@@ -35,9 +35,9 @@ const CircuitBreaker = @import("../util/circuit_breaker.zig").CircuitBreaker;
 /// ```
 pub const MockTransport = struct {
     allocator: std.mem.Allocator,
-    responses: std.ArrayListUnmanaged(MockResponse),
-    stream_responses: std.ArrayListUnmanaged(MockStreamResponse),
-    requests: std.ArrayListUnmanaged(RecordedRequest),
+    responses: std.ArrayList(MockResponse),
+    stream_responses: std.ArrayList(MockStreamResponse),
+    requests: std.ArrayList(RecordedRequest),
 
     pub const vtable: Transport.VTable = .{
         .send_fn = vtableSend,
@@ -143,9 +143,9 @@ pub const MockTransport = struct {
 
     /// Enqueue a canned response by serializing a value to JSON.
     pub fn respondWithJson(self: *MockTransport, status: http.Status, value: anytype) void {
-        const body = std.json.stringifyAlloc(self.allocator, value, .{
+        const body = std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(value, .{
             .emit_null_optional_fields = false,
-        }) catch @panic("OOM in MockTransport.respondWithJson");
+        })}) catch @panic("OOM in MockTransport.respondWithJson");
         self.responses.append(self.allocator, .{
             .status = status,
             .body = body,

@@ -128,7 +128,7 @@ pub fn Informer(comptime T: type) type {
         allocator: std.mem.Allocator,
         store: StoreT,
         reflector: ReflectorT,
-        handlers: std.ArrayListUnmanaged(HandlerT),
+        handlers: std.ArrayList(HandlerT),
         parent_ctx: Context,
         cancel: CancelSource,
         sync_failed: std.atomic.Value(bool),
@@ -137,7 +137,7 @@ pub fn Informer(comptime T: type) type {
         logger: Logger,
 
         /// Staging buffer for initial list pages (atomic swap pattern).
-        staging: std.ArrayListUnmanaged(StoreT.ReplaceItem),
+        staging: std.ArrayList(StoreT.ReplaceItem),
 
         pub const Options = struct {
             label_selector: ?[]const u8 = null,

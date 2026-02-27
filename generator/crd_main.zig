@@ -14,7 +14,7 @@ pub fn main() !void {
 
     // Parse --types-import option and collect positional args.
     var types_import: []const u8 = "types.zig";
-    var positional = std.ArrayListUnmanaged([]const u8){};
+    var positional = std.ArrayList([]const u8){};
 
     var i: usize = 1; // skip program name
     while (i < args.len) : (i += 1) {

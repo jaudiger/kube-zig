@@ -86,7 +86,7 @@ pub fn extractCrdMeta(crd: std.json.Value) ?[]const CrdMeta {
 /// Context passed through recursive struct generation to collect nested structs.
 const GenContext = struct {
     allocator: std.mem.Allocator,
-    nested: std.ArrayListUnmanaged(NestedStruct),
+    nested: std.ArrayList(NestedStruct),
     seen_names: std.StringArrayHashMap(void),
 
     const NestedStruct = struct {

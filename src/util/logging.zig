@@ -485,7 +485,7 @@ test "Field helpers: construct correct values" {
 
 // Test logger that captures output
 const TestLogger = struct {
-    buf: std.ArrayListUnmanaged(u8),
+    buf: std.ArrayList(u8),
     allocator: std.mem.Allocator,
     min_level: Level,
 

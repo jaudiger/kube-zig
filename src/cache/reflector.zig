@@ -576,7 +576,7 @@ pub fn Reflector(comptime T: type) type {
 
         /// Clone list items into individual arenas via deep copy.
         fn cloneItemsToArenas(self: *Self, items: []const T) ![]store_mod.Store(T).ReplaceItem {
-            var result_list: std.ArrayListUnmanaged(store_mod.Store(T).ReplaceItem) = .empty;
+            var result_list: std.ArrayList(store_mod.Store(T).ReplaceItem) = .empty;
             errdefer {
                 for (result_list.items) |item| {
                     item.arena.deinit();

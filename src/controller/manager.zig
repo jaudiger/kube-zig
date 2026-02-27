@@ -112,7 +112,7 @@ pub const Runnable = struct {
 /// thread calls `stop()`.
 pub const ControllerManager = struct {
     allocator: std.mem.Allocator,
-    controllers: std.ArrayListUnmanaged(Runnable),
+    controllers: std.ArrayList(Runnable),
     state: State,
     mutex: std.Thread.Mutex,
     stop_cond: std.Thread.Condition,

@@ -417,7 +417,7 @@ pub fn Api(comptime T: type) type {
             errdefer arena.deinit();
             const arena_alloc = arena.allocator();
 
-            var collected: std.ArrayListUnmanaged(T) = .empty;
+            var collected: std.ArrayList(T) = .empty;
             var resource_version: ?[]const u8 = null;
             var is_first_page = true;
 

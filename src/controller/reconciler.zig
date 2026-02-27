@@ -94,7 +94,7 @@ pub const Reconciler = struct {
     reconcile_fn: ReconcileFn,
     base_context: Context,
     reconcile_timeout_ns: ?u64,
-    workers: std.ArrayListUnmanaged(std.Thread),
+    workers: std.ArrayList(std.Thread),
     max_concurrent_reconciles: u32,
     started: bool,
     metrics: ReconcilerMetrics,

@@ -82,7 +82,7 @@ pub fn extractConflictInfo(
     // Kubernetes SSA conflict messages in JSON contain escaped quotes like:
     //   "conflict with \\\"kubectl-client-side-apply\\\" using apps/v1"
     // In the raw JSON body, the \" appears as \\" in the string literal.
-    var managers_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    var managers_list: std.ArrayList([]const u8) = .empty;
 
     // In the raw JSON body, quoted manager names appear between escaped quotes: \"mgr\"
     // which in the body bytes looks like: \", mgr, \"

@@ -23,7 +23,7 @@ pub fn validateName(name: []const u8) !void {
 // Buffer-based query parameter builders
 /// Append watch query parameters to a growing buffer.
 /// Always append at least "?watch=true".
-pub fn appendWatchQueryTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, opts: WatchOptions) !void {
+pub fn appendWatchQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: WatchOptions) !void {
     try buf.appendSlice(alloc, "?watch=true");
     if (opts.allow_bookmarks) {
         try buf.appendSlice(alloc, "&allowWatchBookmarks=true");
@@ -48,7 +48,7 @@ pub fn appendWatchQueryTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Alloc
 
 /// Append list query parameters to a growing buffer.
 /// Append nothing if no options are set.
-pub fn appendListQueryTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, opts: ListOptions) !void {
+pub fn appendListQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: ListOptions) !void {
     const has_params = opts.label_selector != null or
         opts.field_selector != null or
         opts.resource_version != null or
@@ -111,7 +111,7 @@ pub fn appendListQueryTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Alloca
 
 /// Append dryRun and fieldManager query parameters to a growing buffer.
 /// Append nothing if neither `dry_run` is true nor `field_manager` is set.
-pub fn appendDryRunFieldManagerTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, dry_run: bool, field_manager: ?[]const u8) !void {
+pub fn appendDryRunFieldManagerTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, dry_run: bool, field_manager: ?[]const u8) !void {
     if (!dry_run and field_manager == null) return;
     try buf.append(alloc, '?');
     if (dry_run) {
@@ -126,7 +126,7 @@ pub fn appendDryRunFieldManagerTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.m
 
 /// Append patch-specific query parameters to a growing buffer.
 /// Append nothing if no options require query parameters.
-pub fn appendPatchQueryTo(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, opts: PatchOptions) !void {
+pub fn appendPatchQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: PatchOptions) !void {
     const has_fm = opts.field_manager != null;
     const has_force = opts.force;
     if (!has_fm and !has_force) return;
@@ -150,7 +150,7 @@ pub fn appendPatchQueryParams(alloc: std.mem.Allocator, base: []const u8, opts: 
     if (!opts.force and opts.field_manager == null) return base;
     defer alloc.free(base);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(alloc);
     try buf.appendSlice(alloc, base);
     try appendPatchQueryTo(&buf, alloc, opts);
@@ -206,9 +206,9 @@ pub fn serializeDeleteOpts(alloc: std.mem.Allocator, opts: DeleteOptions) !?[]co
     return try out.toOwnedSlice();
 }
 
-/// Percent-encode a query parameter value into an `ArrayListUnmanaged`.
+/// Percent-encode a query parameter value into an `ArrayList`.
 /// Used by buffer-based query builders and by `logPath` in `path.zig`.
-pub fn percentEncodeQueryValue(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, raw: []const u8) !void {
+pub fn percentEncodeQueryValue(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, raw: []const u8) !void {
     for (raw) |c| {
         if (isQueryValueChar(c)) {
             try buf.append(alloc, c);
@@ -283,7 +283,7 @@ test "validateName: valid name with underscores and tildes succeeds" {
 // appendWatchQueryTo tests
 test "appendWatchQueryTo: defaults produce watch=true with bookmarks" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -295,7 +295,7 @@ test "appendWatchQueryTo: defaults produce watch=true with bookmarks" {
 
 test "appendWatchQueryTo: bookmarks disabled" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -307,7 +307,7 @@ test "appendWatchQueryTo: bookmarks disabled" {
 
 test "appendWatchQueryTo: all options" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -328,7 +328,7 @@ test "appendWatchQueryTo: all options" {
 
 test "appendWatchQueryTo: appends to existing buffer content" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try buf.appendSlice(testing.allocator, "/api/v1/pods");
 
@@ -342,7 +342,7 @@ test "appendWatchQueryTo: appends to existing buffer content" {
 // appendListQueryTo tests
 test "appendListQueryTo: no options appends nothing" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
     try buf.appendSlice(testing.allocator, "/api/v1/pods");
 
@@ -355,7 +355,7 @@ test "appendListQueryTo: no options appends nothing" {
 
 test "appendListQueryTo: label selector" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -367,7 +367,7 @@ test "appendListQueryTo: label selector" {
 
 test "appendListQueryTo: all options" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -391,7 +391,7 @@ test "appendListQueryTo: all options" {
 // appendDryRunFieldManagerTo tests
 test "appendDryRunFieldManagerTo: neither option appends nothing" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -403,7 +403,7 @@ test "appendDryRunFieldManagerTo: neither option appends nothing" {
 
 test "appendDryRunFieldManagerTo: dry_run only" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -415,7 +415,7 @@ test "appendDryRunFieldManagerTo: dry_run only" {
 
 test "appendDryRunFieldManagerTo: field_manager only" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -427,7 +427,7 @@ test "appendDryRunFieldManagerTo: field_manager only" {
 
 test "appendDryRunFieldManagerTo: both" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -440,7 +440,7 @@ test "appendDryRunFieldManagerTo: both" {
 // appendPatchQueryTo tests
 test "appendPatchQueryTo: no options appends nothing" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -452,7 +452,7 @@ test "appendPatchQueryTo: no options appends nothing" {
 
 test "appendPatchQueryTo: fieldManager only" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -464,7 +464,7 @@ test "appendPatchQueryTo: fieldManager only" {
 
 test "appendPatchQueryTo: force only" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -476,7 +476,7 @@ test "appendPatchQueryTo: force only" {
 
 test "appendPatchQueryTo: both fieldManager and force" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -488,7 +488,7 @@ test "appendPatchQueryTo: both fieldManager and force" {
 
 test "appendPatchQueryTo: fieldManager with special characters" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -526,7 +526,7 @@ test "appendPatchQueryParams: with options frees base and returns new" {
 // percentEncodeQueryValue tests
 test "percentEncodeQueryValue: unreserved characters pass through" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act
@@ -538,7 +538,7 @@ test "percentEncodeQueryValue: unreserved characters pass through" {
 
 test "percentEncodeQueryValue: reserved characters are encoded" {
     // Arrange
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
 
     // Act

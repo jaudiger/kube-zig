@@ -32,8 +32,8 @@ pub const ProbeServer = struct {
     server: std.net.Server,
     thread: ?std.Thread,
     stop_flag: std.atomic.Value(bool),
-    liveness_checks: std.ArrayListUnmanaged(HealthCheck),
-    readiness_checks: std.ArrayListUnmanaged(HealthCheck),
+    liveness_checks: std.ArrayList(HealthCheck),
+    readiness_checks: std.ArrayList(HealthCheck),
     read_timeout_ms: u32,
     closed: bool,
 

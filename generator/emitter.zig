@@ -50,7 +50,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
     }
 
     // 1. Group all definitions by group-version key.
-    var groups = std.StringArrayHashMap(std.ArrayListUnmanaged(DefEntry)).init(allocator);
+    var groups = std.StringArrayHashMap(std.ArrayList(DefEntry)).init(allocator);
     defer {
         for (groups.values()) |*list| {
             list.deinit(allocator);

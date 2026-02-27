@@ -39,7 +39,7 @@ pub const PathBuilder = struct {
     }
 
     /// Append the API group+version prefix: `/api/{version}` or `/apis/{group}/{version}`.
-    fn appendGroupVersionPrefix(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, group: []const u8, version: []const u8) !void {
+    fn appendGroupVersionPrefix(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, group: []const u8, version: []const u8) !void {
         if (group.len == 0) {
             try buf.appendSlice(alloc, "/api/");
         } else {
@@ -53,7 +53,7 @@ pub const PathBuilder = struct {
     // Buffer-based path helpers
     /// Append the collection path segments (group/version prefix + optional
     /// namespace + resource) to `buf`.
-    fn appendCollectionTo(self: PathBuilder, buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator) !void {
+    fn appendCollectionTo(self: PathBuilder, buf: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
         try appendGroupVersionPrefix(buf, alloc, self.group, self.version);
         if (self.namespaced) {
             const ns = try self.resolveNamespace();
@@ -65,7 +65,7 @@ pub const PathBuilder = struct {
     }
 
     /// Append the collection path plus `/{name}` to `buf`. Validates `name`.
-    fn appendResourceTo(self: PathBuilder, buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, name: []const u8) !void {
+    fn appendResourceTo(self: PathBuilder, buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name: []const u8) !void {
         try query.validateName(name);
         try self.appendCollectionTo(buf, alloc);
         try buf.append(alloc, '/');
@@ -74,14 +74,14 @@ pub const PathBuilder = struct {
 
     /// Append the cross-namespace base path (group/version prefix + resource,
     /// no namespace segment) to `buf`.
-    fn appendListAllBaseTo(self: PathBuilder, buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator) !void {
+    fn appendListAllBaseTo(self: PathBuilder, buf: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
         try appendGroupVersionPrefix(buf, alloc, self.group, self.version);
         try buf.append(alloc, '/');
         try buf.appendSlice(alloc, self.resource);
     }
 
     /// Append the resource path plus `/{subresource}` to `buf`.
-    fn appendSubresourceTo(self: PathBuilder, buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, name: []const u8, subresource: []const u8) !void {
+    fn appendSubresourceTo(self: PathBuilder, buf: *std.ArrayList(u8), alloc: std.mem.Allocator, name: []const u8, subresource: []const u8) !void {
         try self.appendResourceTo(buf, alloc, name);
         try buf.append(alloc, '/');
         try buf.appendSlice(alloc, subresource);
@@ -95,7 +95,7 @@ pub const PathBuilder = struct {
     /// slice and must free it with the same allocator.
     pub fn collectionPath(self: PathBuilder) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendCollectionTo(&buf, alloc);
         return buf.toOwnedSlice(alloc);
@@ -108,7 +108,7 @@ pub const PathBuilder = struct {
     /// The caller owns the returned slice.
     pub fn resourcePath(self: PathBuilder, name: []const u8) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendResourceTo(&buf, alloc, name);
         return buf.toOwnedSlice(alloc);
@@ -120,7 +120,7 @@ pub const PathBuilder = struct {
     /// The caller owns the returned slice.
     pub fn subresourcePath(self: PathBuilder, name: []const u8, subresource: []const u8) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendSubresourceTo(&buf, alloc, name, subresource);
         return buf.toOwnedSlice(alloc);
@@ -133,7 +133,7 @@ pub const PathBuilder = struct {
     /// The caller owns the returned slice.
     pub fn listAllBasePath(self: PathBuilder) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendListAllBaseTo(&buf, alloc);
         return buf.toOwnedSlice(alloc);
@@ -145,7 +145,7 @@ pub const PathBuilder = struct {
     /// timeout as query parameters. The caller owns the returned slice.
     pub fn listPath(self: PathBuilder, opts: ListOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendCollectionTo(&buf, alloc);
         try query.appendListQueryTo(&buf, alloc, opts);
@@ -158,7 +158,7 @@ pub const PathBuilder = struct {
     /// across all namespaces. The caller owns the returned slice.
     pub fn listAllPath(self: PathBuilder, opts: ListOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendListAllBaseTo(&buf, alloc);
         try query.appendListQueryTo(&buf, alloc, opts);
@@ -171,7 +171,7 @@ pub const PathBuilder = struct {
     /// query parameters. The caller owns the returned slice.
     pub fn watchPath(self: PathBuilder, opts: WatchOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendCollectionTo(&buf, alloc);
         try query.appendWatchQueryTo(&buf, alloc, opts);
@@ -184,7 +184,7 @@ pub const PathBuilder = struct {
     /// across all namespaces. The caller owns the returned slice.
     pub fn watchAllPath(self: PathBuilder, opts: WatchOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendListAllBaseTo(&buf, alloc);
         try query.appendWatchQueryTo(&buf, alloc, opts);
@@ -197,7 +197,7 @@ pub const PathBuilder = struct {
     /// query parameters. The caller owns the returned slice.
     pub fn createPath(self: PathBuilder, opts: WriteOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendCollectionTo(&buf, alloc);
         try query.appendDryRunFieldManagerTo(&buf, alloc, opts.dry_run, opts.field_manager);
@@ -210,7 +210,7 @@ pub const PathBuilder = struct {
     /// query parameters. The caller owns the returned slice.
     pub fn updatePath(self: PathBuilder, name: []const u8, opts: WriteOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendResourceTo(&buf, alloc, name);
         try query.appendDryRunFieldManagerTo(&buf, alloc, opts.dry_run, opts.field_manager);
@@ -223,7 +223,7 @@ pub const PathBuilder = struct {
     /// query parameters. The caller owns the returned slice.
     pub fn patchPath(self: PathBuilder, name: []const u8, opts: PatchOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendResourceTo(&buf, alloc, name);
         try query.appendPatchQueryTo(&buf, alloc, opts);
@@ -236,7 +236,7 @@ pub const PathBuilder = struct {
     /// query parameters. The caller owns the returned slice.
     pub fn subresourcePatchPath(self: PathBuilder, name: []const u8, subresource: []const u8, opts: PatchOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendSubresourceTo(&buf, alloc, name, subresource);
         try query.appendPatchQueryTo(&buf, alloc, opts);
@@ -250,7 +250,7 @@ pub const PathBuilder = struct {
     /// The caller owns the returned slice.
     pub fn logPath(self: PathBuilder, name: []const u8, opts: LogOptions) ![]const u8 {
         const alloc = self.allocator;
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendSubresourceTo(&buf, alloc, name, "log");
 

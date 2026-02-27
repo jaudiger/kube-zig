@@ -59,7 +59,7 @@ pub fn getFieldManagers(
 ) error{OutOfMemory}!?[]const []const u8 {
     const entries = getManagedFields(T, obj) orelse return null;
 
-    var managers: std.ArrayListUnmanaged([]const u8) = .empty;
+    var managers: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (managers.items) |m| allocator.free(m);
         managers.deinit(allocator);

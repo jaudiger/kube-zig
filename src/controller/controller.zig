@@ -78,8 +78,8 @@ pub fn Controller(comptime T: type) type {
         informer_thread: ?std.Thread,
         informer_error: std.atomic.Value(u16),
         secondary_informer_error: std.atomic.Value(u16),
-        secondary_informers: std.ArrayListUnmanaged(SecondaryInformer),
-        secondary_threads: std.ArrayListUnmanaged(std.Thread),
+        secondary_informers: std.ArrayList(SecondaryInformer),
+        secondary_threads: std.ArrayList(std.Thread),
         logger: Logger = Logger.noop,
 
         pub const Options = struct {
