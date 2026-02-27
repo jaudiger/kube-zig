@@ -6,21 +6,36 @@ The project generates Zig types from the Kubernetes OpenAPI spec and uses them t
 
 ## Getting Started
 
+### Download the Kubernetes OpenAPI spec
+
+The spec file (`spec/swagger.json`) is not committed to the repository. Download it with:
+
+```sh
+zig build fetch-spec
+```
+
+By default this downloads the spec for the version pinned in `build.zig`. To fetch a different version:
+
+```sh
+zig build fetch-spec -Dk8s-version=v1.30.0
+zig build fetch-spec -Dk8s-version=latest    # resolves the latest release via the GitHub API
+```
+
 ### Generate types from the OpenAPI spec
 
 ```sh
 zig build generate
 ```
 
-This reads `spec/swagger.json` and emits `generated/types.zig` containing typed struct definitions for 20 core Kubernetes types (Pod, Deployment, Service, etc.).
+This downloads `spec/swagger.json` (if not already present) and emits `generated/types.zig` containing typed struct definitions for core Kubernetes types (Pod, Deployment, Service, etc.). The `-Dk8s-version` option is also supported here.
 
-### Build the code
+### Build
 
 ```sh
 zig build
 ```
 
-### Testing the code
+### Test
 
 ```sh
 zig build test
@@ -30,6 +45,14 @@ This runs three test suites:
 - Unit tests for generator helpers (name extraction, keyword detection, quoting logic)
 - Compile-time type validation tests (type existence, shape, nested references)
 - JSON round-trip tests with fixture files (parsing real Kubernetes resource JSON)
+
+To generate test coverage with [kcov](https://github.com/SimonKagworths/kcov):
+
+```sh
+zig build test -Dcoverage=true
+```
+
+Results are written to `kcov-output/`.
 
 ### Run the examples
 

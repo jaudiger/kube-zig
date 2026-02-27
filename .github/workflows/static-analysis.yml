@@ -1,0 +1,36 @@
+name: Continuous Integration - Static Analysis
+
+on:
+  push:
+    paths:
+      - ".github/workflows/static-analysis.yml"
+      - "**/*.zig"
+      - "build.zig.zon"
+  pull_request:
+    paths:
+      - ".github/workflows/static-analysis.yml"
+      - "**/*.zig"
+      - "build.zig.zon"
+  workflow_dispatch:
+
+concurrency:
+  group: static-analysis-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Check formatting
+        run: zig fmt --check .
+
+      - name: Build
+        run: zig build

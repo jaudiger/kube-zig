@@ -1,0 +1,13 @@
+{
+  "apiVersion": "v1",
+  "kind": "Status",
+  "metadata": {},
+  "status": "Failure",
+  "message": "pods \"nonexistent\" not found",
+  "reason": "NotFound",
+  "details": {
+    "name": "nonexistent",
+    "kind": "pods"
+  },
+  "code": 404
+}

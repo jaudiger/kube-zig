@@ -1,0 +1,12 @@
+{
+  "apiVersion": "v1",
+  "kind": "Status",
+  "metadata": {},
+  "status": "Failure",
+  "message": "pods is forbidden: User \"system:anonymous\" cannot list resource \"pods\" in API group \"\" in the namespace \"default\"",
+  "reason": "Forbidden",
+  "details": {
+    "kind": "pods"
+  },
+  "code": 403
+}
