@@ -40,7 +40,7 @@ const StringKeySortCtx = struct {
 
 /// Main entry point: generate per-group-version files and a root re-export file.
 pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definitions: std.json.ObjectMap, paths: ?std.json.ObjectMap) !void {
-    // 0. Extract resource metadata from paths (if available).
+    // Extract resource metadata from paths (if available).
     var resource_metas = std.StringArrayHashMap(GeneratorResourceMeta).init(allocator);
     defer resource_metas.deinit();
 
@@ -49,7 +49,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
         std.debug.print("Extracted {d} resource metadata entries from paths.\n", .{resource_metas.count()});
     }
 
-    // 1. Group all definitions by group-version key.
+    // Group all definitions by group-version key.
     var groups = std.StringArrayHashMap(std.ArrayList(DefEntry)).init(allocator);
     defer {
         for (groups.values()) |*list| {
@@ -77,7 +77,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
         try gop.value_ptr.append(allocator, .{ .fqn = fqn, .schema = schema });
     }
 
-    // 2. Sort group keys and definitions within each group for deterministic output.
+    // Sort group keys and definitions within each group for deterministic output.
     groups.sort(StringKeySortCtx{ .keys = groups.keys() });
     for (groups.values()) |*entries| {
         std.sort.pdq(DefEntry, entries.items, {}, struct {
@@ -91,7 +91,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
     var dir = try std.fs.cwd().openDir(output_dir, .{});
     defer dir.close();
 
-    // 3. Generate each per-group file.
+    // Generate each per-group file.
     const group_keys = groups.keys();
     const group_values = groups.values();
     for (group_keys, group_values) |group_key, entries| {
@@ -151,7 +151,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
         try writer.flush();
     }
 
-    // 4. Generate root types.zig re-export file.
+    // Generate root types.zig re-export file.
     {
         const file = try dir.createFile("types.zig", .{});
         defer file.close();
@@ -456,11 +456,7 @@ fn writeStruct(writer: *Writer, fqn: []const u8, schema: std.json.Value, definit
             try writer.print("        .version = \"{s}\",\n", .{meta.version});
             try writer.print("        .kind = \"{s}\",\n", .{meta.kind});
             try writer.print("        .resource = \"{s}\",\n", .{meta.resource});
-            if (meta.namespaced) {
-                try writer.writeAll("        .namespaced = true,\n");
-            } else {
-                try writer.writeAll("        .namespaced = false,\n");
-            }
+            try writer.print("        .namespaced = {},\n", .{meta.namespaced});
             // Write list_kind as a type reference (same-file, bare name).
             try writer.writeAll("        .list_kind = ");
             try openapi.writeStructName(writer, meta.list_fqn);

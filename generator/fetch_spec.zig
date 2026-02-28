@@ -42,7 +42,9 @@ pub fn main() !void {
         std.process.fatal("Failed to download spec from {s}: {}\n", .{ url, err });
     };
 
-    // Ensure the parent directory exists.
+    // Ensure the parent directory exists. Ignore errors because the
+    // directory may already exist; the subsequent writeFile will surface
+    // a clear error if the path is truly inaccessible.
     if (std.fs.path.dirname(output_path)) |dir| {
         std.fs.cwd().makePath(dir) catch {};
     }
@@ -67,9 +69,12 @@ fn resolveLatestVersion(allocator: std.mem.Allocator) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
 
-    const tag = parsed.value.object.get("tag_name") orelse {
-        return error.NoTagName;
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.InvalidTagName,
     };
+
+    const tag = obj.get("tag_name") orelse return error.NoTagName;
 
     const tag_str = switch (tag) {
         .string => |s| s,
@@ -112,6 +117,7 @@ fn fetch(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
         .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
         .compress => return error.UnsupportedCompressionMethod,
     };
+    defer if (decompress_buf.len > 0) allocator.free(decompress_buf);
 
     var transfer_buf: [8192]u8 = undefined;
     var decompress: std.http.Decompress = undefined;

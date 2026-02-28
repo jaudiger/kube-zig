@@ -49,8 +49,7 @@ pub fn getNameSegments(fqn: []const u8) NameSegments {
 /// Write a string with its first byte uppercased.
 pub fn writeCapitalized(writer: *Writer, s: []const u8) !void {
     if (s.len == 0) return;
-    var upper: [1]u8 = .{std.ascii.toUpper(s[0])};
-    try writer.writeAll(&upper);
+    try writer.writeByte(std.ascii.toUpper(s[0]));
     if (s.len > 1) {
         try writer.writeAll(s[1..]);
     }

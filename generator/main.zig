@@ -51,7 +51,9 @@ pub fn main() !void {
 
     std.debug.print("Found {d} definitions. Generating types...\n", .{definitions.count()});
 
-    // Ensure output directory exists.
+    // Ensure output directory exists. Ignore errors because the directory
+    // may already exist; the subsequent file creation will surface a clear
+    // error if the path is truly inaccessible.
     std.fs.cwd().makePath(output_dir) catch {};
 
     // Run the emitter to generate per-group files + root types.zig.

@@ -13,21 +13,11 @@ pub fn writeFieldName(writer: *Writer, name: []const u8) !void {
 
 pub fn writeDocComment(writer: *Writer, desc: []const u8) !void {
     // Write first line only as a doc comment.
-    const first_line = blk: {
-        if (std.mem.indexOfScalar(u8, desc, '\n')) |idx| {
-            break :blk desc[0..idx];
-        }
-        break :blk desc;
-    };
+    const first_line = if (std.mem.indexOfScalar(u8, desc, '\n')) |idx| desc[0..idx] else desc;
     try writer.print("/// {s}\n", .{first_line});
 }
 
 pub fn writeFieldDocComment(writer: *Writer, desc: []const u8) !void {
-    const first_line = blk: {
-        if (std.mem.indexOfScalar(u8, desc, '\n')) |idx| {
-            break :blk desc[0..idx];
-        }
-        break :blk desc;
-    };
+    const first_line = if (std.mem.indexOfScalar(u8, desc, '\n')) |idx| desc[0..idx] else desc;
     try writer.print("    /// {s}\n", .{first_line});
 }

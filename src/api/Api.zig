@@ -215,13 +215,7 @@ pub fn Api(comptime T: type) type {
         /// Kubernetes API version string for this resource, computed at comptime.
         /// Core group (group == ""): "v1".
         /// Named group: "apps/v1", "batch/v1", etc.
-        const api_version = blk: {
-            if (meta.group.len == 0) {
-                break :blk meta.version;
-            } else {
-                break :blk meta.group ++ "/" ++ meta.version;
-            }
-        };
+        const api_version = if (meta.group.len == 0) meta.version else meta.group ++ "/" ++ meta.version;
 
         /// Apply (SSA) a resource using a typed Zig struct.
         ///
