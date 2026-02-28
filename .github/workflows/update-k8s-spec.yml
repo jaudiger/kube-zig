@@ -1,0 +1,101 @@
+name: Update Kubernetes Spec
+
+on:
+  schedule:
+    - cron: '0 9 * * 0'  # every Sunday at 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-k8s-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Get current K8s version from build.zig
+        id: current
+        run: |
+          VERSION=$(sed -n 's/.*default_k8s_version = "\([^"]*\)".*/\1/p' build.zig)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Current version: $VERSION"
+
+      - name: Get latest K8s release
+        id: latest
+        run: |
+          VERSION=$(gh release view --repo kubernetes/kubernetes --json tagName --jq '.tagName')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Latest version: $VERSION"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if update is needed
+        id: check
+        run: |
+          if [ "${{ steps.current.outputs.version }}" = "${{ steps.latest.outputs.version }}" ]; then
+            echo "Already up to date (${{ steps.current.outputs.version }})"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Update available: ${{ steps.current.outputs.version }} -> ${{ steps.latest.outputs.version }}"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check if PR already exists
+        if: steps.check.outputs.needed == 'true'
+        id: existing_pr
+        run: |
+          BRANCH="update-k8s-spec-${{ steps.latest.outputs.version }}"
+          PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -n "$PR" ]; then
+            echo "PR #$PR already exists for $BRANCH"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Zig
+        if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.15.2
+
+      - name: Update version in build.zig
+        if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
+        run: |
+          sed -i 's/default_k8s_version = "${{ steps.current.outputs.version }}"/default_k8s_version = "${{ steps.latest.outputs.version }}"/' build.zig
+
+      - name: Fetch spec and generate types
+        if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
+        run: zig build generate
+
+      - name: Check formatting
+        if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
+        run: zig fmt .
+
+      - name: Create pull request
+        if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
+        run: |
+          BRANCH="update-k8s-spec-${{ steps.latest.outputs.version }}"
+          git checkout -b "$BRANCH"
+          git add build.zig spec/swagger.json 'generated/*.zig'
+          git commit -m "chore: update Kubernetes spec to ${{ steps.latest.outputs.version }}"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "chore: update Kubernetes spec to ${{ steps.latest.outputs.version }}" \
+            --body "$(cat <<'EOF'
+          ## Summary
+
+          - Update `default_k8s_version` in `build.zig` from `${{ steps.current.outputs.version }}` to `${{ steps.latest.outputs.version }}`
+          - Fetch the new OpenAPI spec (`spec/swagger.json`)
+          - Regenerate all Zig type definitions in `generated/`
+
+          This PR was created automatically by the **Update Kubernetes Spec** workflow.
+          EOF
+          )"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
