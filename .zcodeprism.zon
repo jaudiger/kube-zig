@@ -1,0 +1,15 @@
+.{
+    // Paths to exclude from indexation.
+    .exclude_paths = .{ "zig-cache", "zig-out", ".git" },
+
+    // Storage configuration.
+    .storage = .{
+        .path = ".zcodeprism/",
+        .format = .binary,
+    },
+
+    // Memory budget.
+    .memory = .{
+        .budget_mb = 512,
+    },
+}
