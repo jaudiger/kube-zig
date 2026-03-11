@@ -245,77 +245,14 @@ pub const PathBuilder = struct {
 
     /// Build the path for a pod log request (`/log` subresource).
     ///
-    /// Appends optional query parameters: `container`, `follow`, `tailLines`,
-    /// `sinceSeconds`, `timestamps`, `previous`, and `limitBytes`.
-    /// The caller owns the returned slice.
+    /// Appends log-specific query parameters when set. The caller owns the
+    /// returned slice.
     pub fn logPath(self: PathBuilder, name: []const u8, opts: LogOptions) ![]const u8 {
         const alloc = self.allocator;
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendSubresourceTo(&buf, alloc, name, "log");
-
-        const has_params = opts.container != null or
-            opts.follow != null or
-            opts.tail_lines != null or
-            opts.since_seconds != null or
-            opts.timestamps != null or
-            opts.previous != null or
-            opts.limit_bytes != null;
-
-        if (!has_params) return buf.toOwnedSlice(alloc);
-
-        try buf.append(alloc, '?');
-
-        var need_amp = false;
-
-        if (opts.container) |c| {
-            try buf.appendSlice(alloc, "container=");
-            try query.percentEncodeQueryValue(&buf, alloc, c);
-            need_amp = true;
-        }
-
-        if (opts.follow) |f| {
-            if (need_amp) try buf.append(alloc, '&');
-            try buf.appendSlice(alloc, "follow=");
-            try buf.appendSlice(alloc, if (f) "true" else "false");
-            need_amp = true;
-        }
-
-        if (opts.tail_lines) |n| {
-            if (need_amp) try buf.append(alloc, '&');
-            try buf.appendSlice(alloc, "tailLines=");
-            try std.fmt.format(buf.writer(alloc), "{d}", .{n});
-            need_amp = true;
-        }
-
-        if (opts.since_seconds) |n| {
-            if (need_amp) try buf.append(alloc, '&');
-            try buf.appendSlice(alloc, "sinceSeconds=");
-            try std.fmt.format(buf.writer(alloc), "{d}", .{n});
-            need_amp = true;
-        }
-
-        if (opts.timestamps) |t| {
-            if (need_amp) try buf.append(alloc, '&');
-            try buf.appendSlice(alloc, "timestamps=");
-            try buf.appendSlice(alloc, if (t) "true" else "false");
-            need_amp = true;
-        }
-
-        if (opts.previous) |p| {
-            if (need_amp) try buf.append(alloc, '&');
-            try buf.appendSlice(alloc, "previous=");
-            try buf.appendSlice(alloc, if (p) "true" else "false");
-            need_amp = true;
-        }
-
-        if (opts.limit_bytes) |n| {
-            if (need_amp) try buf.append(alloc, '&');
-            try buf.appendSlice(alloc, "limitBytes=");
-            try std.fmt.format(buf.writer(alloc), "{d}", .{n});
-            need_amp = true;
-        }
-
+        try query.appendLogQueryTo(&buf, alloc, opts);
         return buf.toOwnedSlice(alloc);
     }
 };

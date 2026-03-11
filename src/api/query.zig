@@ -10,6 +10,7 @@ const ListOptions = options.ListOptions;
 const WatchOptions = options.WatchOptions;
 const PatchOptions = options.PatchOptions;
 const DeleteOptions = options.DeleteOptions;
+const LogOptions = options.LogOptions;
 const testing = std.testing;
 
 /// Validate that a resource name is non-empty and contains no slashes.
@@ -142,6 +143,69 @@ pub fn appendPatchQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opt
     }
 }
 
+/// Append log query parameters to a growing buffer.
+/// Append nothing if no options are set.
+pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: LogOptions) !void {
+    const has_params = opts.container != null or
+        opts.follow != null or
+        opts.tail_lines != null or
+        opts.since_seconds != null or
+        opts.timestamps != null or
+        opts.previous != null or
+        opts.limit_bytes != null;
+    if (!has_params) return;
+
+    try buf.append(alloc, '?');
+    var need_amp = false;
+
+    if (opts.container) |c| {
+        try buf.appendSlice(alloc, "container=");
+        try percentEncodeQueryValue(buf, alloc, c);
+        need_amp = true;
+    }
+
+    if (opts.follow) |f| {
+        if (need_amp) try buf.append(alloc, '&');
+        try buf.appendSlice(alloc, "follow=");
+        try buf.appendSlice(alloc, if (f) "true" else "false");
+        need_amp = true;
+    }
+
+    if (opts.tail_lines) |n| {
+        if (need_amp) try buf.append(alloc, '&');
+        try buf.appendSlice(alloc, "tailLines=");
+        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+        need_amp = true;
+    }
+
+    if (opts.since_seconds) |n| {
+        if (need_amp) try buf.append(alloc, '&');
+        try buf.appendSlice(alloc, "sinceSeconds=");
+        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+        need_amp = true;
+    }
+
+    if (opts.timestamps) |t| {
+        if (need_amp) try buf.append(alloc, '&');
+        try buf.appendSlice(alloc, "timestamps=");
+        try buf.appendSlice(alloc, if (t) "true" else "false");
+        need_amp = true;
+    }
+
+    if (opts.previous) |p| {
+        if (need_amp) try buf.append(alloc, '&');
+        try buf.appendSlice(alloc, "previous=");
+        try buf.appendSlice(alloc, if (p) "true" else "false");
+        need_amp = true;
+    }
+
+    if (opts.limit_bytes) |n| {
+        if (need_amp) try buf.append(alloc, '&');
+        try buf.appendSlice(alloc, "limitBytes=");
+        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+    }
+}
+
 // Allocating wrapper
 /// Append patch-specific query parameters to a base path.
 /// Take ownership of `base` only when params are appended (free it);
@@ -207,7 +271,6 @@ pub fn serializeDeleteOpts(alloc: std.mem.Allocator, opts: DeleteOptions) !?[]co
 }
 
 /// Percent-encode a query parameter value into an `ArrayList`.
-/// Used by buffer-based query builders and by `logPath` in `path.zig`.
 pub fn percentEncodeQueryValue(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, raw: []const u8) !void {
     for (raw) |c| {
         if (isQueryValueChar(c)) {
