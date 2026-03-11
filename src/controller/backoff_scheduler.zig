@@ -6,6 +6,7 @@ const store_mod = @import("../cache/store.zig");
 const ObjectKey = store_mod.ObjectKey;
 const ObjectKeyContext = store_mod.ObjectKeyContext;
 const RetryPolicy = @import("../util/retry.zig").RetryPolicy;
+const time_util = @import("../util/time.zig");
 const rate_limit_mod = @import("../util/rate_limit.zig");
 const RateLimiter = rate_limit_mod.RateLimiter;
 const testing = std.testing;
@@ -161,7 +162,7 @@ pub const BackoffScheduler = struct {
         const backoff_ns = self.retry_policy.backoffWithJitterNs(attempt);
         const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve() else 0;
         const delay_ns = @max(backoff_ns, bucket_delay_ns);
-        const now = self.monotonicNowNs() catch {
+        const now = time_util.monotonicNowNs(self.epoch) catch {
             if (is_new_entry) {
                 freeKey(self.allocator, gop.key_ptr.*);
                 self.failures.removeByPtr(gop.key_ptr);
@@ -212,7 +213,7 @@ pub const BackoffScheduler = struct {
         if (self.heap.count() >= self.max_size) return error.Overflow;
 
         const owned_key = cloneKey(self.allocator, key) catch return error.OutOfMemory;
-        const now = self.monotonicNowNs() catch {
+        const now = time_util.monotonicNowNs(self.epoch) catch {
             freeKey(self.allocator, owned_key);
             return error.ClockUnavailable;
         };
@@ -264,7 +265,7 @@ pub const BackoffScheduler = struct {
         const backoff_ns = self.retry_policy.backoffWithJitterNs(attempt);
         const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve() else 0;
         const delay_ns = @max(backoff_ns, bucket_delay_ns);
-        const now = self.monotonicNowNs() catch {
+        const now = time_util.monotonicNowNs(self.epoch) catch {
             if (is_new_entry) {
                 freeKey(self.allocator, gop.key_ptr.*);
                 self.failures.removeByPtr(gop.key_ptr);
@@ -308,7 +309,7 @@ pub const BackoffScheduler = struct {
 
         if (self.heap.count() >= self.max_size) return .full;
 
-        const now = self.monotonicNowNs() catch return .clock_unavailable;
+        const now = time_util.monotonicNowNs(self.epoch) catch return .clock_unavailable;
         const not_before = now +| delay_ns;
 
         self.waiting_keys.put(self.allocator, key, {}) catch return .oom;
@@ -386,7 +387,7 @@ pub const BackoffScheduler = struct {
     /// Re-insert an item into the waiting heap with a short retry delay.
     /// Used by WorkQueue.promoteExpiredWaiting on clone OOM.
     pub fn reinsertWithDelay(self: *BackoffScheduler, item: WaitingItem, delay_ns: u64) void {
-        const now = self.monotonicNowNs() catch {
+        const now = time_util.monotonicNowNs(self.epoch) catch {
             self.logger.warn("reinsertWithDelay: clock unavailable, item dropped", &.{});
             if (self.failures.fetchRemove(item.key)) |fkv| {
                 freeKey(self.allocator, fkv.key);
@@ -427,12 +428,6 @@ pub const BackoffScheduler = struct {
     /// Number of items in the waiting heap.
     pub fn count(self: *const BackoffScheduler) usize {
         return self.heap.count();
-    }
-
-    // Internal helpers
-    /// Return the current monotonic time in nanoseconds relative to `epoch`.
-    fn monotonicNowNs(self: *const BackoffScheduler) error{ClockUnavailable}!u64 {
-        return (std.time.Instant.now() catch return error.ClockUnavailable).since(self.epoch);
     }
 
     // Key memory helpers (pub for use by work_queue.zig)
@@ -612,7 +607,7 @@ test "BackoffScheduler: overall limiter max semantics with backoff" {
     // The item should be in the heap but not yet expired.
     try testing.expectEqual(@as(usize, 1), s.count());
     var buf: [1]BackoffScheduler.WaitingItem = undefined;
-    const now = try s.monotonicNowNs();
+    const now = try time_util.monotonicNowNs(s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 0), expired.len);
 }
@@ -633,7 +628,7 @@ test "BackoffScheduler: drainExpired returns expired items in order" {
 
     // Assert
     var buf: [10]BackoffScheduler.WaitingItem = undefined;
-    const now = try s.monotonicNowNs();
+    const now = try time_util.monotonicNowNs(s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 3), expired.len);
     try testing.expectEqualStrings("a", expired[0].key.name);
@@ -660,7 +655,7 @@ test "BackoffScheduler: drainExpired respects batch limit" {
 
     // Assert
     var buf: [2]BackoffScheduler.WaitingItem = undefined;
-    const now = try s.monotonicNowNs();
+    const now = try time_util.monotonicNowNs(s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 2), expired.len);
 
@@ -734,7 +729,7 @@ test "BackoffScheduler: cleanupOrphan removes entry when not in waiting" {
     // Drain the item from waiting so it's no longer in waiting_keys.
     std.Thread.sleep(10 * std.time.ns_per_ms);
     var buf: [1]BackoffScheduler.WaitingItem = undefined;
-    const now = try s.monotonicNowNs();
+    const now = try time_util.monotonicNowNs(s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 1), expired.len);
 

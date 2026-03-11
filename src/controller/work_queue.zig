@@ -16,6 +16,7 @@ const ObjectKeyContext = store_mod.ObjectKeyContext;
 const informer_mod = @import("../cache/informer.zig");
 const EventHandler = informer_mod.EventHandler;
 const RetryPolicy = @import("../util/retry.zig").RetryPolicy;
+const time_util = @import("../util/time.zig");
 const RingQueue = @import("../util/ring_queue.zig").RingQueue;
 const QueueMetrics = @import("../util/metrics.zig").QueueMetrics;
 const rate_limit_mod = @import("../util/rate_limit.zig");
@@ -287,7 +288,7 @@ pub const WorkQueue = struct {
 
             // If there are waiting items, sleep until the earliest one expires.
             if (self.scheduler.heap.peek()) |earliest| {
-                const now = self.monotonicNowNs() catch {
+                const now = time_util.monotonicNowNs(self.epoch) catch {
                     // Clock unavailable: use a short polling interval instead.
                     self.cond.timedWait(&self.mutex, 10 * std.time.ns_per_ms) catch {};
                     continue;
@@ -654,11 +655,6 @@ pub const WorkQueue = struct {
         });
     }
 
-    // Internal helpers
-    fn monotonicNowNs(self: *const WorkQueue) error{ClockUnavailable}!u64 {
-        return (std.time.Instant.now() catch return error.ClockUnavailable).since(self.epoch);
-    }
-
     fn addLocked(self: *WorkQueue, key: ObjectKey, defer_to_waiting: bool, ma: *MetricsAction) Error!void {
         if (self.shut_down.raw) return;
 
@@ -711,7 +707,7 @@ pub const WorkQueue = struct {
     /// reduces lock churn at the cost of slightly longer lock hold times.
     fn promoteExpiredWaiting(self: *WorkQueue) void {
         const batch_limit: usize = 256;
-        const now = self.monotonicNowNs() catch {
+        const now = time_util.monotonicNowNs(self.epoch) catch {
             self.logger.warn("promoteExpiredWaiting: clock unavailable, skipping promotion cycle", &.{});
             return;
         };

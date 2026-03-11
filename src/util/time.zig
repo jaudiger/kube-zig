@@ -22,6 +22,11 @@
 const std = @import("std");
 const testing = std.testing;
 
+/// Return nanoseconds elapsed since `epoch` on the monotonic clock.
+pub fn monotonicNowNs(epoch: std.time.Instant) error{ClockUnavailable}!u64 {
+    return (std.time.Instant.now() catch return error.ClockUnavailable).since(epoch);
+}
+
 /// Timestamp precision for RFC 3339 formatting.
 pub const Precision = enum {
     /// `YYYY-MM-DDThh:mm:ssZ` (20 bytes).
