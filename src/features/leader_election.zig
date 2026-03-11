@@ -326,7 +326,7 @@ pub const LeaderElector = struct {
                 // Someone else holds it. Check if expired.
                 const lease_duration_s = if (lease.spec) |s| (s.leaseDurationSeconds orelse self.config.lease_duration_s) else self.config.lease_duration_s;
 
-                if (holder != null and holder.?.len > 0) {
+                if (holder) |h| if (h.len > 0) {
                     // Check expiry based on our observed renewal time.
                     if (self.observed_renew_time) |obs| {
                         const now = std.time.Instant.now() catch return .lost;
@@ -341,7 +341,7 @@ pub const LeaderElector = struct {
                         self.observed_renew_time = std.time.Instant.now() catch null;
                         return .lost;
                     }
-                }
+                };
 
                 // Expired or no holder; take over.
                 return self.updateLeaseTakeover(lease.spec, rv, now_str);

@@ -411,19 +411,19 @@ pub fn Reflector(comptime T: type) type {
                         return null; // internal-only step
                     },
                     .api_error => |api_err| {
-                        if (api_err.code != null and api_err.code.? == 410) {
+                        if (api_err.code) |c| if (c == 410) {
                             event.deinit();
                             self.closeWatch();
                             self.transitionTo(.gone);
                             return .gone;
-                        }
+                        };
                         const code = api_err.code;
-                        if (code != null and (code.? == 401 or code.? == 403)) {
+                        if (code) |c| if (c == 401 or c == 403) {
                             self.logger.err("watch stream auth error", &.{
                                 LogField.string("resource", meta.resource),
-                                LogField.uint("status_code", @intCast(code.?)),
+                                LogField.uint("status_code", @intCast(c)),
                             });
-                        }
+                        };
                         const watch_err: anyerror = if (code) |c| switch (c) {
                             401 => error.HttpUnauthorized,
                             403 => error.HttpForbidden,
