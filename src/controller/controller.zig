@@ -779,3 +779,169 @@ test "Controller: init returns OutOfMemory without leaking" {
     // (WorkQueue create + addEventHandler append).
     try testing.expect(fail_index >= 2);
 }
+
+test "Controller: watchSecondary registers secondaries and blocks hasSynced until synced" {
+    // Arrange
+    const reconcile_fn = ReconcileFn.fromFn(struct {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!reconciler_mod.Result {
+            return .{};
+        }
+    }.reconcile);
+    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
+    var ctrl = try Controller(TestResource).init(testing.allocator, dummy_client, Context.background(), "default", .{
+        .reconcile_fn = reconcile_fn,
+    });
+    defer {
+        ctrl.cancel();
+        ctrl.deinit();
+    }
+
+    // Act
+    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+        .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
+    });
+    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+        .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
+    });
+
+    // Simulate the primary store having completed its initial list sync.
+    const sync = try ctrl.informer.store.replace(&.{});
+    sync.release();
+
+    // Assert: both secondaries registered; hasSynced is false because neither has started.
+    try testing.expectEqual(@as(usize, 2), ctrl.secondary_informers.items.len);
+    try testing.expect(ctrl.informer.hasSynced());
+    try testing.expect(!ctrl.hasSynced());
+}
+
+test "Controller: watchSecondary returns OutOfMemory without leaking" {
+    // Arrange
+    const reconcile_fn = ReconcileFn.fromFn(struct {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!reconciler_mod.Result {
+            return .{};
+        }
+    }.reconcile);
+    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
+
+    // Act / Assert: every OOM path in watchSecondary leaves no leak.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.heap.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const alloc = failing.allocator();
+
+        var ctrl = Controller(TestResource).init(alloc, dummy_client, Context.background(), "default", .{
+            .reconcile_fn = reconcile_fn,
+        }) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        const ws_result = ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+            .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
+        });
+        ctrl.cancel();
+        ctrl.deinit();
+        if (ws_result) |_| break;
+        try testing.expectError(error.OutOfMemory, ws_result);
+    }
+    // At minimum: WorkQueue create, addEventHandler append, MappingCtx
+    // create, Informer(S) create, and secondary_informers append.
+    try testing.expect(fail_index >= 4);
+}
+
+test "Controller: secondary handler enqueues primary key on all event types" {
+    // Arrange
+    const reconcile_fn = ReconcileFn.fromFn(struct {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!reconciler_mod.Result {
+            return .{};
+        }
+    }.reconcile);
+    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
+    var ctrl = try Controller(TestResource).init(testing.allocator, dummy_client, Context.background(), "default", .{
+        .reconcile_fn = reconcile_fn,
+    });
+    defer {
+        ctrl.cancel();
+        ctrl.deinit();
+    }
+    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+        .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "my-deploy"),
+    });
+
+    // Add the primary resource to the store so the handler finds it.
+    const arena = try testing.allocator.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(testing.allocator);
+    const old_entry = try ctrl.informer.store.put(
+        .{ .namespace = "default", .name = "my-deploy" },
+        TestResource{ .metadata = .{ .name = "my-deploy", .namespace = "default" } },
+        arena,
+    );
+    if (old_entry) |e| e.release();
+
+    const InformerS = informer_mod.Informer(TestSecondary);
+    const sec_inf: *InformerS = @ptrCast(@alignCast(ctrl.secondary_informers.items[0].ptr));
+    const handler = sec_inf.handlers.items[0];
+    const sec_obj = TestSecondary{};
+
+    // Act / Assert: on_add enqueues the mapped primary key.
+    handler.onAdd(&sec_obj, false);
+    {
+        const key = (try ctrl.queue.get()).?;
+        try testing.expectEqualStrings("default", key.namespace);
+        try testing.expectEqualStrings("my-deploy", key.name);
+        ctrl.queue.done(key, .success);
+    }
+
+    // Act / Assert: on_update enqueues the mapped primary key.
+    handler.onUpdate(&sec_obj, &sec_obj);
+    {
+        const key = (try ctrl.queue.get()).?;
+        try testing.expectEqualStrings("my-deploy", key.name);
+        ctrl.queue.done(key, .success);
+    }
+
+    // Act / Assert: on_delete enqueues the mapped primary key.
+    handler.onDelete(&sec_obj);
+    {
+        const key = (try ctrl.queue.get()).?;
+        try testing.expectEqualStrings("my-deploy", key.name);
+        ctrl.queue.done(key, .success);
+    }
+}
+
+test "Controller: secondary handler skips enqueue when conditions are not met" {
+    // Arrange
+    const reconcile_fn = ReconcileFn.fromFn(struct {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!reconciler_mod.Result {
+            return .{};
+        }
+    }.reconcile);
+    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
+    var ctrl = try Controller(TestResource).init(testing.allocator, dummy_client, Context.background(), "default", .{
+        .reconcile_fn = reconcile_fn,
+    });
+    defer {
+        ctrl.cancel();
+        ctrl.deinit();
+    }
+    // First secondary: map_fn returns a key but the primary is not in the store.
+    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+        .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "my-deploy"),
+    });
+    // Second secondary: map_fn returns null for objects without a matching ownerRef.
+    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+        .map_fn = mapper_mod.enqueueOwner(TestSecondary, "Deployment"),
+    });
+
+    const InformerS = informer_mod.Informer(TestSecondary);
+    const h0 = (@as(*InformerS, @ptrCast(@alignCast(ctrl.secondary_informers.items[0].ptr)))).handlers.items[0];
+    const h1 = (@as(*InformerS, @ptrCast(@alignCast(ctrl.secondary_informers.items[1].ptr)))).handlers.items[0];
+    const sec_obj = TestSecondary{};
+
+    // Act
+    h0.onAdd(&sec_obj, false);
+    h1.onAdd(&sec_obj, false);
+
+    // Assert: neither condition allows an enqueue.
+    ctrl.queue.shutdown();
+    try testing.expect(try ctrl.queue.get() == null);
+}
