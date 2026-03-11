@@ -1121,14 +1121,7 @@ pub const Client = struct {
                 if (attempt < self.retry_policy.max_retries and isRetryableTransport(err)) {
                     self.metrics.retry_total.inc();
                     const sleep_ns = self.retry_policy.sleepNs(attempt, null);
-                    self.logger.warn("retrying request", &.{
-                        LogField.string("method", @tagName(req_ctx.method)),
-                        LogField.string("path", path),
-                        LogField.uint("attempt", @intCast(attempt + 1)),
-                        LogField.uint("max_retries", @intCast(self.retry_policy.max_retries)),
-                        LogField.uint("backoff_ms", sleep_ns / std.time.ns_per_ms),
-                        LogField.string("error", @errorName(err)),
-                    });
+                    self.logRetry(req_ctx, path, attempt, sleep_ns, .{ .transport = err });
                     context_mod.interruptibleSleep(ctx, sleep_ns) catch return error.Canceled;
                     attempt += 1;
                     continue;
@@ -1169,14 +1162,7 @@ pub const Client = struct {
                     if (attempt < self.retry_policy.max_retries and RetryPolicy.isRetryableStatus(e.status)) {
                         self.metrics.retry_total.inc();
                         const sleep_ns = self.retry_policy.sleepNs(attempt, e.retry_after_ns);
-                        self.logger.warn("retrying request", &.{
-                            LogField.string("method", @tagName(req_ctx.method)),
-                            LogField.string("path", path),
-                            LogField.uint("attempt", @intCast(attempt + 1)),
-                            LogField.uint("max_retries", @intCast(self.retry_policy.max_retries)),
-                            LogField.uint("backoff_ms", sleep_ns / std.time.ns_per_ms),
-                            LogField.uint("status_code", @intFromEnum(e.status)),
-                        });
+                        self.logRetry(req_ctx, path, attempt, sleep_ns, .{ .api_status = e.status });
                         self.allocator.free(e.body);
                         context_mod.interruptibleSleep(ctx, sleep_ns) catch return error.Canceled;
                         attempt += 1;
@@ -1190,6 +1176,32 @@ pub const Client = struct {
                     return raw;
                 },
             }
+        }
+    }
+
+    const RetryReason = union(enum) {
+        transport: anyerror,
+        api_status: http.Status,
+    };
+
+    fn logRetry(self: *Client, req_ctx: anytype, path: []const u8, attempt: u32, sleep_ns: u64, reason: RetryReason) void {
+        switch (reason) {
+            .transport => |err| self.logger.warn("retrying request", &.{
+                LogField.string("method", @tagName(req_ctx.method)),
+                LogField.string("path", path),
+                LogField.uint("attempt", @intCast(attempt + 1)),
+                LogField.uint("max_retries", @intCast(self.retry_policy.max_retries)),
+                LogField.uint("backoff_ms", sleep_ns / std.time.ns_per_ms),
+                LogField.string("error", @errorName(err)),
+            }),
+            .api_status => |code| self.logger.warn("retrying request", &.{
+                LogField.string("method", @tagName(req_ctx.method)),
+                LogField.string("path", path),
+                LogField.uint("attempt", @intCast(attempt + 1)),
+                LogField.uint("max_retries", @intCast(self.retry_policy.max_retries)),
+                LogField.uint("backoff_ms", sleep_ns / std.time.ns_per_ms),
+                LogField.uint("status_code", @intFromEnum(code)),
+            }),
         }
     }
 
