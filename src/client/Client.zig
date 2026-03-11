@@ -1104,7 +1104,6 @@ pub const Client = struct {
         defer owned.deinit(self.allocator);
 
         var attempt: u32 = 0;
-        var pending_retry_after_ns: ?u64 = null;
         while (true) {
             self.metrics.request_total.inc();
             const request_start = std.time.Instant.now() catch null;
@@ -1121,7 +1120,7 @@ pub const Client = struct {
 
                 if (attempt < self.retry_policy.max_retries and isRetryableTransport(err)) {
                     self.metrics.retry_total.inc();
-                    const sleep_ns = self.retry_policy.sleepNs(attempt, pending_retry_after_ns);
+                    const sleep_ns = self.retry_policy.sleepNs(attempt, null);
                     self.logger.warn("retrying request", &.{
                         LogField.string("method", @tagName(req_ctx.method)),
                         LogField.string("path", path),
@@ -1169,7 +1168,6 @@ pub const Client = struct {
 
                     if (attempt < self.retry_policy.max_retries and RetryPolicy.isRetryableStatus(e.status)) {
                         self.metrics.retry_total.inc();
-                        pending_retry_after_ns = e.retry_after_ns;
                         const sleep_ns = self.retry_policy.sleepNs(attempt, e.retry_after_ns);
                         self.logger.warn("retrying request", &.{
                             LogField.string("method", @tagName(req_ctx.method)),

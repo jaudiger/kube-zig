@@ -1164,3 +1164,26 @@ test "Client.poolStats: returns stats from mock transport" {
     try testing.expectEqual(@as(u32, 0), stats.?.free_connections);
     try testing.expectEqual(@as(u32, 0), stats.?.active_connections);
 }
+
+test "retry loop: transport error after 429 with Retry-After hint" {
+    // Arrange
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+
+    mock.respondWithRetryAfterNs(.too_many_requests, "{}", 1);
+    mock.respondWithTransportError();
+    mock.respondWith(.ok, "{}");
+
+    var c = mock.client();
+    c.retry_policy = .{ .max_retries = 2, .initial_backoff_ns = 0, .max_backoff_ns = 0, .backoff_multiplier = 1, .jitter = false };
+    defer c.deinit();
+    const ctx = c.context();
+
+    // Act
+    const result = try c.getRaw("/api/v1/nodes", ctx);
+    defer result.deinit();
+
+    // Assert
+    try testing.expect(result == .ok);
+    try testing.expectEqual(@as(usize, 3), mock.requestCount());
+}

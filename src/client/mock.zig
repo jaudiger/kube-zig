@@ -50,6 +50,8 @@ pub const MockTransport = struct {
     pub const MockResponse = struct {
         status: http.Status,
         body: []const u8,
+        retry_after_ns: ?u64 = null,
+        fail: bool = false,
         flow_schema_uid: ?[]const u8 = null,
         priority_level_uid: ?[]const u8 = null,
     };
@@ -139,6 +141,24 @@ pub const MockTransport = struct {
             .status = status,
             .body = body,
         }) catch @panic("OOM in MockTransport.respondWith");
+    }
+
+    /// Enqueue a canned response with a Retry-After hint in nanoseconds.
+    pub fn respondWithRetryAfterNs(self: *MockTransport, status: http.Status, body: []const u8, retry_after_ns: u64) void {
+        self.responses.append(self.allocator, .{
+            .status = status,
+            .body = body,
+            .retry_after_ns = retry_after_ns,
+        }) catch @panic("OOM in MockTransport.respondWithRetryAfterNs");
+    }
+
+    /// Enqueue a slot that returns a transport error instead of an HTTP response.
+    pub fn respondWithTransportError(self: *MockTransport) void {
+        self.responses.append(self.allocator, .{
+            .status = .internal_server_error,
+            .body = "",
+            .fail = true,
+        }) catch @panic("OOM in MockTransport.respondWithTransportError");
     }
 
     /// Enqueue a canned response by serializing a value to JSON.
@@ -265,6 +285,8 @@ pub const MockTransport = struct {
         }
         const resp = self.responses.orderedRemove(0);
 
+        if (resp.fail) return error.HttpRequestFailed;
+
         // Return a copy of the body owned by the caller's allocator,
         // matching real transport behavior.
         const body_copy = try allocator.dupe(u8, resp.body);
@@ -296,6 +318,7 @@ pub const MockTransport = struct {
         return .{
             .status = resp.status,
             .body = body_copy,
+            .retry_after_ns = resp.retry_after_ns,
             .flow_control = .{
                 .flow_schema_uid = fs_uid,
                 .priority_level_uid = pl_uid,
