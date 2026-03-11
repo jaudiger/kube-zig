@@ -250,13 +250,13 @@ pub const WorkQueue = struct {
     }
 
     fn getLocked(self: *WorkQueue, ma: *MetricsAction) Error!?ObjectKey {
-        const max_oom_retries: u32 = 10;
-        var oom_retries: u32 = 0;
-
         while (true) {
             if (self.shut_down.raw) return null;
 
             if (self.queue.count > 0) {
+                // Ensure processing has capacity before popping. If this fails,
+                // the key stays in the queue and OOM propagates without data loss.
+                try self.processing.ensureUnusedCapacity(self.allocator, 1);
                 const key = self.queuePop();
                 const removed = self.dirty.fetchRemove(key);
                 if (removed) |kv| {
@@ -267,32 +267,7 @@ pub const WorkQueue = struct {
                         self.freeKey(kv.key);
                     }
                 }
-                self.processing.put(self.allocator, key, {}) catch {
-                    // OOM: can't track in processing. Re-add to dirty and
-                    // queue. queuePush won't allocate (ring buffer just had
-                    // a pop). dirty.put may allocate (tombstone accumulation);
-                    // OOM is handled below.
-                    self.dirty.put(self.allocator, key, {}) catch {
-                        self.freeKey(key);
-                        return error.OutOfMemory;
-                    };
-                    self.queuePush(key) catch {
-                        _ = self.dirty.remove(key);
-                        self.freeKey(key);
-                        return error.OutOfMemory;
-                    };
-                    oom_retries += 1;
-                    if (oom_retries >= max_oom_retries) {
-                        self.logger.warn("get: persistent OOM, item re-queued", &.{
-                            LogField.uint("retries", max_oom_retries),
-                        });
-                        return error.OutOfMemory;
-                    }
-                    // Release mutex briefly to avoid tight spin under
-                    // sustained OOM and give other threads a chance.
-                    self.cond.timedWait(&self.mutex, 10 * std.time.ns_per_ms) catch {};
-                    continue;
-                };
+                self.processing.putAssumeCapacity(key, {});
                 // Measure queue latency (time from add to get).
                 if (self.enqueue_times.fetchRemove(key)) |kv| {
                     if (std.time.Instant.now() catch null) |now| {
@@ -1264,7 +1239,7 @@ test "WorkQueue: done() OOM on re-queue does not leak" {
     q.done(k, .success);
 }
 
-test "WorkQueue: get() OOM on processing.put retries until shutdown" {
+test "WorkQueue: get() OOM on processing.ensureCapacity preserves key" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
     var q = WorkQueue.init(fa.allocator(), .{});
@@ -1273,31 +1248,23 @@ test "WorkQueue: get() OOM on processing.put retries until shutdown" {
         q.deinit();
     }
 
-    // Act
     try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
 
-    // Assert
-    // Make the next allocation fail.
+    // Act
     fa.fail_index = fa.alloc_index;
     fa.resize_fail_index = fa.resize_index;
 
-    // another thread to break the retry loop.
-    const shutdowner = struct {
-        fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            wq.shutdown();
-        }
-    };
-    const thread = try std.Thread.spawn(.{}, shutdowner.run, .{&q});
-    // get() may return error.OutOfMemory (retry limit reached) or null (shutdown).
-    // Both are acceptable outcomes under sustained OOM.
-    const result = q.get() catch null;
-    try testing.expect(result == null);
-    thread.join();
+    // Assert
+    // OOM is returned immediately; the key must still be in the queue.
+    try testing.expectError(error.OutOfMemory, q.get());
 
-    // Restore allocator for clean deinit.
     fa.fail_index = std.math.maxInt(usize);
     fa.resize_fail_index = std.math.maxInt(usize);
+
+    // Key survives: the next get() must return it.
+    const key = (try q.get()).?;
+    try testing.expectEqualStrings("pod-1", key.name);
+    q.done(key, .success);
 }
 
 test "WorkQueue: add() OOM on queue push resize does not leak" {
