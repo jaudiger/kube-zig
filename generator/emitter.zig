@@ -751,13 +751,9 @@ test "extractResourceSegment: empty string returns null" {
 
 // ---- getResponseRef tests ----
 
-fn parseJson(allocator: std.mem.Allocator, input: []const u8) !std.json.Parsed(std.json.Value) {
-    return std.json.parseFromSlice(std.json.Value, allocator, input, .{});
-}
-
 test "getResponseRef: extracts ref from 200 response" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"responses":{"200":{"schema":{"$ref":"#/definitions/io.k8s.api.core.v1.Pod"}}}}
     );
     defer parsed.deinit();
@@ -771,7 +767,7 @@ test "getResponseRef: extracts ref from 200 response" {
 
 test "getResponseRef: empty object returns null" {
     // Arrange
-    const parsed = try parseJson(testing.allocator, "{}");
+    const parsed = try json_helpers.parseJson(testing.allocator, "{}");
     defer parsed.deinit();
 
     // Act
@@ -783,7 +779,7 @@ test "getResponseRef: empty object returns null" {
 
 test "getResponseRef: no 200 response returns null" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"responses":{"201":{}}}
     );
     defer parsed.deinit();
@@ -797,7 +793,7 @@ test "getResponseRef: no 200 response returns null" {
 
 test "getResponseRef: 200 without schema returns null" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"responses":{"200":{}}}
     );
     defer parsed.deinit();
@@ -811,7 +807,7 @@ test "getResponseRef: 200 without schema returns null" {
 
 test "getResponseRef: schema without ref returns null" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"responses":{"200":{"schema":{"type":"string"}}}}
     );
     defer parsed.deinit();
@@ -941,7 +937,7 @@ test "writeFieldDocComment: multiline takes first line only" {
 
 test "writeType: string" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"string"}
     );
     defer parsed.deinit();
@@ -957,7 +953,7 @@ test "writeType: string" {
 
 test "writeType: boolean" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"boolean"}
     );
     defer parsed.deinit();
@@ -973,7 +969,7 @@ test "writeType: boolean" {
 
 test "writeType: number" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"number"}
     );
     defer parsed.deinit();
@@ -989,7 +985,7 @@ test "writeType: number" {
 
 test "writeType: integer defaults to i64" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"integer"}
     );
     defer parsed.deinit();
@@ -1005,7 +1001,7 @@ test "writeType: integer defaults to i64" {
 
 test "writeType: integer int32" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"integer","format":"int32"}
     );
     defer parsed.deinit();
@@ -1021,7 +1017,7 @@ test "writeType: integer int32" {
 
 test "writeType: array of strings" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"array","items":{"type":"string"}}
     );
     defer parsed.deinit();
@@ -1037,7 +1033,7 @@ test "writeType: array of strings" {
 
 test "writeType: array without items" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"array"}
     );
     defer parsed.deinit();
@@ -1053,7 +1049,7 @@ test "writeType: array without items" {
 
 test "writeType: object with additionalProperties string" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object","additionalProperties":{"type":"string"}}
     );
     defer parsed.deinit();
@@ -1069,7 +1065,7 @@ test "writeType: object with additionalProperties string" {
 
 test "writeType: bare object" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object"}
     );
     defer parsed.deinit();
@@ -1085,7 +1081,7 @@ test "writeType: bare object" {
 
 test "writeType: empty schema" {
     // Arrange
-    const parsed = try parseJson(testing.allocator, "{}");
+    const parsed = try json_helpers.parseJson(testing.allocator, "{}");
     defer parsed.deinit();
     var buf: [256]u8 = undefined;
     var writer = Writer.fixed(&buf);
@@ -1099,11 +1095,11 @@ test "writeType: empty schema" {
 
 test "writeType: ref to existing definition in same group" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"$ref":"#/definitions/io.k8s.api.core.v1.PodSpec"}
     );
     defer parsed.deinit();
-    const def_schema = try parseJson(testing.allocator,
+    const def_schema = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object"}
     );
     defer def_schema.deinit();
@@ -1122,7 +1118,7 @@ test "writeType: ref to existing definition in same group" {
 
 test "writeType: ref to missing definition falls back to json.Value" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"$ref":"#/definitions/io.unknown.Foo"}
     );
     defer parsed.deinit();
@@ -1138,11 +1134,11 @@ test "writeType: ref to missing definition falls back to json.Value" {
 
 test "writeType: ref to existing definition in different group qualifies with module" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"$ref":"#/definitions/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"}
     );
     defer parsed.deinit();
-    const def_schema = try parseJson(testing.allocator,
+    const def_schema = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object"}
     );
     defer def_schema.deinit();
@@ -1161,7 +1157,7 @@ test "writeType: ref to existing definition in different group qualifies with mo
 
 test "writeType: integer with non-int32 format defaults to i64" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"integer","format":"int64"}
     );
     defer parsed.deinit();
@@ -1177,11 +1173,11 @@ test "writeType: integer with non-int32 format defaults to i64" {
 
 test "writeType: object with additionalProperties containing ref" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object","additionalProperties":{"$ref":"#/definitions/io.k8s.api.core.v1.Container"}}
     );
     defer parsed.deinit();
-    const def_schema = try parseJson(testing.allocator,
+    const def_schema = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object"}
     );
     defer def_schema.deinit();
@@ -1200,11 +1196,11 @@ test "writeType: object with additionalProperties containing ref" {
 
 test "writeType: array of refs" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"array","items":{"$ref":"#/definitions/io.k8s.api.core.v1.Container"}}
     );
     defer parsed.deinit();
-    const def_schema = try parseJson(testing.allocator,
+    const def_schema = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object"}
     );
     defer def_schema.deinit();

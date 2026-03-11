@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// Parse a JSON slice into a std.json.Value tree.
+pub fn parseJson(allocator: std.mem.Allocator, input: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+}
+
 /// Safe accessor: returns the object map if val is a JSON object, null otherwise.
 pub fn asObject(val: std.json.Value) ?std.json.ObjectMap {
     return switch (val) {

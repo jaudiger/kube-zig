@@ -9,6 +9,7 @@ const std = @import("std");
 const json = std.json;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const json_helpers = @import("json_helpers.zig");
 
 /// Deep-clone a value of type T, allocating all referenced memory
 /// (slices, strings, nested containers) into the provided allocator.
@@ -73,7 +74,7 @@ fn deepCloneImpl(comptime T: type, allocator: Allocator, value: T) Allocator.Err
             // Container types with internal MultiArrayList storage (which uses
             // [*]align pointers) cannot be cloned field-by-field. Detect and
             // clone via their public API instead.
-            if (comptime isJsonArrayHashMap(T)) {
+            if (comptime json_helpers.isJsonArrayHashMap(T)) {
                 return cloneJsonArrayHashMap(T, allocator, value);
             }
             if (comptime isManagedArrayHashMap(T)) {
@@ -84,15 +85,6 @@ fn deepCloneImpl(comptime T: type, allocator: Allocator, value: T) Allocator.Err
 
         else => @compileError("deepClone: unsupported type " ++ @typeName(T)),
     }
-}
-
-/// Detect std.json.ArrayHashMap(V), a thin wrapper around
-/// StringArrayHashMapUnmanaged with jsonParse/jsonStringify support.
-/// These have a single `map` field containing the unmanaged hash map.
-fn isJsonArrayHashMap(comptime T: type) bool {
-    const info = @typeInfo(T);
-    if (info != .@"struct") return false;
-    return @hasField(T, "map") and @hasDecl(T, "jsonStringify");
 }
 
 /// Detect managed std.ArrayHashMap types by their characteristic fields.

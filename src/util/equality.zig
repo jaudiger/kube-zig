@@ -11,6 +11,7 @@ const std = @import("std");
 const json = std.json;
 const resource_shape = @import("resource_shape.zig");
 const testing = std.testing;
+const json_helpers = @import("json_helpers.zig");
 
 /// Comptime-generic deep equality for Kubernetes resource structs.
 ///
@@ -63,7 +64,7 @@ fn deepEqualImpl(comptime T: type, a: T, b: T) bool {
         },
 
         .@"struct" => {
-            if (comptime isJsonArrayHashMap(T)) {
+            if (comptime json_helpers.isJsonArrayHashMap(T)) {
                 return jsonArrayHashMapEqual(T, a, b);
             }
             return structEqual(T, a, b);
@@ -71,13 +72,6 @@ fn deepEqualImpl(comptime T: type, a: T, b: T) bool {
 
         else => @compileError("deepEqual: unsupported type " ++ @typeName(T)),
     }
-}
-
-/// Detect std.json.ArrayHashMap(V).
-fn isJsonArrayHashMap(comptime T: type) bool {
-    const info = @typeInfo(T);
-    if (info != .@"struct") return false;
-    return @hasField(T, "map") and @hasDecl(T, "jsonStringify");
 }
 
 fn structEqual(comptime T: type, a: T, b: T) bool {

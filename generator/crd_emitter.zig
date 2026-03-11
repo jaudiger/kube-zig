@@ -620,10 +620,6 @@ fn schemaUsesIntOrString(val: std.json.Value) bool {
     return false;
 }
 
-fn parseJson(allocator: std.mem.Allocator, input: []const u8) !std.json.Parsed(std.json.Value) {
-    return std.json.parseFromSlice(std.json.Value, allocator, input, .{});
-}
-
 // ---- extractCrdMeta tests ----
 
 test "extractCrdMeta: extracts metadata from valid CRD" {
@@ -653,7 +649,7 @@ test "extractCrdMeta: extracts metadata from valid CRD" {
         \\  }
         \\}
     ;
-    const parsed = try parseJson(testing.allocator, crd_json);
+    const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
     defer parsed.deinit();
 
     // Act / Assert
@@ -679,7 +675,7 @@ test "extractCrdMeta: cluster-scoped CRD sets namespaced to false" {
         \\  }
         \\}
     ;
-    const parsed = try parseJson(testing.allocator, crd_json);
+    const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
     defer parsed.deinit();
 
     // Act / Assert
@@ -703,7 +699,7 @@ test "extractCrdMeta: multiple served versions" {
         \\  }
         \\}
     ;
-    const parsed = try parseJson(testing.allocator, crd_json);
+    const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
     defer parsed.deinit();
 
     // Act / Assert
@@ -715,7 +711,7 @@ test "extractCrdMeta: multiple served versions" {
 
 test "extractCrdMeta: returns null for invalid JSON" {
     // Act / Assert
-    const parsed = try parseJson(testing.allocator, "{}");
+    const parsed = try json_helpers.parseJson(testing.allocator, "{}");
     defer parsed.deinit();
     try testing.expect(extractCrdMeta(parsed.value) == null);
 }
@@ -724,7 +720,7 @@ test "extractCrdMeta: returns null for invalid JSON" {
 
 test "writeSchemaType: string type" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"string"}
     );
     defer parsed.deinit();
@@ -740,7 +736,7 @@ test "writeSchemaType: string type" {
 
 test "writeSchemaType: boolean type" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"boolean"}
     );
     defer parsed.deinit();
@@ -756,7 +752,7 @@ test "writeSchemaType: boolean type" {
 
 test "writeSchemaType: integer defaults to i64" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"integer"}
     );
     defer parsed.deinit();
@@ -772,7 +768,7 @@ test "writeSchemaType: integer defaults to i64" {
 
 test "writeSchemaType: integer int32 format" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"integer","format":"int32"}
     );
     defer parsed.deinit();
@@ -788,7 +784,7 @@ test "writeSchemaType: integer int32 format" {
 
 test "writeSchemaType: integer int64 format" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"integer","format":"int64"}
     );
     defer parsed.deinit();
@@ -804,7 +800,7 @@ test "writeSchemaType: integer int64 format" {
 
 test "writeSchemaType: number defaults to f64" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"number"}
     );
     defer parsed.deinit();
@@ -820,7 +816,7 @@ test "writeSchemaType: number defaults to f64" {
 
 test "writeSchemaType: number float format" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"number","format":"float"}
     );
     defer parsed.deinit();
@@ -836,7 +832,7 @@ test "writeSchemaType: number float format" {
 
 test "writeSchemaType: array of strings" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"array","items":{"type":"string"}}
     );
     defer parsed.deinit();
@@ -852,7 +848,7 @@ test "writeSchemaType: array of strings" {
 
 test "writeSchemaType: array without items" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"array"}
     );
     defer parsed.deinit();
@@ -868,7 +864,7 @@ test "writeSchemaType: array without items" {
 
 test "writeSchemaType: object with additionalProperties string" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object","additionalProperties":{"type":"string"}}
     );
     defer parsed.deinit();
@@ -884,7 +880,7 @@ test "writeSchemaType: object with additionalProperties string" {
 
 test "writeSchemaType: object with properties creates nested struct" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object","properties":{"name":{"type":"string"}}}
     );
     defer parsed.deinit();
@@ -902,7 +898,7 @@ test "writeSchemaType: object with properties creates nested struct" {
 
 test "writeSchemaType: bare object without properties" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object"}
     );
     defer parsed.deinit();
@@ -918,7 +914,7 @@ test "writeSchemaType: bare object without properties" {
 
 test "writeSchemaType: x-kubernetes-preserve-unknown-fields" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"type":"object","x-kubernetes-preserve-unknown-fields":true}
     );
     defer parsed.deinit();
@@ -934,7 +930,7 @@ test "writeSchemaType: x-kubernetes-preserve-unknown-fields" {
 
 test "writeSchemaType: x-kubernetes-int-or-string" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"x-kubernetes-int-or-string":true}
     );
     defer parsed.deinit();
@@ -950,7 +946,7 @@ test "writeSchemaType: x-kubernetes-int-or-string" {
 
 test "writeSchemaType: empty schema falls back to json.Value" {
     // Arrange
-    const parsed = try parseJson(testing.allocator, "{}");
+    const parsed = try json_helpers.parseJson(testing.allocator, "{}");
     defer parsed.deinit();
     var buf: [256]u8 = undefined;
     var writer = Writer.fixed(&buf);
@@ -964,7 +960,7 @@ test "writeSchemaType: empty schema falls back to json.Value" {
 
 test "writeSchemaType: oneOf falls back to json.Value" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"oneOf":[{"type":"string"},{"type":"integer"}]}
     );
     defer parsed.deinit();
@@ -980,7 +976,7 @@ test "writeSchemaType: oneOf falls back to json.Value" {
 
 test "writeSchemaType: anyOf falls back to json.Value" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"anyOf":[{"type":"string"},{"type":"integer"}]}
     );
     defer parsed.deinit();
@@ -996,7 +992,7 @@ test "writeSchemaType: anyOf falls back to json.Value" {
 
 test "writeSchemaType: $ref falls back to json.Value" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"$ref":"#/definitions/something"}
     );
     defer parsed.deinit();
@@ -1012,7 +1008,7 @@ test "writeSchemaType: $ref falls back to json.Value" {
 
 test "writeSchemaType: items without type treated as array" {
     // Arrange
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"items":{"type":"string"}}
     );
     defer parsed.deinit();
@@ -1097,7 +1093,7 @@ test "buildTypeName: multi version with beta" {
 
 test "crdUsesIntOrString: detects x-kubernetes-int-or-string" {
     // Act / Assert
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"spec":{"versions":[{"schema":{"openAPIV3Schema":{"type":"object","properties":{"port":{"x-kubernetes-int-or-string":true}}}}}]}}
     );
     defer parsed.deinit();
@@ -1106,7 +1102,7 @@ test "crdUsesIntOrString: detects x-kubernetes-int-or-string" {
 
 test "crdUsesIntOrString: false when not used" {
     // Act / Assert
-    const parsed = try parseJson(testing.allocator,
+    const parsed = try json_helpers.parseJson(testing.allocator,
         \\{"spec":{"versions":[{"schema":{"openAPIV3Schema":{"type":"object","properties":{"name":{"type":"string"}}}}}]}}
     );
     defer parsed.deinit();
