@@ -46,18 +46,18 @@ pub const FlowControlTracker = struct {
     }
 
     /// Update flow-control state from a transport response.
-    pub fn update(self: *FlowControlTracker, fc: FlowControl) void {
+    pub fn update(self: *FlowControlTracker, fc: FlowControl) error{OutOfMemory}!void {
         self.mu.lock();
         defer self.mu.unlock();
 
         self.clearLocked();
         if (fc.flow_schema_uid) |uid| {
-            const dupe = self.allocator.dupe(u8, uid) catch null;
+            const dupe = try self.allocator.dupe(u8, uid);
             self.schema_buf = dupe;
             self.state.flow_schema_uid = dupe;
         }
         if (fc.priority_level_uid) |uid| {
-            const dupe = self.allocator.dupe(u8, uid) catch null;
+            const dupe = try self.allocator.dupe(u8, uid);
             self.priority_buf = dupe;
             self.state.priority_level_uid = dupe;
         }

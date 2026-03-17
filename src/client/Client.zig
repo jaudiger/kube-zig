@@ -201,6 +201,7 @@ pub const StdHttpTransport = struct {
     tcp_keepalive_interval_s: ?u32 = null,
     tcp_keepalive_count: ?u32 = null,
     max_response_bytes: usize = 128 * 1024 * 1024,
+    logger: Logger = Logger.noop,
     /// The allocator used to heap-allocate this transport (for self-freeing in deinit).
     self_allocator: ?std.mem.Allocator = null,
 
@@ -337,7 +338,9 @@ pub const StdHttpTransport = struct {
                     .sec = @intCast(ms / 1000),
                     .usec = @intCast(@as(u32, ms % 1000) * 1000),
                 };
-                std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+                std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {
+                    self.logger.warn("setsockopt SO_RCVTIMEO (watch) failed", &.{});
+                };
             }
         }
 
@@ -437,8 +440,8 @@ pub const StdHttpTransport = struct {
         0;
 
     /// Configure socket-level options (timeouts, keepalive).
-    /// Errors from `setsockopt` are intentionally ignored: these options
-    /// are best-effort and may not be supported on all platforms.
+    /// These options are best-effort and may not be supported on all
+    /// platforms; failures are logged as warnings rather than propagated.
     fn configureSocket(self: *StdHttpTransport, req: *http.Client.Request) void {
         const conn = req.connection orelse return;
         const fd = conn.stream_writer.getStream().handle;
@@ -448,7 +451,9 @@ pub const StdHttpTransport = struct {
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast(@as(u32, ms % 1000) * 1000),
             };
-            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {
+                self.logger.warn("setsockopt SO_RCVTIMEO failed", &.{});
+            };
         }
 
         if (self.write_timeout_ms) |ms| {
@@ -456,32 +461,42 @@ pub const StdHttpTransport = struct {
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast(@as(u32, ms % 1000) * 1000),
             };
-            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {
+                self.logger.warn("setsockopt SO_SNDTIMEO failed", &.{});
+            };
         }
 
         if (self.tcp_keepalive) {
             const enable = std.mem.toBytes(@as(c_int, 1));
-            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, &enable) catch {};
+            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, &enable) catch {
+                self.logger.warn("setsockopt SO_KEEPALIVE failed", &.{});
+            };
         }
 
         if (self.tcp_keepalive_idle_s) |secs| {
             if (TCP_KEEPIDLE_OPTION != 0) {
                 const val = std.mem.toBytes(@as(c_int, @intCast(secs)));
-                std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPIDLE_OPTION, &val) catch {};
+                std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, TCP_KEEPIDLE_OPTION, &val) catch {
+                    self.logger.warn("setsockopt TCP_KEEPIDLE failed", &.{});
+                };
             }
         }
 
         if (self.tcp_keepalive_interval_s) |secs| {
             if (@hasDecl(std.posix.TCP, "KEEPINTVL")) {
                 const val = std.mem.toBytes(@as(c_int, @intCast(secs)));
-                std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPINTVL, &val) catch {};
+                std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPINTVL, &val) catch {
+                    self.logger.warn("setsockopt TCP_KEEPINTVL failed", &.{});
+                };
             }
         }
 
         if (self.tcp_keepalive_count) |count| {
             if (@hasDecl(std.posix.TCP, "KEEPCNT")) {
                 const val = std.mem.toBytes(@as(c_int, @intCast(count)));
-                std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPCNT, &val) catch {};
+                std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPCNT, &val) catch {
+                    self.logger.warn("setsockopt TCP_KEEPCNT failed", &.{});
+                };
             }
         }
     }
@@ -1043,7 +1058,7 @@ pub const Client = struct {
         };
         defer resp.deinit();
 
-        self.flow_tracker.update(resp.flow_control);
+        try self.flow_tracker.update(resp.flow_control);
 
         if (resp.status.class() != .success) {
             if (resp.status == .unauthorized) self.auth.markUnauthorized();
@@ -1305,6 +1320,7 @@ pub const Client = struct {
             .tcp_keepalive_interval_s = options.tcp_keepalive_interval_s,
             .tcp_keepalive_count = options.tcp_keepalive_count,
             .max_response_bytes = options.max_response_bytes,
+            .logger = options.logger.withScope("transport"),
             .self_allocator = allocator,
         };
 

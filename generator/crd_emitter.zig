@@ -24,8 +24,9 @@ pub const CrdMeta = struct {
     schema: ?std.json.Value,
 };
 
-/// Extract CRD metadata for each served version from a parsed CRD JSON object.
-pub fn extractCrdMeta(crd: std.json.Value) ?[]const CrdMeta {
+/// Extract per-version CRD metadata into the caller-provided buffer.
+/// Returns null when the CRD is malformed or has no served versions.
+pub fn extractCrdMeta(crd: std.json.Value, buf: []CrdMeta) ?[]const CrdMeta {
     const root = asObject(crd) orelse return null;
     const spec = asObject(root.get("spec") orelse return null) orelse return null;
 
@@ -39,27 +40,12 @@ pub fn extractCrdMeta(crd: std.json.Value) ?[]const CrdMeta {
 
     const versions_arr = asArray(spec.get("versions") orelse return null) orelse return null;
 
-    // Count served versions.
-    var count: usize = 0;
-    for (versions_arr.items) |v| {
-        const ver_obj = asObject(v) orelse continue;
-        const served = asBool(ver_obj.get("served") orelse continue) orelse continue;
-        if (served) count += 1;
-    }
-    if (count == 0) return null;
-
-    // We can't allocate here without an allocator, so we return a slice from the array items.
-    // Instead, use a static buffer approach. CRDs rarely have more than a few versions.
-    const Static = struct {
-        var buf: [16]CrdMeta = undefined;
-    };
-
     var i: usize = 0;
     for (versions_arr.items) |v| {
         const ver_obj = asObject(v) orelse continue;
         const served = asBool(ver_obj.get("served") orelse continue) orelse continue;
         if (!served) continue;
-        if (i >= 16) break;
+        if (i >= buf.len) break;
 
         const version = asString(ver_obj.get("name") orelse continue) orelse continue;
 
@@ -69,7 +55,7 @@ pub fn extractCrdMeta(crd: std.json.Value) ?[]const CrdMeta {
             break :blk schema_obj.get("openAPIV3Schema");
         };
 
-        Static.buf[i] = .{
+        buf[i] = .{
             .group = group,
             .version = version,
             .kind = kind,
@@ -80,7 +66,8 @@ pub fn extractCrdMeta(crd: std.json.Value) ?[]const CrdMeta {
         i += 1;
     }
 
-    return Static.buf[0..i];
+    if (i == 0) return null;
+    return buf[0..i];
 }
 
 /// Context passed through recursive struct generation to collect nested structs.
@@ -136,7 +123,8 @@ pub fn generateCrd(
     crd: std.json.Value,
     types_import: []const u8,
 ) !void {
-    const metas = extractCrdMeta(crd) orelse return error.InvalidCrd;
+    var meta_buf: [16]CrdMeta = undefined;
+    const metas = extractCrdMeta(crd, &meta_buf) orelse return error.InvalidCrd;
     const multi_version = metas.len > 1;
 
     // Write CRD source comment.
@@ -653,7 +641,8 @@ test "extractCrdMeta: extracts metadata from valid CRD" {
     defer parsed.deinit();
 
     // Act / Assert
-    const metas = extractCrdMeta(parsed.value).?;
+    var meta_buf: [16]CrdMeta = undefined;
+    const metas = extractCrdMeta(parsed.value, &meta_buf).?;
     try testing.expectEqual(@as(usize, 1), metas.len);
     try testing.expectEqualStrings("stable.example.com", metas[0].group);
     try testing.expectEqualStrings("v1", metas[0].version);
@@ -679,7 +668,8 @@ test "extractCrdMeta: cluster-scoped CRD sets namespaced to false" {
     defer parsed.deinit();
 
     // Act / Assert
-    const metas = extractCrdMeta(parsed.value).?;
+    var meta_buf: [16]CrdMeta = undefined;
+    const metas = extractCrdMeta(parsed.value, &meta_buf).?;
     try testing.expect(!metas[0].namespaced);
 }
 
@@ -703,7 +693,8 @@ test "extractCrdMeta: multiple served versions" {
     defer parsed.deinit();
 
     // Act / Assert
-    const metas = extractCrdMeta(parsed.value).?;
+    var meta_buf: [16]CrdMeta = undefined;
+    const metas = extractCrdMeta(parsed.value, &meta_buf).?;
     try testing.expectEqual(@as(usize, 2), metas.len);
     try testing.expectEqualStrings("v1", metas[0].version);
     try testing.expectEqualStrings("v1beta1", metas[1].version);
@@ -713,7 +704,8 @@ test "extractCrdMeta: returns null for invalid JSON" {
     // Act / Assert
     const parsed = try json_helpers.parseJson(testing.allocator, "{}");
     defer parsed.deinit();
-    try testing.expect(extractCrdMeta(parsed.value) == null);
+    var meta_buf: [16]CrdMeta = undefined;
+    try testing.expect(extractCrdMeta(parsed.value, &meta_buf) == null);
 }
 
 // ---- writeSchemaType tests ----
