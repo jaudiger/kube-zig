@@ -15,7 +15,8 @@ const Client = client_mod.Client;
 const Context = client_mod.Context;
 const informer_mod = @import("../cache/informer.zig");
 const store_mod = @import("../cache/store.zig");
-const ObjectKey = store_mod.ObjectKey;
+const object_key_mod = @import("../object_key.zig");
+const ObjectKey = object_key_mod.ObjectKey;
 const work_queue_mod = @import("work_queue.zig");
 const WorkQueue = work_queue_mod.WorkQueue;
 const reconciler_mod = @import("reconciler.zig");
@@ -604,7 +605,7 @@ test "Controller: Options defaults" {
     // Act
     const opts = Controller(TestResource).Options{
         .reconcile_fn = ReconcileFn.fromFn(struct {
-            fn reconcile(_: store_mod.ObjectKey, _: Context) anyerror!reconciler_mod.Result {
+            fn reconcile(_: ObjectKey, _: Context) anyerror!reconciler_mod.Result {
                 return .{};
             }
         }.reconcile),
@@ -751,7 +752,7 @@ test "Controller: primary and secondary errors are independent" {
 test "Controller: init returns OutOfMemory without leaking" {
     // Arrange
     const reconcile_fn = ReconcileFn.fromFn(struct {
-        fn reconcile(_: store_mod.ObjectKey, _: Context) anyerror!reconciler_mod.Result {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!reconciler_mod.Result {
             return .{};
         }
     }.reconcile);

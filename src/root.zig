@@ -70,7 +70,7 @@ pub const StreamResponse = client_mod.StreamResponse;
 
 const store_mod = @import("cache/store.zig");
 pub const Store = store_mod.Store;
-pub const ObjectKey = store_mod.ObjectKey;
+pub const ObjectKey = @import("object_key.zig").ObjectKey;
 
 const reflector_mod = @import("cache/reflector.zig");
 pub const Reflector = reflector_mod.Reflector;

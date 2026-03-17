@@ -6,8 +6,7 @@
 //! fixed-key routing (`enqueueConst`).
 
 const std = @import("std");
-const store_mod = @import("../cache/store.zig");
-const ObjectKey = store_mod.ObjectKey;
+const ObjectKey = @import("../object_key.zig").ObjectKey;
 const testing = std.testing;
 
 /// A mapper function that converts a secondary resource event into zero or more
