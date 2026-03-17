@@ -63,13 +63,15 @@ const watch_partial_json =
 // Helpers
 // ============================================================================
 
-/// Free an init_page's items (arena + entry wrapper for each, then the slice).
-fn freeInitPage(allocator: std.mem.Allocator, items: []Store(Pod).ReplaceItem) void {
-    for (items) |item| {
+/// Free an init_page's items (arena + entry wrapper for each, then the slice)
+/// and its owned rv_buf.
+fn freeInitPage(allocator: std.mem.Allocator, page: ReflectorEvent(Pod).InitPage) void {
+    for (page.items) |item| {
         item.arena.deinit();
         allocator.destroy(item.arena);
     }
-    allocator.free(items);
+    allocator.free(page.items);
+    if (page.rv_buf) |buf| allocator.free(buf);
 }
 
 // ============================================================================
@@ -99,7 +101,7 @@ test "watch 410 triggers re-list" {
     // Step 1: initial listing returns init_page.
     const ev1 = (try reflector.step()).?;
     try testing.expect(ev1 == .init_page);
-    freeInitPage(testing.allocator, ev1.init_page.items);
+    freeInitPage(testing.allocator, ev1.init_page);
     try testing.expect(reflector.state == .watching);
 
     // Step 2: watching opens stream, reads ERROR 410, returns .gone.
@@ -116,7 +118,7 @@ test "watch 410 triggers re-list" {
     // Step 4: initial listing again, re-list succeeds.
     const ev4 = (try reflector.step()).?;
     try testing.expect(ev4 == .init_page);
-    freeInitPage(testing.allocator, ev4.init_page.items);
+    freeInitPage(testing.allocator, ev4.init_page);
     try testing.expect(reflector.state == .watching);
 }
 
@@ -147,7 +149,7 @@ test "network disconnect reconnects with resourceVersion" {
     // Step 1: list.
     const ev1 = (try reflector.step()).?;
     try testing.expect(ev1 == .init_page);
-    freeInitPage(testing.allocator, ev1.init_page.items);
+    freeInitPage(testing.allocator, ev1.init_page);
 
     // Step 2: watch ADDED event (rv updated to 101).
     const ev2 = (try reflector.step()).?;
@@ -196,7 +198,7 @@ test "bookmark updates resourceVersion" {
 
     // Step 1: list (rv 100).
     const ev1 = (try reflector.step()).?;
-    freeInitPage(testing.allocator, ev1.init_page.items);
+    freeInitPage(testing.allocator, ev1.init_page);
     try testing.expectEqualStrings("100", reflector.resource_version.?);
 
     // Step 2: watch reads BOOKMARK rv=150. Returns null (internal-only step).
@@ -297,6 +299,7 @@ test "empty re-list after 410 clears cache" {
     const replace_result1 = try store.replace(ev1.init_page.items);
     replace_result1.release();
     testing.allocator.free(ev1.init_page.items);
+    if (ev1.init_page.rv_buf) |buf| testing.allocator.free(buf);
     try testing.expectEqual(@as(u32, 2), store.len());
 
     // Step 2: watch returns 410 ERROR.
@@ -315,6 +318,7 @@ test "empty re-list after 410 clears cache" {
     // Use replace to get the items that were deleted.
     const replace_result2 = try store.replace(ev4.init_page.items);
     testing.allocator.free(ev4.init_page.items);
+    if (ev4.init_page.rv_buf) |buf| testing.allocator.free(buf);
 
     // Verify 2 items were removed.
     try testing.expectEqual(@as(usize, 2), replace_result2.entries.len);
@@ -348,7 +352,7 @@ test "partial JSON line treated as disconnect" {
 
     // Step 1: list succeeds.
     const ev1 = (try reflector.step()).?;
-    freeInitPage(testing.allocator, ev1.init_page.items);
+    freeInitPage(testing.allocator, ev1.init_page);
 
     // Step 2: watch opens, reads partial JSON, results in transient error.
     const ev2 = (try reflector.step()).?;
@@ -394,7 +398,7 @@ test "410 on initial list retries without resourceVersion" {
     const ev3 = (try reflector.step()).?;
     try testing.expect(ev3 == .init_page);
     try testing.expect(ev3.init_page.is_last);
-    freeInitPage(testing.allocator, ev3.init_page.items);
+    freeInitPage(testing.allocator, ev3.init_page);
     try testing.expect(reflector.state == .watching);
 
     // Verify: the re-list request (2nd request, index 1) used rv="" (empty)

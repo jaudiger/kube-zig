@@ -50,17 +50,24 @@ pub const FlowControlTracker = struct {
         self.mu.lock();
         defer self.mu.unlock();
 
+        // Pre-allocate both strings before clearing old state, so a
+        // partial OOM leaves the tracker unchanged rather than half-updated.
+        const new_schema = if (fc.flow_schema_uid) |uid|
+            try self.allocator.dupe(u8, uid)
+        else
+            null;
+        errdefer if (new_schema) |s| self.allocator.free(s);
+
+        const new_priority = if (fc.priority_level_uid) |uid|
+            try self.allocator.dupe(u8, uid)
+        else
+            null;
+
         self.clearLocked();
-        if (fc.flow_schema_uid) |uid| {
-            const dupe = try self.allocator.dupe(u8, uid);
-            self.schema_buf = dupe;
-            self.state.flow_schema_uid = dupe;
-        }
-        if (fc.priority_level_uid) |uid| {
-            const dupe = try self.allocator.dupe(u8, uid);
-            self.priority_buf = dupe;
-            self.state.priority_level_uid = dupe;
-        }
+        self.schema_buf = new_schema;
+        self.state.flow_schema_uid = new_schema;
+        self.priority_buf = new_priority;
+        self.state.priority_level_uid = new_priority;
     }
 
     fn clearLocked(self: *FlowControlTracker) void {

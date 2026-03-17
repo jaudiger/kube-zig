@@ -285,7 +285,7 @@ pub fn Reflector(comptime T: type) type {
                     // Clone items into individual arenas.
                     const items_slice = self.extractListItems(parsed_list.value);
                     const replace_items = self.cloneItemsToArenas(items_slice) catch |err| {
-                        return .{ .transient_error = err };
+                        return self.recordError(err);
                     };
 
                     const is_last = new_continue == null;
@@ -293,22 +293,16 @@ pub fn Reflector(comptime T: type) type {
                     // Save resource version from the last page.
                     if (new_rv) |rv_str| {
                         self.updateResourceVersion(rv_str) catch |err| {
-                            // Free cloned items on failure. This is safe and cannot
-                            // double-free: the transient_error event variant carries
-                            // only the error value (anyerror), not the items, so the
-                            // informer never receives or frees replace_items.
                             self.freeReplaceItems(replace_items);
-                            return .{ .transient_error = err };
+                            return self.recordError(err);
                         };
                     }
 
                     // Save continue token.
                     if (new_continue) |ct| {
                         const owned_ct = self.allocator.dupe(u8, ct) catch |err| {
-                            // Same safety reasoning as the rv dupe above:
-                            // transient_error carries only anyerror, not items.
                             self.freeReplaceItems(replace_items);
-                            return .{ .transient_error = err };
+                            return self.recordError(err);
                         };
                         if (self.continue_token) |old_ct| self.allocator.free(old_ct);
                         self.continue_token = owned_ct;
@@ -326,12 +320,20 @@ pub fn Reflector(comptime T: type) type {
                         self.transitionTo(.watching);
                     }
 
+                    // Dupe the RV so the event owns its copy independently
+                    // of self.resource_version, which later steps may free.
+                    const rv_for_event = self.resource_version orelse "";
+                    const rv_dupe = self.allocator.dupe(u8, rv_for_event) catch |err| {
+                        self.freeReplaceItems(replace_items);
+                        return self.recordError(err);
+                    };
+
                     return .{
                         .init_page = .{
                             .items = replace_items,
                             .is_last = is_last,
-                            .resource_version = self.resource_version orelse "",
-                            .rv_buf = null, // RV is owned by self
+                            .resource_version = rv_dupe,
+                            .rv_buf = rv_dupe,
                         },
                     };
                 },
@@ -392,6 +394,10 @@ pub fn Reflector(comptime T: type) type {
             // Read next event from the watch stream.
             const parsed_event = self.watch_stream.?.next() catch |err| {
                 self.closeWatch();
+                if (err == error.HttpGone) {
+                    self.transitionTo(.gone);
+                    return .gone;
+                }
                 return self.recordError(err);
             };
 
@@ -401,7 +407,7 @@ pub fn Reflector(comptime T: type) type {
                         // Update RV silently, don't forward to informer.
                         self.updateResourceVersion(bm.resource_version) catch {
                             event.deinit();
-                            return .{ .transient_error = error.OutOfMemory };
+                            return self.recordError(error.OutOfMemory);
                         };
                         event.deinit();
                         return null; // internal-only step

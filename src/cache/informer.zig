@@ -282,6 +282,8 @@ pub fn Informer(comptime T: type) type {
         }
 
         fn processInitPage(self: *Self, page: ReflectorEvent(T).InitPage) void {
+            defer if (page.rv_buf) |buf| self.allocator.free(buf);
+
             // If a previous page failed, discard all subsequent pages
             // to prevent a partial store replacement.
             if (self.sync_failed.load(.acquire)) {
