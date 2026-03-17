@@ -797,27 +797,7 @@ pub const Client = struct {
     /// that the caller can use to read newline-delimited JSON events.
     /// The caller owns the returned `StreamState` and must call `state.deinit()`.
     pub fn watchStream(self: *Client, path: []const u8, ctx: Context) !StreamResponse {
-        ctx.check() catch return error.Canceled;
-
-        // Rate limiter: measure wait time.
-        if (self.rate_limiter) |*rl| {
-            const before = std.time.Instant.now() catch null;
-            rl.acquire(ctx) catch return error.Canceled;
-            if (before) |b| {
-                if (std.time.Instant.now() catch null) |after| {
-                    const wait_ns: f64 = @floatFromInt(after.since(b));
-                    self.metrics.rate_limiter_latency.observe(wait_ns / @as(f64, std.time.ns_per_s));
-                }
-            }
-        }
-
-        // Circuit breaker.
-        if (self.circuit_breaker) |*cb| {
-            cb.allowRequest() catch {
-                self.metrics.circuit_breaker_trip_total.inc();
-                return error.CircuitBreakerOpen;
-            };
-        }
+        try self.preflight(ctx);
 
         self.metrics.request_total.inc();
         const request_start = std.time.Instant.now() catch null;
@@ -1090,11 +1070,10 @@ pub const Client = struct {
         }{ .method = method, .payload = payload, .content_type = content_type, .accept = accept, .body = body, .parent_span = ctx.span_context }, path, ctx);
     }
 
-    /// Shared retry loop.
-    fn retryLoop(self: *Client, req_ctx: anytype, path: []const u8, ctx: Context) RequestError!RawResult {
+    /// Context cancellation, rate limiting, and circuit breaker gate.
+    fn preflight(self: *Client, ctx: Context) !void {
         ctx.check() catch return error.Canceled;
 
-        // Rate limiter: measure wait time.
         if (self.rate_limiter) |*rl| {
             const before = std.time.Instant.now() catch null;
             rl.acquire(ctx) catch return error.Canceled;
@@ -1106,13 +1085,17 @@ pub const Client = struct {
             }
         }
 
-        // Circuit breaker.
         if (self.circuit_breaker) |*cb| {
             cb.allowRequest() catch {
                 self.metrics.circuit_breaker_trip_total.inc();
                 return error.CircuitBreakerOpen;
             };
         }
+    }
+
+    /// Shared retry loop.
+    fn retryLoop(self: *Client, req_ctx: anytype, path: []const u8, ctx: Context) RequestError!RawResult {
+        try self.preflight(ctx);
 
         var uri_buf: [uri_buf_size]u8 = undefined;
         const owned = try self.buildUri(path, &uri_buf);

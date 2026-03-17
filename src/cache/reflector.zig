@@ -292,7 +292,7 @@ pub fn Reflector(comptime T: type) type {
 
                     // Save resource version from the last page.
                     if (new_rv) |rv_str| {
-                        const owned_rv = self.allocator.dupe(u8, rv_str) catch |err| {
+                        self.updateResourceVersion(rv_str) catch |err| {
                             // Free cloned items on failure. This is safe and cannot
                             // double-free: the transient_error event variant carries
                             // only the error value (anyerror), not the items, so the
@@ -300,8 +300,6 @@ pub fn Reflector(comptime T: type) type {
                             self.freeReplaceItems(replace_items);
                             return .{ .transient_error = err };
                         };
-                        if (self.resource_version) |old_rv| self.allocator.free(old_rv);
-                        self.resource_version = owned_rv;
                     }
 
                     // Save continue token.
@@ -401,12 +399,10 @@ pub fn Reflector(comptime T: type) type {
                 switch (event.event) {
                     .bookmark => |bm| {
                         // Update RV silently, don't forward to informer.
-                        const owned_rv = self.allocator.dupe(u8, bm.resource_version) catch {
+                        self.updateResourceVersion(bm.resource_version) catch {
                             event.deinit();
                             return .{ .transient_error = error.OutOfMemory };
                         };
-                        if (self.resource_version) |rv| self.allocator.free(rv);
-                        self.resource_version = owned_rv;
                         event.deinit();
                         return null; // internal-only step
                     },
@@ -438,12 +434,10 @@ pub fn Reflector(comptime T: type) type {
                         // Update RV from the event object.
                         const ev_rv = self.extractEventRV(event.event);
                         if (ev_rv) |rv_str| {
-                            const owned_rv = self.allocator.dupe(u8, rv_str) catch {
+                            self.updateResourceVersion(rv_str) catch {
                                 // Can't track RV but still forward the event.
                                 return .{ .watch_event = event };
                             };
-                            if (self.resource_version) |rv| self.allocator.free(rv);
-                            self.resource_version = owned_rv;
                         }
                         return .{ .watch_event = event };
                     },
@@ -609,6 +603,13 @@ pub fn Reflector(comptime T: type) type {
             }
 
             return result_list.toOwnedSlice(self.allocator);
+        }
+
+        /// Dupe `new_rv`, free the old one, and store the new owned copy.
+        fn updateResourceVersion(self: *Self, new_rv: []const u8) !void {
+            const owned_rv = try self.allocator.dupe(u8, new_rv);
+            if (self.resource_version) |old_rv| self.allocator.free(old_rv);
+            self.resource_version = owned_rv;
         }
 
         /// Record a transient error and return the appropriate event.

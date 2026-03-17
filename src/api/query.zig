@@ -47,6 +47,13 @@ pub fn appendWatchQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opt
     }
 }
 
+/// Append an ampersand separator (if needed) and the parameter key.
+fn appendParamKey(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, need_amp: *bool, key: []const u8) !void {
+    if (need_amp.*) try buf.append(alloc, '&');
+    try buf.appendSlice(alloc, key);
+    need_amp.* = true;
+}
+
 /// Append list query parameters to a growing buffer.
 /// Append nothing if no options are set.
 pub fn appendListQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: ListOptions) !void {
@@ -63,49 +70,37 @@ pub fn appendListQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts
     var need_amp = false;
 
     if (opts.label_selector) |ls| {
-        try buf.appendSlice(alloc, "labelSelector=");
+        try appendParamKey(buf, alloc, &need_amp, "labelSelector=");
         try percentEncodeQueryValue(buf, alloc, ls);
-        need_amp = true;
     }
 
     if (opts.field_selector) |fs| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "fieldSelector=");
+        try appendParamKey(buf, alloc, &need_amp, "fieldSelector=");
         try percentEncodeQueryValue(buf, alloc, fs);
-        need_amp = true;
     }
 
     if (opts.resource_version) |rv| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "resourceVersion=");
+        try appendParamKey(buf, alloc, &need_amp, "resourceVersion=");
         try percentEncodeQueryValue(buf, alloc, rv);
-        need_amp = true;
     }
 
     if (opts.resource_version_match) |rvm| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "resourceVersionMatch=");
+        try appendParamKey(buf, alloc, &need_amp, "resourceVersionMatch=");
         try buf.appendSlice(alloc, rvm.toValue());
-        need_amp = true;
     }
 
     if (opts.limit) |n| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "limit=");
+        try appendParamKey(buf, alloc, &need_amp, "limit=");
         try std.fmt.format(buf.writer(alloc), "{d}", .{n});
-        need_amp = true;
     }
 
     if (opts.continue_token) |ct| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "continue=");
+        try appendParamKey(buf, alloc, &need_amp, "continue=");
         try percentEncodeQueryValue(buf, alloc, ct);
-        need_amp = true;
     }
 
     if (opts.timeout_seconds) |ts| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "timeoutSeconds=");
+        try appendParamKey(buf, alloc, &need_amp, "timeoutSeconds=");
         try std.fmt.format(buf.writer(alloc), "{d}", .{ts});
     }
 }
@@ -159,49 +154,37 @@ pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts:
     var need_amp = false;
 
     if (opts.container) |c| {
-        try buf.appendSlice(alloc, "container=");
+        try appendParamKey(buf, alloc, &need_amp, "container=");
         try percentEncodeQueryValue(buf, alloc, c);
-        need_amp = true;
     }
 
     if (opts.follow) |f| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "follow=");
+        try appendParamKey(buf, alloc, &need_amp, "follow=");
         try buf.appendSlice(alloc, if (f) "true" else "false");
-        need_amp = true;
     }
 
     if (opts.tail_lines) |n| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "tailLines=");
+        try appendParamKey(buf, alloc, &need_amp, "tailLines=");
         try std.fmt.format(buf.writer(alloc), "{d}", .{n});
-        need_amp = true;
     }
 
     if (opts.since_seconds) |n| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "sinceSeconds=");
+        try appendParamKey(buf, alloc, &need_amp, "sinceSeconds=");
         try std.fmt.format(buf.writer(alloc), "{d}", .{n});
-        need_amp = true;
     }
 
     if (opts.timestamps) |t| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "timestamps=");
+        try appendParamKey(buf, alloc, &need_amp, "timestamps=");
         try buf.appendSlice(alloc, if (t) "true" else "false");
-        need_amp = true;
     }
 
     if (opts.previous) |p| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "previous=");
+        try appendParamKey(buf, alloc, &need_amp, "previous=");
         try buf.appendSlice(alloc, if (p) "true" else "false");
-        need_amp = true;
     }
 
     if (opts.limit_bytes) |n| {
-        if (need_amp) try buf.append(alloc, '&');
-        try buf.appendSlice(alloc, "limitBytes=");
+        try appendParamKey(buf, alloc, &need_amp, "limitBytes=");
         try std.fmt.format(buf.writer(alloc), "{d}", .{n});
     }
 }
