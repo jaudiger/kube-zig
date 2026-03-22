@@ -81,8 +81,10 @@ jobs:
         if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
         run: |
           BRANCH="update-k8s-spec-${{ steps.latest.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add build.zig spec/swagger.json 'generated/*.zig'
+          git add -f build.zig spec/swagger.json 'generated/*.zig'
           git commit -m "chore: update Kubernetes spec to ${{ steps.latest.outputs.version }}"
           git push origin "$BRANCH"
           gh pr create \
