@@ -1171,7 +1171,7 @@ test "retry loop: transport error after 429 with Retry-After hint" {
     defer mock.deinit();
 
     mock.respondWithRetryAfterNs(.too_many_requests, "{}", 1);
-    mock.respondWithTransportError();
+    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
     mock.respondWith(.ok, "{}");
 
     var c = mock.client(std.testing.io);

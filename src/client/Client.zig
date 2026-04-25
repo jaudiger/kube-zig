@@ -1112,7 +1112,7 @@ pub const Client = struct {
                 }
                 self.updateCircuitBreakerGauge();
 
-                if (attempt < self.retry_policy.max_retries and isRetryableTransport(err)) {
+                if (attempt < self.retry_policy.max_retries and shouldRetryTransport(req_ctx.method, err)) {
                     self.metrics.retry_total.inc();
                     const sleep_ns = self.retry_policy.sleepNs(io, attempt, null);
                     self.logRetry(req_ctx, path, attempt, sleep_ns, .{ .transport = err });
@@ -1153,7 +1153,7 @@ pub const Client = struct {
                     }
                     self.updateCircuitBreakerGauge();
 
-                    if (attempt < self.retry_policy.max_retries and RetryPolicy.isRetryableStatus(e.status)) {
+                    if (attempt < self.retry_policy.max_retries and shouldRetryStatus(req_ctx.method, e.status, e.retry_after_ns)) {
                         self.metrics.retry_total.inc();
                         const sleep_ns = self.retry_policy.sleepNs(io, attempt, e.retry_after_ns);
                         self.logRetry(req_ctx, path, attempt, sleep_ns, .{ .api_status = e.status });
@@ -1199,14 +1199,49 @@ pub const Client = struct {
         }
     }
 
+    /// True for named network errors where we know the request either never
+    /// left the local side or was rejected before the peer processed it.
+    /// `HttpRequestFailed` is excluded because it is the catch-all bucket for
+    /// any unmapped `std.http` error, and retrying (or recording a circuit
+    /// breaker failure for) an unknown error class is unsafe.
     fn isRetryableTransport(err: TransportError) bool {
         return switch (err) {
             error.ConnectionRefused,
             error.ConnectionResetByPeer,
             error.ConnectionTimedOut,
             error.TemporaryNameServerFailure,
-            error.HttpRequestFailed,
             => true,
+            else => false,
+        };
+    }
+
+    /// RFC 9110 idempotent methods. POST and PATCH are not idempotent: the
+    /// server may have already applied the request before the connection
+    /// failed, so retrying can create duplicate resources.
+    fn isIdempotent(method: http.Method) bool {
+        return switch (method) {
+            .GET, .HEAD, .OPTIONS, .PUT, .DELETE => true,
+            else => false,
+        };
+    }
+
+    /// Method-aware transport retry gate. Non-idempotent methods never retry
+    /// on transport errors because the server-side effect is unknown.
+    fn shouldRetryTransport(method: http.Method, err: TransportError) bool {
+        if (!isIdempotent(method)) return false;
+        return isRetryableTransport(err);
+    }
+
+    /// Method-aware status retry gate. Idempotent methods use the default
+    /// retryable-status set. Non-idempotent methods only retry when the
+    /// server explicitly signaled pre-processing rejection via a 429 or 503
+    /// carrying a Retry-After header, which guarantees the request was not
+    /// applied.
+    fn shouldRetryStatus(method: http.Method, status: http.Status, retry_after_ns: ?u64) bool {
+        if (isIdempotent(method)) return RetryPolicy.isRetryableStatus(status);
+        if (retry_after_ns == null) return false;
+        return switch (status) {
+            .too_many_requests, .service_unavailable => true,
             else => false,
         };
     }

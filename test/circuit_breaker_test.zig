@@ -42,6 +42,30 @@ test "retryLoop records transport failures for circuit breaker" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
+    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
+
+    // Act
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
+    c.circuit_breaker = try CircuitBreaker.init(.{ .failure_threshold = 5 });
+    c.retry_policy = RetryPolicy.disabled;
+
+    // Assert
+    const r = c.get(std.testing.io, struct {}, "/api/v1/pods", c.context());
+    try testing.expectError(error.ConnectionResetByPeer, r);
+
+    try testing.expect(c.circuit_breaker != null);
+    if (c.circuit_breaker) |*cb| {
+        try testing.expectEqual(@as(u32, 1), cb.consecutive_failures);
+    }
+}
+
+// Unknown/catch-all transport errors are not counted as circuit breaker failures
+test "retryLoop does not record HttpRequestFailed as circuit breaker failure" {
+    // Arrange
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+    mock.respondWithTransportError();
 
     // Act
     var c = mock.client(std.testing.io);
@@ -53,9 +77,8 @@ test "retryLoop records transport failures for circuit breaker" {
     const r = c.get(std.testing.io, struct {}, "/api/v1/pods", c.context());
     try testing.expectError(error.HttpRequestFailed, r);
 
-    try testing.expect(c.circuit_breaker != null);
     if (c.circuit_breaker) |*cb| {
-        try testing.expectEqual(@as(u32, 1), cb.consecutive_failures);
+        try testing.expectEqual(@as(u32, 0), cb.consecutive_failures);
     }
 }
 

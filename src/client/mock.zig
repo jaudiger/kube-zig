@@ -47,11 +47,13 @@ pub const MockTransport = struct {
     };
 
     /// A canned response to return from send().
+    /// When `fail_error` is set, sendImpl returns that error instead of an
+    /// HTTP response; `status` and `body` are ignored.
     pub const MockResponse = struct {
         status: http.Status,
         body: []const u8,
         retry_after_ns: ?u64 = null,
-        fail: bool = false,
+        fail_error: ?anyerror = null,
         flow_schema_uid: ?[]const u8 = null,
         priority_level_uid: ?[]const u8 = null,
     };
@@ -152,13 +154,19 @@ pub const MockTransport = struct {
         }) catch @panic("OOM in MockTransport.respondWithRetryAfterNs");
     }
 
-    /// Enqueue a slot that returns a transport error instead of an HTTP response.
+    /// Enqueue a slot that returns a generic `HttpRequestFailed` error.
     pub fn respondWithTransportError(self: *MockTransport) void {
+        self.respondWithTransportErrorKind(error.HttpRequestFailed);
+    }
+
+    /// Enqueue a slot that returns the given error from the transport layer.
+    /// Lets tests exercise specific error kinds such as `ConnectionResetByPeer`.
+    pub fn respondWithTransportErrorKind(self: *MockTransport, err: anyerror) void {
         self.responses.append(self.allocator, .{
             .status = .internal_server_error,
             .body = "",
-            .fail = true,
-        }) catch @panic("OOM in MockTransport.respondWithTransportError");
+            .fail_error = err,
+        }) catch @panic("OOM in MockTransport.respondWithTransportErrorKind");
     }
 
     /// Enqueue a canned response by serializing a value to JSON.
@@ -285,7 +293,7 @@ pub const MockTransport = struct {
         }
         const resp = self.responses.orderedRemove(0);
 
-        if (resp.fail) return error.HttpRequestFailed;
+        if (resp.fail_error) |e| return e;
 
         // Return a copy of the body owned by the caller's allocator,
         // matching real transport behavior.
