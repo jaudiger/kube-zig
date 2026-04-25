@@ -27,7 +27,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Check formatting
         run: zig fmt --check .

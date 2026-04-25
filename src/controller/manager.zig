@@ -24,11 +24,11 @@ pub const Runnable = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    const VTable = struct {
-        start: *const fn (ptr: *anyopaque) anyerror!void,
-        cancel: *const fn (ptr: *anyopaque) void,
+    pub const VTable = struct {
+        start: *const fn (ptr: *anyopaque, io: std.Io) anyerror!void,
+        cancel: *const fn (ptr: *anyopaque, io: std.Io) void,
         join: *const fn (ptr: *anyopaque) void,
-        has_synced: *const fn (ptr: *anyopaque) bool,
+        has_synced: *const fn (ptr: *anyopaque, io: std.Io) bool,
         get_error: *const fn (ptr: *anyopaque) ?anyerror,
     };
 
@@ -38,21 +38,21 @@ pub const Runnable = struct {
     /// `Runnable` (and any `ControllerManager` it is added to).
     pub fn fromController(comptime T: type, ctrl: *controller_mod.Controller(T)) Runnable {
         const Impl = struct {
-            fn start(ptr: *anyopaque) anyerror!void {
+            fn start(ptr: *anyopaque, io: std.Io) anyerror!void {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
-                return self.start();
+                return self.start(io);
             }
-            fn cancel(ptr: *anyopaque) void {
+            fn cancel(ptr: *anyopaque, io: std.Io) void {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
-                self.cancel();
+                self.cancel(io);
             }
             fn join(ptr: *anyopaque) void {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
                 self.join();
             }
-            fn hasSynced(ptr: *anyopaque) bool {
+            fn hasSynced(ptr: *anyopaque, io: std.Io) bool {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
-                return self.hasSynced();
+                return self.hasSynced(io);
             }
             fn getError(ptr: *anyopaque) ?anyerror {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
@@ -73,13 +73,13 @@ pub const Runnable = struct {
     }
 
     /// Start the controller's informer and reconciler threads.
-    pub fn start(self: Runnable) anyerror!void {
-        return self.vtable.start(self.ptr);
+    pub fn start(self: Runnable, io: std.Io) anyerror!void {
+        return self.vtable.start(self.ptr, io);
     }
 
     /// Signal the controller to stop (non-blocking).
-    pub fn cancel(self: Runnable) void {
-        self.vtable.cancel(self.ptr);
+    pub fn cancel(self: Runnable, io: std.Io) void {
+        self.vtable.cancel(self.ptr, io);
     }
 
     /// Block until the controller's threads have exited.
@@ -88,14 +88,14 @@ pub const Runnable = struct {
     }
 
     /// Cancel and then join: signal shutdown and wait for completion.
-    pub fn stop(self: Runnable) void {
-        self.cancel();
+    pub fn stop(self: Runnable, io: std.Io) void {
+        self.cancel(io);
         self.join();
     }
 
     /// Return whether the controller's informer has completed its initial list.
-    pub fn hasSynced(self: Runnable) bool {
-        return self.vtable.has_synced(self.ptr);
+    pub fn hasSynced(self: Runnable, io: std.Io) bool {
+        return self.vtable.has_synced(self.ptr, io);
     }
 
     /// Return the informer error, if any.
@@ -114,14 +114,16 @@ pub const ControllerManager = struct {
     allocator: std.mem.Allocator,
     controllers: std.ArrayList(Runnable),
     state: State,
-    mutex: std.Thread.Mutex,
-    stop_cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    /// Wakeup epoch for the stop condition.
+    stop_cond_epoch: std.atomic.Value(u32),
     client: ?*Client = null,
     logger: Logger = Logger.noop,
     shutdown_timeout_ns: ?u64 = null,
     join_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    join_mutex: std.Thread.Mutex = .{},
-    join_cond: std.Thread.Condition = .{},
+    join_mutex: std.Io.Mutex = .init,
+    /// Wakeup epoch for the join completion signal.
+    join_cond_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     join_thread: ?std.Thread = null,
 
     const State = enum {
@@ -145,8 +147,8 @@ pub const ControllerManager = struct {
             .allocator = allocator,
             .controllers = .empty,
             .state = .idle,
-            .mutex = .{},
-            .stop_cond = .{},
+            .mutex = .init,
+            .stop_cond_epoch = std.atomic.Value(u32).init(0),
             .client = opts.client,
             .logger = opts.logger.withScope("controller_manager"),
             .shutdown_timeout_ns = opts.shutdown_timeout_ns,
@@ -177,7 +179,7 @@ pub const ControllerManager = struct {
     ///
     /// If controller N fails to start, controllers 0..N-1 are stopped in
     /// reverse order and the error from N is returned.
-    pub fn start(self: *ControllerManager) !void {
+    pub fn start(self: *ControllerManager, io: std.Io) !void {
         std.debug.assert(self.state == .idle);
 
         self.logger.info("starting controller manager", &.{
@@ -188,7 +190,7 @@ pub const ControllerManager = struct {
             self.logger.info("starting controller", &.{
                 LogField.uint("index", i),
             });
-            runnable.start() catch |err| {
+            runnable.start(io) catch |err| {
                 self.logger.err("controller failed to start, rolling back", &.{
                     LogField.uint("index", i),
                     LogField.string("error", @errorName(err)),
@@ -196,10 +198,10 @@ pub const ControllerManager = struct {
                 // Rollback: cancel 0..i-1 in forward order, then join.
                 // Cancelling all first gives controllers maximum time
                 // to react before we block on joins.
-                for (items[0..i]) |r| r.cancel();
+                for (items[0..i]) |r| r.cancel(io);
 
                 if (self.shutdown_timeout_ns) |timeout_ns| {
-                    self.timedJoinN(i, timeout_ns);
+                    self.timedJoinN(io, i, timeout_ns);
                 } else {
                     self.joinN(i);
                 }
@@ -208,36 +210,37 @@ pub const ControllerManager = struct {
             };
         }
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.state = .running;
     }
 
     /// Stop all controllers: cancel all, then join all.
     ///
     /// Safe to call from any thread. Signals `run()` to unblock.
-    pub fn stop(self: *ControllerManager) void {
+    pub fn stop(self: *ControllerManager, io: std.Io) void {
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             if (self.state != .running) return;
             self.logger.info("stopping controller manager", &.{});
             self.state = .stopped;
-            self.stop_cond.signal();
+            _ = self.stop_cond_epoch.fetchAdd(1, .release);
+            io.futexWake(u32, &self.stop_cond_epoch.raw, std.math.maxInt(u32));
         }
 
         // Set the client's shutdown flag.  This propagates to all
         // contexts derived from client.context(), unblocking any thread
         // in interruptibleSleep() or ctx.check().
-        if (self.client) |c| c.shutdown();
+        if (self.client) |c| c.shutdown(io);
 
         // Cancel ALL controllers (non-blocking).
         // Each cancel() sets informer cancel flags, interrupts watch
         // sockets, and shuts down work queues.
         const items = self.controllers.items;
         for (items) |runnable| {
-            runnable.cancel();
+            runnable.cancel(io);
         }
 
         // Join ALL controller threads (reverse order).
@@ -246,7 +249,7 @@ pub const ControllerManager = struct {
         // and the remaining joins continue in a background thread.
         const n = self.controllers.items.len;
         if (self.shutdown_timeout_ns) |timeout_ns| {
-            self.timedJoinN(n, timeout_ns);
+            self.timedJoinN(io, n, timeout_ns);
         } else {
             self.joinN(n);
         }
@@ -275,31 +278,24 @@ pub const ControllerManager = struct {
     /// Spawn a helper thread to join the first `n` controllers, then
     /// wait for it with the given timeout. If the timeout expires, the
     /// helper thread is left running and will be joined by deinit().
-    fn timedJoinN(self: *ControllerManager, n: usize, timeout_ns: u64) void {
+    fn timedJoinN(self: *ControllerManager, io: std.Io, n: usize, timeout_ns: u64) void {
         self.join_done.store(false, .release);
 
-        const join_thread = std.Thread.spawn(.{}, joinNThread, .{ self, n }) catch {
+        const join_thread = std.Thread.spawn(.{}, joinNThread, .{ self, io, n }) catch {
             self.logger.warn("failed to spawn join thread, falling back to blocking join", &.{});
             self.joinN(n);
             return;
         };
 
-        {
-            self.join_mutex.lock();
-            defer self.join_mutex.unlock();
-
-            if (std.time.Instant.now()) |begin| {
-                while (!self.join_done.load(.acquire)) {
-                    const elapsed = (std.time.Instant.now() catch break).since(begin);
-                    if (elapsed >= timeout_ns) break;
-                    self.join_cond.timedWait(&self.join_mutex, timeout_ns - elapsed) catch break;
-                }
-            } else |_| {
-                // Monotonic clock unavailable; single wait with full timeout.
-                if (!self.join_done.load(.acquire)) {
-                    self.join_cond.timedWait(&self.join_mutex, timeout_ns) catch {};
-                }
-            }
+        const begin: std.Io.Clock.Timestamp = .now(io, .awake);
+        while (!self.join_done.load(.acquire)) {
+            const elapsed_ns_i: i96 = begin.untilNow(io).raw.nanoseconds;
+            const elapsed: u64 = if (elapsed_ns_i < 0) 0 else @intCast(elapsed_ns_i);
+            if (elapsed >= timeout_ns) break;
+            const remaining: u64 = timeout_ns - elapsed;
+            const observed = self.join_cond_epoch.load(.acquire);
+            const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .{ .nanoseconds = @intCast(remaining) } } };
+            io.futexWaitTimeout(u32, &self.join_cond_epoch.raw, observed, timeout) catch break;
         }
 
         if (self.join_done.load(.acquire)) {
@@ -312,32 +308,36 @@ pub const ControllerManager = struct {
         }
     }
 
-    fn joinNThread(self: *ControllerManager, n: usize) void {
+    fn joinNThread(self: *ControllerManager, io: std.Io, n: usize) void {
         self.joinN(n);
-        self.join_mutex.lock();
-        defer self.join_mutex.unlock();
+        self.join_mutex.lockUncancelable(io);
+        defer self.join_mutex.unlock(io);
         self.join_done.store(true, .release);
-        self.join_cond.signal();
+        _ = self.join_cond_epoch.fetchAdd(1, .release);
+        io.futexWake(u32, &self.join_cond_epoch.raw, std.math.maxInt(u32));
     }
 
     /// Start all controllers, then block until `stop()` is called.
-    pub fn run(self: *ControllerManager) !void {
-        try self.start();
+    pub fn run(self: *ControllerManager, io: std.Io) !void {
+        try self.start(io);
 
         self.logger.info("controller manager blocking, waiting for stop signal", &.{});
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        while (self.state == .running) {
-            self.stop_cond.wait(&self.mutex);
+        while (true) {
+            const observed = self.stop_cond_epoch.load(.acquire);
+            self.mutex.lockUncancelable(io);
+            const still_running = self.state == .running;
+            self.mutex.unlock(io);
+            if (!still_running) break;
+            io.futexWaitUncancelable(u32, &self.stop_cond_epoch.raw, observed);
         }
         self.logger.info("controller manager unblocked, returning", &.{});
     }
 
     /// Returns `true` if every registered controller has synced.
     /// Vacuously true when no controllers are registered.
-    pub fn allSynced(self: *ControllerManager) bool {
+    pub fn allSynced(self: *ControllerManager, io: std.Io) bool {
         for (self.controllers.items) |runnable| {
-            if (!runnable.hasSynced()) return false;
+            if (!runnable.hasSynced(io)) return false;
         }
         return true;
     }
@@ -345,8 +345,8 @@ pub const ControllerManager = struct {
     /// Return a health check that reports healthy when all controllers have synced.
     pub fn healthCheck(self: *ControllerManager) HealthCheck {
         return HealthCheck.fromTypedCtx(ControllerManager, self, struct {
-            fn check(mgr: *ControllerManager) bool {
-                return mgr.allSynced();
+            fn check(mgr: *ControllerManager, io: std.Io) bool {
+                return mgr.allSynced(io);
             }
         }.check);
     }
@@ -382,12 +382,12 @@ const MockState = struct {
 
 fn makeMockRunnable(state: *MockState) Runnable {
     const Impl = struct {
-        fn start(ptr: *anyopaque) anyerror!void {
+        fn start(ptr: *anyopaque, _: std.Io) anyerror!void {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             if (s.fail_start) return error.MockStartFailed;
             s.started = true;
         }
-        fn cancel(ptr: *anyopaque) void {
+        fn cancel(ptr: *anyopaque, _: std.Io) void {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             s.canceled = true;
             s.stopped = true; // backwards compat for existing tests
@@ -402,7 +402,7 @@ fn makeMockRunnable(state: *MockState) Runnable {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             if (s.join_blocker) |blocker| {
                 while (blocker.load(.acquire) == 0) {
-                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 1 * std.time.ns_per_ms } }, std.testing.io) catch {};
                 }
             }
             s.joined = true;
@@ -410,7 +410,7 @@ fn makeMockRunnable(state: *MockState) Runnable {
                 s.join_order = counter.fetchAdd(1, .seq_cst);
             }
         }
-        fn hasSynced(ptr: *anyopaque) bool {
+        fn hasSynced(ptr: *anyopaque, _: std.Io) bool {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             return s.synced;
         }
@@ -445,7 +445,7 @@ test "init/deinit: count is 0, allSynced is vacuously true" {
 
     // Act / Assert
     try testing.expectEqual(0, mgr.count());
-    try testing.expect(mgr.allSynced());
+    try testing.expect(mgr.allSynced(std.testing.io));
 }
 
 test "add increments count" {
@@ -476,8 +476,8 @@ test "start calls all controllers" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Assert
-    try mgr.start();
-    defer mgr.stop();
+    try mgr.start(std.testing.io);
+    defer mgr.stop(std.testing.io);
 
     try testing.expect(s1.started);
     try testing.expect(s2.started);
@@ -495,7 +495,7 @@ test "start rolls back on failure" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Assert
-    try testing.expectError(error.MockStartFailed, mgr.start());
+    try testing.expectError(error.MockStartFailed, mgr.start(std.testing.io));
 
     // First controller was started then rolled back.
     try testing.expect(s1.started);
@@ -519,8 +519,8 @@ test "stop in reverse order" {
     try mgr.add(makeMockRunnable(&s3));
 
     // Assert
-    try mgr.start();
-    mgr.stop();
+    try mgr.start(std.testing.io);
+    mgr.stop(std.testing.io);
 
     // s3 stopped first (order 0), then s2 (order 1), then s1 (order 2).
     try testing.expectEqual(2, s1.stop_order.?);
@@ -540,10 +540,10 @@ test "allSynced: false until all report synced" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Assert
-    try testing.expect(!mgr.allSynced());
+    try testing.expect(!mgr.allSynced(std.testing.io));
 
     s2.synced = true;
-    try testing.expect(mgr.allSynced());
+    try testing.expect(mgr.allSynced(std.testing.io));
 }
 
 test "healthCheck: reflects allSynced state" {
@@ -556,10 +556,10 @@ test "healthCheck: reflects allSynced state" {
     const check = mgr.healthCheck();
 
     // Act / Assert
-    try testing.expect(!check.check_fn(check.ctx));
+    try testing.expect(!check.check_fn(check.ctx, std.testing.io));
 
     s1.synced = true;
-    try testing.expect(check.check_fn(check.ctx));
+    try testing.expect(check.check_fn(check.ctx, std.testing.io));
 }
 
 test "getError returns per-controller errors" {
@@ -589,7 +589,7 @@ test "stop without start is safe" {
 
     // Assert
     // Should not crash because state is idle, not running.
-    mgr.stop();
+    mgr.stop(std.testing.io);
 
     try testing.expect(!s1.stopped);
 }
@@ -606,13 +606,13 @@ test "run blocks until stop" {
     // Assert
     // Spawn a thread to call stop() after a short delay.
     const stopper = try std.Thread.spawn(.{}, struct {
-        fn run(m: *ControllerManager) void {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-            m.stop();
+        fn run(io: std.Io, m: *ControllerManager) void {
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, io) catch {};
+            m.stop(io);
         }
-    }.run, .{&mgr});
+    }.run, .{ std.testing.io, &mgr });
 
-    try mgr.run();
+    try mgr.run(std.testing.io);
     stopper.join();
 
     try testing.expect(s1.started);
@@ -653,8 +653,8 @@ test "stop cancels all before joining any" {
     try mgr.add(makeMockRunnable(&s2));
     try mgr.add(makeMockRunnable(&s3));
 
-    try mgr.start();
-    mgr.stop();
+    try mgr.start(std.testing.io);
+    mgr.stop(std.testing.io);
 
     try testing.expect(s1.canceled);
     try testing.expect(s2.canceled);
@@ -685,8 +685,8 @@ test "stop with shutdown_timeout: completes within timeout" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Act
-    try mgr.start();
-    mgr.stop();
+    try mgr.start(std.testing.io);
+    mgr.stop(std.testing.io);
 
     // Assert
     try testing.expect(s1.joined);
@@ -707,10 +707,11 @@ test "stop with shutdown_timeout: timeout expires with stuck controller" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Act
-    try mgr.start();
-    const start_time = try std.time.Instant.now();
-    mgr.stop();
-    const elapsed = (try std.time.Instant.now()).since(start_time);
+    try mgr.start(std.testing.io);
+    const start_time: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+    mgr.stop(std.testing.io);
+    const elapsed_i: i96 = start_time.untilNow(std.testing.io).raw.nanoseconds;
+    const elapsed: u64 = if (elapsed_i < 0) 0 else @intCast(elapsed_i);
 
     // Assert
     try testing.expect(elapsed < 1 * std.time.ns_per_s);
@@ -730,8 +731,8 @@ test "shutdownComplete: true after clean stop" {
     try mgr.add(makeMockRunnable(&s1));
 
     // Act
-    try mgr.start();
-    mgr.stop();
+    try mgr.start(std.testing.io);
+    mgr.stop(std.testing.io);
 
     // Assert
     try testing.expect(mgr.shutdownComplete());
@@ -749,8 +750,8 @@ test "shutdownComplete: false during timed-out stop" {
     try mgr.add(makeMockRunnable(&s1));
 
     // Act
-    try mgr.start();
-    mgr.stop();
+    try mgr.start(std.testing.io);
+    mgr.stop(std.testing.io);
 
     // Assert
     try testing.expect(!mgr.shutdownComplete());
@@ -773,7 +774,7 @@ test "start rollback with shutdown_timeout" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Act / Assert
-    try testing.expectError(error.MockStartFailed, mgr.start());
+    try testing.expectError(error.MockStartFailed, mgr.start(std.testing.io));
     try testing.expect(s1.canceled);
 
     // Unblock so the background join thread can finish during deinit.
@@ -796,7 +797,7 @@ test "start rollback cancels all before joining" {
     try mgr.add(makeMockRunnable(&s3));
 
     // Act
-    try testing.expectError(error.MockStartFailed, mgr.start());
+    try testing.expectError(error.MockStartFailed, mgr.start(std.testing.io));
 
     // Assert
     // All cancels (orders 0,1) happened before any joins (orders 0,1)

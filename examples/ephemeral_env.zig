@@ -198,6 +198,7 @@ const ServiceApi = kube_zig.Api(k8s.CoreV1Service);
 
 const ReconcileCtx = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     client: *kube_zig.Client,
     store: kube_zig.Store(EphemeralEnv).View,
     recorder: kube_zig.EventRecorder,
@@ -209,7 +210,7 @@ const ReconcileCtx = struct {
         self.logger.info("reconciling", &.{LogField.string("name", env_name)});
 
         // Deep-clone from cache so the lock is released before HTTP calls.
-        const result = self.store.getCloned(self.allocator, key) catch |err| {
+        const result = self.store.getCloned(self.allocator, self.io, key) catch |err| {
             self.logger.warn("failed to clone object from cache", &.{LogField.err("error", err)});
             return .{ .requeue = true };
         } orelse {
@@ -233,7 +234,7 @@ const ReconcileCtx = struct {
         // finalizer.  On steady-state re-reconciles the finalizer is present in
         // the cache, so this avoids a round-trip every cycle.
         if (!kube_zig.finalizers.hasFinalizer(&meta, finalizer_name)) {
-            kube_zig.finalizers.ensureFinalizer(EphemeralEnv, api, self.allocator, env_name, finalizer_name) catch |err| {
+            kube_zig.finalizers.ensureFinalizer(EphemeralEnv, self.io, api, self.allocator, env_name, finalizer_name) catch |err| {
                 self.logger.warn("failed to ensure finalizer", &.{LogField.err("error", err)});
                 return .{ .requeue = true };
             };
@@ -260,7 +261,7 @@ const ReconcileCtx = struct {
             return .{ .requeue_after_ns = 30 * std.time.ns_per_s };
         };
 
-        const now: i64 = std.time.timestamp();
+        const now: i64 = @intCast(@divTrunc(std.Io.Clock.real.now(self.io).nanoseconds, std.time.ns_per_s));
         const elapsed = now - created_epoch;
 
         // TTL expired; skip provisioning, go straight to cleanup.
@@ -273,7 +274,7 @@ const ReconcileCtx = struct {
 
             const ns_api = NamespaceApi.init(self.client, self.client.context(), null);
             del: {
-                const del_result = ns_api.delete(ns_name, .{}) catch {
+                const del_result = ns_api.delete(self.io, ns_name, .{}) catch {
                     self.logger.warn("failed to delete namespace during TTL expiry", &.{});
                     break :del;
                 };
@@ -284,7 +285,7 @@ const ReconcileCtx = struct {
             // This sets deletionTimestamp; the next reconcile will enter
             // handleDeletion which removes the finalizer.
             cr_del: {
-                const cr_del_result = api.delete(env_name, .{}) catch {
+                const cr_del_result = api.delete(self.io, env_name, .{}) catch {
                     self.logger.warn("failed to delete EphemeralEnv CR during TTL expiry", &.{});
                     break :cr_del;
                 };
@@ -292,6 +293,7 @@ const ReconcileCtx = struct {
             }
 
             self.recorder.event(
+                self.io,
                 objRef(env_name, uid),
                 null,
                 .normal,
@@ -316,7 +318,7 @@ const ReconcileCtx = struct {
 
         // Not yet ready; provision child resources.
         if (!std.mem.eql(u8, current_phase, "Provisioning")) {
-            updatePhase(self.allocator, self.logger, api, env_name, "Provisioning", ns_name) catch |err| {
+            updatePhase(self.allocator, self.io, self.logger, api, env_name, "Provisioning", ns_name) catch |err| {
                 self.logger.warn("failed to update status to Provisioning", &.{LogField.err("error", err)});
             };
         }
@@ -331,7 +333,7 @@ const ReconcileCtx = struct {
 
         try self.ensureService(ns_name, env_name, spec, owner_ref);
 
-        updatePhase(self.allocator, self.logger, api, env_name, "Ready", ns_name) catch |err| {
+        updatePhase(self.allocator, self.io, self.logger, api, env_name, "Ready", ns_name) catch |err| {
             self.logger.warn("failed to update status to Ready", &.{LogField.err("error", err)});
         };
 
@@ -360,7 +362,7 @@ const ReconcileCtx = struct {
 
         const ns_api = NamespaceApi.init(self.client, self.client.context(), null);
         del: {
-            const del_result = ns_api.delete(ns_name, .{}) catch {
+            const del_result = ns_api.delete(self.io, ns_name, .{}) catch {
                 self.logger.warn("failed to delete namespace during cleanup (may already be gone)", &.{});
                 break :del;
             };
@@ -369,12 +371,13 @@ const ReconcileCtx = struct {
 
         // Remove the finalizer (high-level helper: GET+PUT with automatic
         // 409 retry via kube_zig.retryOnConflict).
-        kube_zig.finalizers.removeFinalizerAndUpdate(EphemeralEnv, api, env_name, finalizer_name) catch |err| {
+        kube_zig.finalizers.removeFinalizerAndUpdate(EphemeralEnv, self.io, api, env_name, finalizer_name) catch |err| {
             self.logger.warn("failed to remove finalizer", &.{ LogField.string("name", env_name), LogField.err("error", err) });
             return .{ .requeue = true };
         };
 
         self.recorder.event(
+            self.io,
             objRef(env_name, uid),
             null,
             .normal,
@@ -409,7 +412,7 @@ const ReconcileCtx = struct {
             },
         };
 
-        const result = try ns_api.apply(ns_name, ns, .{ .field_manager = field_manager, .force = true });
+        const result = try ns_api.apply(self.io, ns_name, ns, .{ .field_manager = field_manager, .force = true });
         switch (result) {
             .ok => |parsed| parsed.deinit(),
             .api_error => |err_resp| {
@@ -438,7 +441,7 @@ const ReconcileCtx = struct {
             },
         };
 
-        const result = try cm_api.apply(cm_name, cm, .{ .field_manager = field_manager, .force = true });
+        const result = try cm_api.apply(self.io, cm_name, cm, .{ .field_manager = field_manager, .force = true });
         switch (result) {
             .ok => |p| p.deinit(),
             .api_error => |e| e.deinit(),
@@ -488,7 +491,7 @@ const ReconcileCtx = struct {
             },
         };
 
-        const result = try deploy_api.apply(env_name, deploy, .{ .field_manager = field_manager, .force = true });
+        const result = try deploy_api.apply(self.io, env_name, deploy, .{ .field_manager = field_manager, .force = true });
         switch (result) {
             .ok => |p| p.deinit(),
             .api_error => |e| {
@@ -532,7 +535,7 @@ const ReconcileCtx = struct {
             },
         };
 
-        const result = try svc_api.apply(env_name, svc, .{ .field_manager = field_manager, .force = true });
+        const result = try svc_api.apply(self.io, env_name, svc, .{ .field_manager = field_manager, .force = true });
         switch (result) {
             .ok => |p| p.deinit(),
             .api_error => |e| {
@@ -546,6 +549,7 @@ const ReconcileCtx = struct {
 // Free functions (no self needed)
 fn updatePhase(
     allocator: std.mem.Allocator,
+    io: std.Io,
     logger: kube_zig.Logger,
     api: EphemeralEnvApi,
     env_name: []const u8,
@@ -575,7 +579,7 @@ fn updatePhase(
 
     // Build the "Ready" condition using the conditions helper.
     var ts_buf: [kube_zig.time.Precision.seconds.bufLen()]u8 = undefined;
-    const timestamp = kube_zig.time.bufNow(.seconds, &ts_buf);
+    const timestamp = kube_zig.time.bufNow(io, .seconds, &ts_buf);
 
     const new_conditions = try kube_zig.conditions.setCondition(
         Condition,
@@ -598,7 +602,7 @@ fn updatePhase(
         },
     };
 
-    const result = try api.applyStatus(env_name, status_body, .{
+    const result = try api.applyStatus(io, env_name, status_body, .{
         .field_manager = field_manager,
         .force = true,
     });
@@ -646,52 +650,56 @@ fn namespaceMapper(_: std.mem.Allocator, obj: *const k8s.CoreV1Namespace) ?kube_
 
 // Shutdown context
 const ShutdownCtx = struct {
+    io: std.Io,
     mgr: *kube_zig.ControllerManager,
     probes: *kube_zig.ProbeServer,
     logger: kube_zig.Logger,
 
     fn shutdown(self: *ShutdownCtx) void {
         self.logger.info("signal received, shutting down", &.{});
-        self.mgr.stop();
-        self.probes.stop();
+        self.mgr.stop(self.io);
+        self.probes.stop(self.io);
     }
 };
 
 // Main
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     // Allocator setup.
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
 
     // Client init via ProxyConfig with structured JSON logging.
-    const config = kube_zig.ProxyConfig.init();
-    var text_logger = kube_zig.TextStdoutLogger.init(.info);
+    const config = kube_zig.ProxyConfig.init(init.environ_map);
+    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
     const logger = text_logger.logger();
 
-    var client = try kube_zig.Client.init(allocator, config.base_url, .{ .logger = logger });
-    defer client.deinit();
+    var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = logger });
+    defer client.deinit(io);
 
     // Create the controller (cluster-scoped, namespace = null).
     var reconcile_ctx = ReconcileCtx{
         .allocator = allocator,
+        .io = io,
         .client = &client,
         .store = undefined, // Set after controller init.
         .recorder = kube_zig.EventRecorder.init(&client, "ephemeral-env-controller", "ephemeral-env-controller"),
         .logger = logger.withScope("ephemeral-env"),
     };
 
-    var ctrl = try kube_zig.Controller(EphemeralEnv).init(allocator, &client, client.context(), null, .{
+    var ctrl = try kube_zig.Controller(EphemeralEnv).init(allocator, io, &client, client.context(), null, .{
         .reconcile_fn = kube_zig.ReconcileFn.fromTypedCtx(ReconcileCtx, &reconcile_ctx, ReconcileCtx.reconcile),
         .logger = logger,
     });
-    defer ctrl.deinit();
+    defer ctrl.deinit(io);
 
     // Wire the store into the reconcile context.
     reconcile_ctx.store = ctrl.getStore();
 
     // Watch secondary: CoreV1Namespace (cluster-scoped) with label-based mapper.
-    try ctrl.watchSecondary(k8s.CoreV1Namespace, &client, null, .{
+    try ctrl.watchSecondary(io, k8s.CoreV1Namespace, &client, null, .{
         .map_fn = namespaceMapper,
     });
 
@@ -701,26 +709,27 @@ pub fn main() !void {
     try mgr.add(kube_zig.Runnable.fromController(EphemeralEnv, &ctrl));
 
     // Create ProbeServer with readiness + liveness checks.
-    var probes = try kube_zig.ProbeServer.init(allocator, .{ .port = 8080 });
-    defer probes.deinit();
+    var probes = try kube_zig.ProbeServer.init(allocator, io, .{ .port = 8080 });
+    defer probes.deinit(io);
     try probes.addReadinessCheck(mgr.healthCheck());
     try probes.addLivenessCheck(client.healthCheck());
-    try probes.start();
+    try probes.start(io);
 
     // Setup signal handling.
     var shutdown_ctx = ShutdownCtx{
+        .io = io,
         .mgr = &mgr,
         .probes = &probes,
         .logger = logger.withScope("ephemeral-env"),
     };
 
-    const sig_handle = try kube_zig.signal.setupShutdown(&.{
+    const sig_handle = try kube_zig.signal.setupShutdown(io, &.{
         kube_zig.signal.ShutdownCallback.fromTypedCtx(ShutdownCtx, &shutdown_ctx, ShutdownCtx.shutdown),
     });
 
     // Print startup banner.
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     defer w.flush() catch {};
 
@@ -732,7 +741,7 @@ pub fn main() !void {
     w.flush() catch {};
 
     // mgr.run() blocks until signal.
-    try mgr.run();
+    try mgr.run(io);
 
     // Join signal thread and cleanup.
     sig_handle.thread.join();

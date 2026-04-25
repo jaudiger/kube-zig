@@ -54,14 +54,15 @@ pub const LeaderElector = struct {
     client: *Client,
     ctx: Context,
     config: LeaderElectionConfig,
-    mutex: std.Thread.Mutex,
-    stop_cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    /// Wakeup epoch for the stop condition (allows timed waits).
+    stop_cond_epoch: std.atomic.Value(u32),
     state: std.atomic.Value(State),
     renew_thread: ?std.Thread,
     /// Heap-owned resourceVersion from the last observed Lease.
     observed_resource_version: ?[]const u8,
     /// Monotonic time of the last observed lease renewal.
-    observed_renew_time: ?std.time.Instant,
+    observed_renew_time: ?std.Io.Clock.Timestamp,
 
     pub const State = enum(u8) {
         idle,
@@ -90,8 +91,8 @@ pub const LeaderElector = struct {
             .client = client,
             .ctx = ctx,
             .config = cfg,
-            .mutex = .{},
-            .stop_cond = .{},
+            .mutex = .init,
+            .stop_cond_epoch = std.atomic.Value(u32).init(0),
             .state = std.atomic.Value(State).init(.idle),
             .renew_thread = null,
             .observed_resource_version = null,
@@ -110,9 +111,9 @@ pub const LeaderElector = struct {
     }
 
     /// Spawn the background election loop. Transitions from `idle` to `standby`.
-    pub fn start(self: *LeaderElector) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn start(self: *LeaderElector, io: std.Io) !void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         std.debug.assert(self.state.raw == .idle);
         self.config.logger.info("leader election starting", &.{
             LogField.string("identity", self.config.identity),
@@ -121,14 +122,14 @@ pub const LeaderElector = struct {
         });
         self.state.store(.standby, .release);
 
-        self.renew_thread = try std.Thread.spawn(.{}, run, .{self});
+        self.renew_thread = try std.Thread.spawn(.{}, run, .{ self, io });
     }
 
     /// Signal the election loop to stop and wait for the thread to exit.
-    pub fn stop(self: *LeaderElector) void {
+    pub fn stop(self: *LeaderElector, io: std.Io) void {
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             const s = self.state.raw;
             if (s == .idle or s == .stopped) return;
@@ -136,7 +137,8 @@ pub const LeaderElector = struct {
                 LogField.string("identity", self.config.identity),
             });
             self.state.store(.stopped, .release);
-            self.stop_cond.signal();
+            _ = self.stop_cond_epoch.fetchAdd(1, .release);
+            io.futexWake(u32, &self.stop_cond_epoch.raw, std.math.maxInt(u32));
         }
 
         if (self.renew_thread) |t| {
@@ -154,36 +156,36 @@ pub const LeaderElector = struct {
     /// Return a health check that reports healthy when this instance is the leader.
     pub fn healthCheck(self: *LeaderElector) HealthCheck {
         return HealthCheck.fromTypedCtx(LeaderElector, self, struct {
-            fn check(e: *LeaderElector) bool {
+            fn check(e: *LeaderElector, _: std.Io) bool {
                 return e.isLeader();
             }
         }.check);
     }
 
     // Background thread entry point
-    fn run(self: *LeaderElector) void {
-        if (!self.runAcquirePhase()) return;
-        self.runRenewPhase();
+    fn run(self: *LeaderElector, io: std.Io) void {
+        if (!self.runAcquirePhase(io)) return;
+        self.runRenewPhase(io);
     }
 
     /// Retry until we become the leader or are stopped.
     /// Returns `true` if leadership was acquired, `false` if stopped.
-    fn runAcquirePhase(self: *LeaderElector) bool {
+    fn runAcquirePhase(self: *LeaderElector, io: std.Io) bool {
         while (true) {
             {
-                self.mutex.lock();
-                defer self.mutex.unlock();
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
                 if (self.state.raw == .stopped) return false;
             }
 
             self.config.logger.debug("attempting to acquire leadership", &.{
                 LogField.string("identity", self.config.identity),
             });
-            const result = self.tryAcquireOrRenew();
+            const result = self.tryAcquireOrRenew(io);
             if (result == .acquired) {
                 {
-                    self.mutex.lock();
-                    defer self.mutex.unlock();
+                    self.mutex.lockUncancelable(io);
+                    defer self.mutex.unlock(io);
                     if (self.state.raw == .stopped) return false;
                     self.state.store(.leading, .release);
                 }
@@ -200,45 +202,30 @@ pub const LeaderElector = struct {
             }
 
             // Sleep for retry_period_s (interruptible).
-            {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-                if (self.state.raw == .stopped) return false;
-                const retry_ns: u64 = std.math.cast(u64, @as(i64, self.config.retry_period_s) * std.time.ns_per_s) orelse 2 * std.time.ns_per_s;
-                self.stop_cond.timedWait(&self.mutex, retry_ns) catch {};
-                if (self.state.raw == .stopped) return false;
-            }
+            const retry_ns: u64 = std.math.cast(u64, @as(i64, self.config.retry_period_s) * std.time.ns_per_s) orelse 2 * std.time.ns_per_s;
+            _ = self.interruptibleSleep(io, retry_ns);
+            if (self.state.raw == .stopped) return false;
         }
     }
 
     /// Keep renewing the lease until we lose leadership or are stopped.
-    fn runRenewPhase(self: *LeaderElector) void {
+    fn runRenewPhase(self: *LeaderElector, io: std.Io) void {
         while (true) {
-            {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-                if (self.state.raw == .stopped) return;
-            }
+            if (self.state.raw == .stopped) return;
 
             // Sleep for renew_interval_s (interruptible).
-            const stopped = blk: {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-                if (self.state.raw == .stopped) break :blk true;
-                const renew_ns: u64 = std.math.cast(u64, @as(i64, self.config.renew_interval_s) * std.time.ns_per_s) orelse 10 * std.time.ns_per_s;
-                self.stop_cond.timedWait(&self.mutex, renew_ns) catch {};
-                break :blk self.state.raw == .stopped;
-            };
-            if (stopped) {
+            const renew_ns: u64 = std.math.cast(u64, @as(i64, self.config.renew_interval_s) * std.time.ns_per_s) orelse 10 * std.time.ns_per_s;
+            const not_stopped = self.interruptibleSleep(io, renew_ns);
+            if (!not_stopped) {
                 self.config.metrics.is_leader.set(0.0);
-                self.releaseLease();
+                self.releaseLease(io);
                 self.config.logger.info("lease released on shutdown", &.{
                     LogField.string("identity", self.config.identity),
                 });
                 return;
             }
 
-            const result = self.tryAcquireOrRenew();
+            const result = self.tryAcquireOrRenew(io);
             if (result == .renewed) {
                 self.config.logger.debug("renewed lease", &.{
                     LogField.string("identity", self.config.identity),
@@ -248,8 +235,8 @@ pub const LeaderElector = struct {
             }
 
             // Check if renewal deadline exceeded.
-            if (self.renewalDeadlineExceeded()) {
-                self.transitionToStandby();
+            if (self.renewalDeadlineExceeded(io)) {
+                self.transitionToStandby(io);
                 return;
             }
 
@@ -260,14 +247,14 @@ pub const LeaderElector = struct {
                         LogField.string("lease_name", self.config.lease_name),
                     });
                 }
-                self.transitionToStandby();
+                self.transitionToStandby(io);
                 return;
             }
         }
     }
 
     /// Transition out of leadership: update metrics, set state to standby, notify callback.
-    fn transitionToStandby(self: *LeaderElector) void {
+    fn transitionToStandby(self: *LeaderElector, io: std.Io) void {
         self.config.logger.warn("lost leadership", &.{
             LogField.string("identity", self.config.identity),
             LogField.string("lease_name", self.config.lease_name),
@@ -276,15 +263,15 @@ pub const LeaderElector = struct {
         self.config.metrics.is_leader.set(0.0);
         self.config.metrics.transitions_total.inc();
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
             if (self.state.raw != .stopped) self.state.store(.standby, .release);
         }
         self.config.on_stopped_leading(self.config.callback_ctx);
     }
 
     // Core algorithm
-    fn tryAcquireOrRenew(self: *LeaderElector) LeaseResult {
+    fn tryAcquireOrRenew(self: *LeaderElector, io: std.Io) LeaseResult {
         const Lease = types.CoordinationV1Lease;
         const LeaseApi = Api_mod.Api(Lease);
 
@@ -292,7 +279,7 @@ pub const LeaderElector = struct {
 
         // Format timestamp once for all lease operations in this cycle.
         var ts_buf: [27]u8 = undefined;
-        const now_str = time_mod.bufNow(.micros, &ts_buf);
+        const now_str = time_mod.bufNow(io, .micros, &ts_buf);
 
         // GET the existing lease.
         const get_result = api.get(self.config.lease_name) catch |err| {
@@ -320,7 +307,7 @@ pub const LeaderElector = struct {
 
                 if (is_us) {
                     // We hold it, so renew.
-                    return self.updateLease(rv, now_str);
+                    return self.updateLease(io, rv, now_str);
                 }
 
                 // Someone else holds it. Check if expired.
@@ -329,8 +316,8 @@ pub const LeaderElector = struct {
                 if (holder) |h| if (h.len > 0) {
                     // Check expiry based on our observed renewal time.
                     if (self.observed_renew_time) |obs| {
-                        const now = std.time.Instant.now() catch return .lost;
-                        const elapsed_ns = now.since(obs);
+                        const elapsed_i: i96 = obs.untilNow(io).raw.nanoseconds;
+                        const elapsed_ns: u64 = if (elapsed_i < 0) 0 else @intCast(elapsed_i);
                         const lease_duration_ns: u64 = std.math.cast(u64, @as(i64, lease_duration_s) * std.time.ns_per_s) orelse 0;
                         if (elapsed_ns < lease_duration_ns) {
                             // Not expired yet.
@@ -338,26 +325,26 @@ pub const LeaderElector = struct {
                         }
                     } else {
                         // First observation; record it and report lost.
-                        self.observed_renew_time = std.time.Instant.now() catch null;
+                        self.observed_renew_time = .now(io, .awake);
                         return .lost;
                     }
                 };
 
                 // Expired or no holder; take over.
-                return self.updateLeaseTakeover(lease.spec, rv, now_str);
+                return self.updateLeaseTakeover(io, lease.spec, rv, now_str);
             },
             .api_error => |api_err| {
                 defer api_err.deinit();
                 if (api_err.status == .not_found) {
                     // 404: create a new lease.
-                    return self.createLease(now_str);
+                    return self.createLease(io, now_str);
                 }
                 return .err;
             },
         }
     }
 
-    fn createLease(self: *LeaderElector, now_str: []const u8) LeaseResult {
+    fn createLease(self: *LeaderElector, io: std.Io, now_str: []const u8) LeaseResult {
         const Lease = types.CoordinationV1Lease;
         const LeaseApi = Api_mod.Api(Lease);
 
@@ -393,7 +380,7 @@ pub const LeaderElector = struct {
                 if (rv) |new_rv| {
                     self.setObservedResourceVersion(new_rv);
                 }
-                self.observed_renew_time = std.time.Instant.now() catch null;
+                self.observed_renew_time = .now(io, .awake);
                 return .acquired;
             },
             .api_error => |api_err| {
@@ -405,6 +392,7 @@ pub const LeaderElector = struct {
 
     fn updateLease(
         self: *LeaderElector,
+        io: std.Io,
         rv: ?[]const u8,
         now_str: []const u8,
     ) LeaseResult {
@@ -442,7 +430,7 @@ pub const LeaderElector = struct {
                 if (new_rv) |nrv| {
                     self.setObservedResourceVersion(nrv);
                 }
-                self.observed_renew_time = std.time.Instant.now() catch null;
+                self.observed_renew_time = .now(io, .awake);
                 return .renewed;
             },
             .api_error => |api_err| {
@@ -454,6 +442,7 @@ pub const LeaderElector = struct {
 
     fn updateLeaseTakeover(
         self: *LeaderElector,
+        io: std.Io,
         existing_spec: ?types.CoordinationV1LeaseSpec,
         rv: ?[]const u8,
         now_str: []const u8,
@@ -496,7 +485,7 @@ pub const LeaderElector = struct {
                 if (new_rv) |nrv| {
                     self.setObservedResourceVersion(nrv);
                 }
-                self.observed_renew_time = std.time.Instant.now() catch null;
+                self.observed_renew_time = .now(io, .awake);
                 return .acquired;
             },
             .api_error => |api_err| {
@@ -508,7 +497,8 @@ pub const LeaderElector = struct {
 
     /// Best-effort lease release on graceful shutdown.
     /// Clears holderIdentity so another replica can acquire immediately.
-    fn releaseLease(self: *LeaderElector) void {
+    fn releaseLease(self: *LeaderElector, io: std.Io) void {
+        _ = io;
         const Lease = types.CoordinationV1Lease;
         const LeaseApi = Api_mod.Api(Lease);
 
@@ -562,22 +552,24 @@ pub const LeaderElector = struct {
     }
 
     /// Returns `true` when we haven't successfully renewed within `lease_duration_s`.
-    fn renewalDeadlineExceeded(self: *LeaderElector) bool {
+    fn renewalDeadlineExceeded(self: *LeaderElector, io: std.Io) bool {
         const obs = self.observed_renew_time orelse return true;
-        const now = std.time.Instant.now() catch return true;
-        const elapsed_ns = now.since(obs);
+        const elapsed_i: i96 = obs.untilNow(io).raw.nanoseconds;
+        if (elapsed_i < 0) return true;
+        const elapsed_ns: u64 = @intCast(elapsed_i);
         const deadline_ns: u64 = std.math.cast(u64, @as(i64, self.config.lease_duration_s) * std.time.ns_per_s) orelse return true;
         return elapsed_ns >= deadline_ns;
     }
 
-    /// Perform an interruptible sleep using the stop condition variable.
+    /// Perform an interruptible sleep using the stop condition.
     /// Returns `true` if the sleep completed without interruption,
     /// `false` if `stop()` was signalled.
-    pub fn interruptibleSleep(self: *LeaderElector, ns: u64) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn interruptibleSleep(self: *LeaderElector, io: std.Io, ns: u64) bool {
         if (self.state.raw == .stopped) return false;
-        self.stop_cond.timedWait(&self.mutex, ns) catch {};
+        const observed = self.stop_cond_epoch.load(.acquire);
+        if (self.state.raw == .stopped) return false;
+        const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .{ .nanoseconds = @intCast(ns) } } };
+        io.futexWaitTimeout(u32, &self.stop_cond_epoch.raw, observed, timeout) catch {};
         return self.state.raw != .stopped;
     }
 };
@@ -619,7 +611,7 @@ test "renewalDeadlineExceeded: true when no observation" {
 
     // Assert
     // No observation yet, so deadline is exceeded.
-    try testing.expect(elector.renewalDeadlineExceeded());
+    try testing.expect(elector.renewalDeadlineExceeded(std.testing.io));
 }
 
 test "renewalDeadlineExceeded: false within duration" {
@@ -639,9 +631,9 @@ test "renewalDeadlineExceeded: false within duration" {
     defer elector.deinit();
 
     // Assert
-    elector.observed_renew_time = std.time.Instant.now() catch unreachable;
+    elector.observed_renew_time = .now(std.testing.io, .awake);
 
-    try testing.expect(!elector.renewalDeadlineExceeded());
+    try testing.expect(!elector.renewalDeadlineExceeded(std.testing.io));
 }
 
 test "renewalDeadlineExceeded: true past duration" {
@@ -663,10 +655,10 @@ test "renewalDeadlineExceeded: true past duration" {
     // Assert
     // Set observed time to now, then set duration to 0 so any elapsed
     // time exceeds the deadline.
-    elector.observed_renew_time = std.time.Instant.now() catch unreachable;
+    elector.observed_renew_time = .now(std.testing.io, .awake);
     elector.config.lease_duration_s = 0;
 
-    try testing.expect(elector.renewalDeadlineExceeded());
+    try testing.expect(elector.renewalDeadlineExceeded(std.testing.io));
 }
 
 test "interruptibleSleep wakes on stop" {
@@ -689,22 +681,23 @@ test "interruptibleSleep wakes on stop" {
     elector.state.raw = .standby;
 
     const sleeper = try std.Thread.spawn(.{}, struct {
-        fn run(e: *LeaderElector) void {
+        fn run(io: std.Io, e: *LeaderElector) void {
             // Sleep for a very long time; should be woken early.
-            const completed = e.interruptibleSleep(60 * std.time.ns_per_s);
+            const completed = e.interruptibleSleep(io, 60 * std.time.ns_per_s);
             _ = completed;
         }
-    }.run, .{&elector});
+    }.run, .{ std.testing.io, &elector });
 
     // Give the thread time to enter the wait.
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // Signal stop.
     {
-        elector.mutex.lock();
-        defer elector.mutex.unlock();
+        elector.mutex.lockUncancelable(std.testing.io);
+        defer elector.mutex.unlock(std.testing.io);
         elector.state.raw = .stopped;
-        elector.stop_cond.signal();
+        _ = elector.stop_cond_epoch.fetchAdd(1, .release);
+        std.testing.io.futexWake(u32, &elector.stop_cond_epoch.raw, std.math.maxInt(u32));
     }
 
     sleeper.join();
@@ -730,7 +723,7 @@ test "stop without start is safe" {
 
     // Assert
     // Should not crash.
-    elector.stop();
+    elector.stop(std.testing.io);
 
     try testing.expectEqual(LeaderElector.State.idle, elector.state.load(.acquire));
 }
@@ -782,10 +775,10 @@ test "healthCheck: reflects isLeader state" {
     const check = elector.healthCheck();
 
     // Act / Assert
-    try testing.expect(!check.check_fn(check.ctx));
+    try testing.expect(!check.check_fn(check.ctx, std.testing.io));
 
     elector.state.raw = .leading;
-    try testing.expect(check.check_fn(check.ctx));
+    try testing.expect(check.check_fn(check.ctx, std.testing.io));
 }
 
 test "setObservedResourceVersion: OOM on dupe does not corrupt state" {

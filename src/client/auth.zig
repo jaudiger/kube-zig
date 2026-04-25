@@ -19,8 +19,8 @@ pub const AuthProvider = struct {
     token_path: ?[]const u8,
     token_buf: ?[]const u8,
     bearer_header: ?[]const u8,
-    token_last_read: ?std.time.Instant,
-    mu: std.Thread.Mutex,
+    token_last_read: ?std.Io.Clock.Timestamp,
+    mu: std.Io.Mutex,
     last_unauthorized: std.atomic.Value(bool),
     logger: Logger,
 
@@ -35,7 +35,7 @@ pub const AuthProvider = struct {
             .token_buf = null,
             .bearer_header = null,
             .token_last_read = null,
-            .mu = .{},
+            .mu = .init,
             .last_unauthorized = std.atomic.Value(bool).init(false),
             .logger = logger,
         };
@@ -75,17 +75,17 @@ pub const AuthProvider = struct {
     /// free it with `self.allocator`.
     /// Thread-safe: acquires `mu` so that concurrent callers
     /// cannot race on token state.
-    pub fn getAuthHeader(self: *AuthProvider, force: bool) Error!?[]const u8 {
-        self.mu.lock();
-        defer self.mu.unlock();
-        try self.readToken(force);
+    pub fn getAuthHeader(self: *AuthProvider, io: std.Io, force: bool) Error!?[]const u8 {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+        try self.readToken(io, force);
         if (self.bearer_header) |bh| {
             return self.allocator.dupe(u8, bh) catch return error.OutOfMemory;
         }
         return null;
     }
 
-    fn readToken(self: *AuthProvider, force: bool) Error!void {
+    fn readToken(self: *AuthProvider, io: std.Io, force: bool) Error!void {
         const path = self.token_path orelse return;
 
         if (force) {
@@ -94,22 +94,21 @@ pub const AuthProvider = struct {
 
         if (!force) {
             if (self.token_last_read) |last| {
-                if (std.time.Instant.now() catch null) |now| {
-                    if (now.since(last) < 60 * std.time.ns_per_s) return;
-                }
+                const elapsed_ns: i96 = last.untilNow(io).raw.nanoseconds;
+                if (elapsed_ns >= 0 and elapsed_ns < 60 * std.time.ns_per_s) return;
             }
         }
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch {
+        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
             self.logger.err("failed to read service account token", &.{
                 LogField.string("token_path", path),
                 LogField.string("error", "open failed"),
             });
             return error.HttpRequestFailed;
         };
-        defer file.close();
+        defer file.close(io);
 
-        const new_token = file.readToEndAlloc(self.allocator, 1024 * 1024) catch |err| switch (err) {
+        const new_token = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 self.logger.err("failed to read service account token", &.{
@@ -119,7 +118,7 @@ pub const AuthProvider = struct {
                 return error.HttpRequestFailed;
             },
         };
-        self.token_last_read = std.time.Instant.now() catch null;
+        self.token_last_read = .now(io, .awake);
 
         if (self.token_buf) |old| {
             if (std.mem.eql(u8, old, new_token)) {
@@ -140,28 +139,29 @@ pub const AuthProvider = struct {
 
 test "readToken caches within 60s window" {
     // Arrange
+    const io = std.testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    tmp.dir.writeFile(.{ .sub_path = "token", .data = "test-token-v1" }) catch unreachable;
+    tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v1" }) catch unreachable;
 
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "token");
+    const path = try tmp.dir.realPathFileAlloc(io, testing.allocator, "token");
     defer testing.allocator.free(path);
 
     var auth = AuthProvider.init(testing.allocator, path, Logger.noop);
     defer auth.deinit();
 
     // Act: first call reads the token from disk.
-    const h1 = (try auth.getAuthHeader(false)).?;
+    const h1 = (try auth.getAuthHeader(io, false)).?;
     defer testing.allocator.free(h1);
 
     try testing.expect(auth.token_last_read != null);
 
     // Overwrite the file on disk.
-    tmp.dir.writeFile(.{ .sub_path = "token", .data = "test-token-v2" }) catch unreachable;
+    tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v2" }) catch unreachable;
 
     // Act: second call within the cache window returns the cached token.
-    const h2 = (try auth.getAuthHeader(false)).?;
+    const h2 = (try auth.getAuthHeader(io, false)).?;
     defer testing.allocator.free(h2);
 
     // Assert
@@ -171,25 +171,26 @@ test "readToken caches within 60s window" {
 
 test "force refresh bypasses cache" {
     // Arrange
+    const io = std.testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    tmp.dir.writeFile(.{ .sub_path = "token", .data = "test-token-v1" }) catch unreachable;
+    tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v1" }) catch unreachable;
 
-    const path = try tmp.dir.realpathAlloc(testing.allocator, "token");
+    const path = try tmp.dir.realPathFileAlloc(io, testing.allocator, "token");
     defer testing.allocator.free(path);
 
     var auth = AuthProvider.init(testing.allocator, path, Logger.noop);
     defer auth.deinit();
 
-    const h1 = (try auth.getAuthHeader(false)).?;
+    const h1 = (try auth.getAuthHeader(io, false)).?;
     defer testing.allocator.free(h1);
 
     // Overwrite the file on disk.
-    tmp.dir.writeFile(.{ .sub_path = "token", .data = "test-token-v2" }) catch unreachable;
+    tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v2" }) catch unreachable;
 
     // Act: force refresh reads the new token.
-    const h2 = (try auth.getAuthHeader(true)).?;
+    const h2 = (try auth.getAuthHeader(io, true)).?;
     defer testing.allocator.free(h2);
 
     // Assert

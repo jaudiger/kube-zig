@@ -230,6 +230,7 @@ pub const WithFieldsLogger = struct {
 ///
 /// Thread-safe: each line is built in a stack buffer and written atomically.
 pub const JsonStdoutLogger = struct {
+    io: std.Io,
     min_level: Level,
 
     const vtable_impl: Logger.VTable = .{
@@ -237,8 +238,8 @@ pub const JsonStdoutLogger = struct {
     };
 
     /// Create a new JSON stdout logger that filters messages below `min_level`.
-    pub fn init(min_level: Level) JsonStdoutLogger {
-        return .{ .min_level = min_level };
+    pub fn init(io: std.Io, min_level: Level) JsonStdoutLogger {
+        return .{ .io = io, .min_level = min_level };
     }
 
     /// Obtain a `Logger` backed by this instance.
@@ -255,22 +256,21 @@ pub const JsonStdoutLogger = struct {
         if (level.order() < self.min_level.order()) return;
 
         var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        var w: std.Io.Writer = .fixed(&buf);
 
-        writeJsonLine(w, level, scope, message, fields) catch return;
+        writeJsonLine(self.io, &w, level, scope, message, fields) catch return;
 
-        const out = fbs.getWritten();
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll(out) catch {};
+        const out = w.buffered();
+        const stdout = std.Io.File.stdout();
+        stdout.writeStreamingAll(self.io, out) catch {};
     }
 };
 
 /// Write a single JSON log line to the given writer. Shared between
 /// JsonStdoutLogger and the test writer logger.
-fn writeJsonLine(w: anytype, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
+fn writeJsonLine(io: std.Io, w: anytype, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
     try w.writeAll("{\"ts\":\"");
-    try time_mod.writeNow(.nanos, w);
+    try time_mod.writeNow(io, .nanos, w);
     try w.writeByte('"');
     try w.writeAll(",\"level\":\"");
     try w.writeAll(level.asText());
@@ -329,6 +329,7 @@ fn writeJsonString(w: anytype, s: []const u8) !void {
 ///
 /// Thread-safe: each line is built in a stack buffer and written atomically.
 pub const TextStdoutLogger = struct {
+    io: std.Io,
     min_level: Level,
 
     const vtable_impl: Logger.VTable = .{
@@ -336,8 +337,8 @@ pub const TextStdoutLogger = struct {
     };
 
     /// Create a new plain-text stdout logger that filters messages below `min_level`.
-    pub fn init(min_level: Level) TextStdoutLogger {
-        return .{ .min_level = min_level };
+    pub fn init(io: std.Io, min_level: Level) TextStdoutLogger {
+        return .{ .io = io, .min_level = min_level };
     }
 
     /// Obtain a `Logger` backed by this instance.
@@ -354,14 +355,13 @@ pub const TextStdoutLogger = struct {
         if (level.order() < self.min_level.order()) return;
 
         var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        const w = fbs.writer();
+        var w: std.Io.Writer = .fixed(&buf);
 
-        writeTextLine(w, level, scope, message, fields) catch return;
+        writeTextLine(self.io, &w, level, scope, message, fields) catch return;
 
-        const out = fbs.getWritten();
-        const stdout = std.fs.File.stdout();
-        stdout.writeAll(out) catch {};
+        const out = w.buffered();
+        const stdout = std.Io.File.stdout();
+        stdout.writeStreamingAll(self.io, out) catch {};
     }
 };
 
@@ -385,8 +385,8 @@ fn writeEscapedText(w: anytype, s: []const u8) !void {
 }
 
 /// Write a single plain-text log line to the given writer.
-fn writeTextLine(w: anytype, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
-    try time_mod.writeNow(.nanos, w);
+fn writeTextLine(io: std.Io, w: anytype, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
+    try time_mod.writeNow(io, .nanos, w);
     try w.writeByte(' ');
     try w.writeAll(level.asTextUpper());
 
@@ -487,16 +487,18 @@ test "Field helpers: construct correct values" {
 const TestLogger = struct {
     buf: std.ArrayList(u8),
     allocator: std.mem.Allocator,
+    io: std.Io,
     min_level: Level,
 
     const vtable_impl: Logger.VTable = .{
         .log = logImpl,
     };
 
-    fn init(allocator: std.mem.Allocator, min_level: Level) TestLogger {
+    fn init(allocator: std.mem.Allocator, io: std.Io, min_level: Level) TestLogger {
         return .{
             .buf = .empty,
             .allocator = allocator,
+            .io = io,
             .min_level = min_level,
         };
     }
@@ -516,7 +518,10 @@ const TestLogger = struct {
     fn logImpl(ptr: ?*anyopaque, level: Level, scope: []const u8, message: []const u8, fields: []const Field) void {
         const self: *TestLogger = @ptrCast(@alignCast(ptr.?));
         if (level.order() < self.min_level.order()) return;
-        writeJsonLine(self.buf.writer(self.allocator), level, scope, message, fields) catch return;
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        writeJsonLine(self.io, &aw.writer, level, scope, message, fields) catch return;
+        self.buf.appendSlice(self.allocator, aw.written()) catch return;
     }
 
     fn output(self: *const TestLogger) []const u8 {
@@ -527,7 +532,7 @@ const TestLogger = struct {
 test "JsonStdoutLogger: respects min level filtering" {
     // Arrange
     // Use TestLogger to validate level filtering logic (same as JsonStdoutLogger).
-    var tl = TestLogger.init(testing.allocator, .info);
+    var tl = TestLogger.init(testing.allocator, testing.io, .info);
     defer tl.deinit();
     const l = tl.getLogger();
 
@@ -542,7 +547,7 @@ test "JsonStdoutLogger: respects min level filtering" {
 
 test "JsonStdoutLogger: JSON output parses correctly and includes all fields" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .debug);
+    var tl = TestLogger.init(testing.allocator, testing.io, .debug);
     defer tl.deinit();
     const l = tl.getLogger();
 
@@ -581,7 +586,7 @@ test "JsonStdoutLogger: JSON output parses correctly and includes all fields" {
 
 test "FieldValue union: each variant serializes correctly in JSON" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .debug);
+    var tl = TestLogger.init(testing.allocator, testing.io, .debug);
     defer tl.deinit();
     const l = tl.getLogger();
 
@@ -612,7 +617,7 @@ test "FieldValue union: each variant serializes correctly in JSON" {
 
 test "withFields: base fields appear in every log call alongside call-site fields" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .debug);
+    var tl = TestLogger.init(testing.allocator, testing.io, .debug);
     defer tl.deinit();
     const l = tl.getLogger();
 
@@ -648,18 +653,17 @@ test "withFields: base fields appear in every log call alongside call-site field
 test "writeJsonString: escapes special characters" {
     // Arrange
     var buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act / Assert
-    try writeJsonString(w, "hello \"world\"\nline2\ttab\\back");
-    const result = fbs.getWritten();
+    try writeJsonString(&w, "hello \"world\"\nline2\ttab\\back");
+    const result = w.buffered();
     try testing.expectEqualStrings("\"hello \\\"world\\\"\\nline2\\ttab\\\\back\"", result);
 }
 
 test "JsonStdoutLogger: init and logger method" {
     // Act / Assert
-    var jsl = JsonStdoutLogger.init(.warn);
+    var jsl = JsonStdoutLogger.init(testing.io, .warn);
     const l = jsl.logger();
     // Verify the vtable-based Logger is correctly wired.
     try testing.expect(l.ptr != null);
@@ -675,7 +679,7 @@ test "JsonStdoutLogger: init and logger method" {
 
 test "withScope: scope appears in JSON output" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .debug);
+    var tl = TestLogger.init(testing.allocator, testing.io, .debug);
     defer tl.deinit();
     const l = tl.getLogger().withScope("reflector");
 
@@ -693,7 +697,7 @@ test "withScope: scope appears in JSON output" {
 
 test "withScope: empty scope omits scope key" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .debug);
+    var tl = TestLogger.init(testing.allocator, testing.io, .debug);
     defer tl.deinit();
     const l = tl.getLogger();
 
@@ -711,7 +715,7 @@ test "withScope: empty scope omits scope key" {
 
 test "withScope: preserved through withFields" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .debug);
+    var tl = TestLogger.init(testing.allocator, testing.io, .debug);
     defer tl.deinit();
     const scoped = tl.getLogger().withScope("controller");
 
@@ -735,7 +739,7 @@ test "withScope: preserved through withFields" {
 
 test "TextStdoutLogger: init and logger method" {
     // Act / Assert
-    var tsl = TextStdoutLogger.init(.info);
+    var tsl = TextStdoutLogger.init(testing.io, .info);
     const l = tsl.logger();
     try testing.expect(l.ptr != null);
     try testing.expect(l.vtable == &TextStdoutLogger.vtable_impl);
@@ -745,12 +749,11 @@ test "TextStdoutLogger: init and logger method" {
 test "writeTextLine: formats plain text correctly" {
     // Arrange
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act / Assert
-    try writeTextLine(w, .info, "", "hello world", &.{});
-    const output = fbs.getWritten();
+    try writeTextLine(std.testing.io, &w, .info, "", "hello world", &.{});
+    const output = w.buffered();
     // 30-byte RFC 3339 timestamp + space prefix.
     try testing.expect(output.len >= 31);
     try testing.expect(output[30] == ' ');
@@ -762,12 +765,11 @@ test "writeTextLine: formats plain text correctly" {
 test "writeTextLine: includes scope" {
     // Arrange
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act / Assert
-    try writeTextLine(w, .warn, "reflector", "watch ended", &.{});
-    const output = fbs.getWritten();
+    try writeTextLine(std.testing.io, &w, .warn, "reflector", "watch ended", &.{});
+    const output = w.buffered();
     try testing.expect(output.len >= 31);
     try testing.expectEqualStrings("WARN reflector \"watch ended\"\n", output[31..]);
 }
@@ -775,15 +777,14 @@ test "writeTextLine: includes scope" {
 test "writeTextLine: includes fields" {
     // Arrange
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act / Assert
-    try writeTextLine(w, .info, "informer", "list completed", &.{
+    try writeTextLine(std.testing.io, &w, .info, "informer", "list completed", &.{
         Field.string("resource", "pods"),
         Field.uint("count", 5),
     });
-    const output = fbs.getWritten();
+    const output = w.buffered();
     try testing.expect(output.len >= 31);
     try testing.expectEqualStrings("INFO informer \"list completed\" resource=pods count=5\n", output[31..]);
 }
@@ -791,35 +792,33 @@ test "writeTextLine: includes fields" {
 test "writeEscapedText: escapes newlines and control characters" {
     // Arrange
     var buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act
-    try writeEscapedText(w, "hello\nworld\r\ttab\x01end");
+    try writeEscapedText(&w, "hello\nworld\r\ttab\x01end");
 
     // Assert
-    try testing.expectEqualStrings("hello\\nworld\\r\\ttab\\x01end", fbs.getWritten());
+    try testing.expectEqualStrings("hello\\nworld\\r\\ttab\\x01end", w.buffered());
 }
 
 test "writeTextLine: escapes control characters in string field values" {
     // Arrange
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act
-    try writeTextLine(w, .info, "", "msg", &.{
+    try writeTextLine(std.testing.io, &w, .info, "", "msg", &.{
         Field.string("val", "line1\nline2"),
     });
 
     // Assert
-    const output = fbs.getWritten();
+    const output = w.buffered();
     try testing.expectEqualStrings("INFO \"msg\" val=line1\\nline2\n", output[31..]);
 }
 
 test "min_level: early level check skips vtable dispatch" {
     // Arrange
-    var tl = TestLogger.init(testing.allocator, .warn);
+    var tl = TestLogger.init(testing.allocator, testing.io, .warn);
     defer tl.deinit();
     const l = tl.getLogger();
 

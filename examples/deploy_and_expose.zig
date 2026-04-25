@@ -14,19 +14,21 @@ const replicas: i32 = 2;
 const DeployApi = kube_zig.Api(k8s.AppsV1Deployment);
 const ServiceApi = kube_zig.Api(k8s.CoreV1Service);
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
 
-    const config = kube_zig.ProxyConfig.init();
-    var text_logger = kube_zig.TextStdoutLogger.init(.info);
+    const config = kube_zig.ProxyConfig.init(init.environ_map);
+    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
 
-    var client = try kube_zig.Client.init(allocator, config.base_url, .{ .logger = text_logger.logger() });
-    defer client.deinit();
+    var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = text_logger.logger() });
+    defer client.deinit(io);
 
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     defer w.flush() catch {};
 
@@ -49,7 +51,7 @@ pub fn main() !void {
     // 1. Apply the Deployment (idempotent create-or-update)
     try w.print("-- Applying Deployment --\n", .{});
 
-    const dep_result = deployments.apply(app_name, .{
+    const dep_result = deployments.apply(io, app_name, .{
         .metadata = .{
             .name = app_name,
             .namespace = namespace,
@@ -85,7 +87,7 @@ pub fn main() !void {
     // 2. Apply the Service (idempotent create-or-update)
     try w.print("-- Applying Service --\n", .{});
 
-    const svc_result = services.apply(app_name, .{
+    const svc_result = services.apply(io, app_name, .{
         .metadata = .{
             .name = app_name,
             .namespace = namespace,
@@ -103,12 +105,12 @@ pub fn main() !void {
         },
     }, .{ .field_manager = "deploy-and-expose-example", .force = true }) catch |err| {
         try w.print("  Failed to apply service: {}\n", .{err});
-        deleteResource(DeployApi, deployments, "Deployment", w);
+        deleteResource(DeployApi, deployments, io, "Deployment", w);
         return;
     };
     const svc_parsed = svc_result.value() catch |err| {
         try w.print("  Failed to apply service: {}\n", .{err});
-        deleteResource(DeployApi, deployments, "Deployment", w);
+        deleteResource(DeployApi, deployments, io, "Deployment", w);
         return;
     };
     defer svc_parsed.deinit();
@@ -120,14 +122,14 @@ pub fn main() !void {
     // 3. Verify: fetch the deployment and service back
     try w.print("-- Verifying resources --\n", .{});
 
-    const dep_get_result = deployments.get(app_name) catch |err| {
+    const dep_get_result = deployments.get(io, app_name) catch |err| {
         try w.print("  Failed to get deployment: {}\n", .{err});
-        cleanupAll(deployments, services, w);
+        cleanupAll(deployments, services, io, w);
         return;
     };
     const dep_get = dep_get_result.value() catch |err| {
         try w.print("  Failed to get deployment: {}\n", .{err});
-        cleanupAll(deployments, services, w);
+        cleanupAll(deployments, services, io, w);
         return;
     };
     defer dep_get.deinit();
@@ -136,14 +138,14 @@ pub fn main() !void {
     const ready_replicas = if (dep_get.value.status) |s| (s.readyReplicas orelse 0) else 0;
     try w.print("  Deployment {s}: {d}/{d} replicas ready\n", .{ app_name, ready_replicas, desired });
 
-    const svc_get_result = services.get(app_name) catch |err| {
+    const svc_get_result = services.get(io, app_name) catch |err| {
         try w.print("  Failed to get service: {}\n", .{err});
-        cleanupAll(deployments, services, w);
+        cleanupAll(deployments, services, io, w);
         return;
     };
     const svc_get = svc_get_result.value() catch |err| {
         try w.print("  Failed to get service: {}\n", .{err});
-        cleanupAll(deployments, services, w);
+        cleanupAll(deployments, services, io, w);
         return;
     };
     defer svc_get.deinit();
@@ -166,15 +168,15 @@ pub fn main() !void {
     try w.print("\n  Access inside cluster: http://{s}:{d}\n\n", .{ svc_ip, service_port });
 
     // 4. Clean up
-    cleanupAll(deployments, services, w);
+    cleanupAll(deployments, services, io, w);
 
     try w.print("Done.\n", .{});
 }
 
 /// Generic cleanup: delete a named resource through any Api(T) instance.
-fn deleteResource(comptime ApiT: type, api: ApiT, comptime label: []const u8, w: *std.Io.Writer) void {
+fn deleteResource(comptime ApiT: type, api: ApiT, io: std.Io, comptime label: []const u8, w: *std.Io.Writer) void {
     w.print("-- Deleting " ++ label ++ " {s} --\n", .{app_name}) catch return;
-    const result = api.delete(app_name, .{}) catch |err| {
+    const result = api.delete(io, app_name, .{}) catch |err| {
         w.print("  Failed to delete " ++ label ++ ": {}\n", .{err}) catch {};
         return;
     };
@@ -182,7 +184,7 @@ fn deleteResource(comptime ApiT: type, api: ApiT, comptime label: []const u8, w:
     w.print("  Deleted.\n", .{}) catch {};
 }
 
-fn cleanupAll(deployments: DeployApi, services: ServiceApi, w: *std.Io.Writer) void {
-    deleteResource(DeployApi, deployments, "Deployment", w);
-    deleteResource(ServiceApi, services, "Service", w);
+fn cleanupAll(deployments: DeployApi, services: ServiceApi, io: std.Io, w: *std.Io.Writer) void {
+    deleteResource(DeployApi, deployments, io, "Deployment", w);
+    deleteResource(ServiceApi, services, io, "Service", w);
 }

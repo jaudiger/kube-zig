@@ -125,62 +125,62 @@ pub fn Api(comptime T: type) type {
         }
 
         /// List all resources in the configured namespace, or cluster-wide for cluster-scoped resources.
-        pub fn list(self: @This(), opts: ThisModule.ListOptions) !TypedResult(std.json.Parsed(ListT)) {
+        pub fn list(self: @This(), io: std.Io, opts: ThisModule.ListOptions) !TypedResult(std.json.Parsed(ListT)) {
             const path = try self.pathBuilder().listPath(opts);
             defer self.client.allocator.free(path);
-            return self.client.get(ListT, path, self.ctx);
+            return self.client.get(io, ListT, path, self.ctx);
         }
 
         /// List all resources across all namespaces (cluster-wide).
         /// Only available for namespaced resources; cluster-scoped resources
         /// are already cluster-wide, use `list()` instead.
-        pub fn listAll(self: @This(), opts: ThisModule.ListOptions) !TypedResult(std.json.Parsed(ListT)) {
+        pub fn listAll(self: @This(), io: std.Io, opts: ThisModule.ListOptions) !TypedResult(std.json.Parsed(ListT)) {
             if (!meta.namespaced) @compileError("listAll is only available for namespaced resources; use list() instead");
             const path = try self.pathBuilder().listAllPath(opts);
             defer self.client.allocator.free(path);
-            return self.client.get(ListT, path, self.ctx);
+            return self.client.get(io, ListT, path, self.ctx);
         }
 
         /// Watch for changes to resources in the configured namespace.
         /// Return a `WatchStream(T)` iterator that yields typed events.
         /// The caller must call `close()` on the returned stream when done.
-        pub fn watch(self: @This(), opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
+        pub fn watch(self: @This(), io: std.Io, opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
             const path = try self.pathBuilder().watchPath(opts);
             // Safe to free path after init: WatchStream.init() calls client.watchStream()
             // which copies the path into a URI via buildUri() and opens the HTTP request
             // synchronously. The path slice is not retained by WatchStream.
             defer self.client.allocator.free(path);
-            return watch_mod.WatchStream(T).init(self.client, self.ctx, path, opts.max_line_size);
+            return watch_mod.WatchStream(T).init(self.client, io, self.ctx, path, opts.max_line_size);
         }
 
         /// Watch for changes to resources across all namespaces.
         /// Only available for namespaced resources; cluster-scoped resources
         /// are already cluster-wide, use `watch()` instead.
-        pub fn watchAll(self: @This(), opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
+        pub fn watchAll(self: @This(), io: std.Io, opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
             if (!meta.namespaced) @compileError("watchAll is only available for namespaced resources; use watch() instead");
             const path = try self.pathBuilder().watchAllPath(opts);
             // Safe to free path after init: see comment in watch() above.
             defer self.client.allocator.free(path);
-            return watch_mod.WatchStream(T).init(self.client, self.ctx, path, opts.max_line_size);
+            return watch_mod.WatchStream(T).init(self.client, io, self.ctx, path, opts.max_line_size);
         }
 
         /// Get a single resource by name.
-        pub fn get(self: @This(), name: []const u8) !TypedResult(std.json.Parsed(T)) {
+        pub fn get(self: @This(), io: std.Io, name: []const u8) !TypedResult(std.json.Parsed(T)) {
             const path = try self.pathBuilder().resourcePath(name);
             defer self.client.allocator.free(path);
-            return self.client.get(T, path, self.ctx);
+            return self.client.get(io, T, path, self.ctx);
         }
 
         /// Create a new resource.
-        pub fn create(self: @This(), body: T, opts: ThisModule.WriteOptions) !TypedResult(std.json.Parsed(T)) {
+        pub fn create(self: @This(), io: std.Io, body: T, opts: ThisModule.WriteOptions) !TypedResult(std.json.Parsed(T)) {
             const path = try self.pathBuilder().createPath(opts);
             defer self.client.allocator.free(path);
-            return self.client.postValue(T, T, path, &body, self.ctx);
+            return self.client.postValue(io, T, T, path, &body, self.ctx);
         }
 
         /// Update (PUT) an existing resource by name.
         /// The `name` must match `body.metadata.name`.
-        pub fn update(self: @This(), name: []const u8, body: T, opts: ThisModule.WriteOptions) !TypedResult(std.json.Parsed(T)) {
+        pub fn update(self: @This(), io: std.Io, name: []const u8, body: T, opts: ThisModule.WriteOptions) !TypedResult(std.json.Parsed(T)) {
             if (body.metadata) |m| {
                 if (m.name) |body_name| {
                     std.debug.assert(std.mem.eql(u8, name, body_name));
@@ -188,27 +188,27 @@ pub fn Api(comptime T: type) type {
             }
             const path = try self.pathBuilder().updatePath(name, opts);
             defer self.client.allocator.free(path);
-            return self.client.putValue(T, T, path, &body, self.ctx);
+            return self.client.putValue(io, T, T, path, &body, self.ctx);
         }
 
         /// Delete a resource by name. Return an `ApiResult` wrapping a `RawResponse`
         /// with the raw JSON body, which may be the deleted resource or a
         /// Kubernetes Status object.
-        pub fn delete(self: @This(), name: []const u8, opts: ThisModule.DeleteOptions) !Client.ApiResult(Client.RawResponse) {
+        pub fn delete(self: @This(), io: std.Io, name: []const u8, opts: ThisModule.DeleteOptions) !Client.ApiResult(Client.RawResponse) {
             const path = try self.pathBuilder().resourcePath(name);
             defer self.client.allocator.free(path);
             const delete_body = try query.serializeDeleteOpts(self.client.allocator, opts);
             defer if (delete_body) |b| self.client.allocator.free(b);
-            return self.client.delete(path, delete_body, self.ctx);
+            return self.client.delete(io, path, delete_body, self.ctx);
         }
 
         /// Patch a resource by name with a raw patch body.
         /// The caller provides the raw bytes appropriate for the chosen
         /// patch type (JSON merge-patch, strategic merge-patch, etc.).
-        pub fn patch(self: @This(), name: []const u8, patch_body: []const u8, opts: ThisModule.PatchOptions) !TypedResult(std.json.Parsed(T)) {
+        pub fn patch(self: @This(), io: std.Io, name: []const u8, patch_body: []const u8, opts: ThisModule.PatchOptions) !TypedResult(std.json.Parsed(T)) {
             const path = try self.pathBuilder().patchPath(name, opts);
             defer self.client.allocator.free(path);
-            return self.client.patch(T, path, patch_body, opts.patch_type.contentType(), self.ctx);
+            return self.client.patch(io, T, path, patch_body, opts.patch_type.contentType(), self.ctx);
         }
 
         // Server-Side Apply methods
@@ -227,16 +227,16 @@ pub fn Api(comptime T: type) type {
         /// The caller builds a partial object. Since all generated fields are
         /// `?T = null`, only non-null fields appear in the serialized output,
         /// which is exactly what SSA expects.
-        pub fn apply(self: @This(), name: []const u8, body: T, opts: ThisModule.ApplyOptions) !TypedResult(std.json.Parsed(T)) {
-            return self.applyInternal(name, body, opts, null);
+        pub fn apply(self: @This(), io: std.Io, name: []const u8, body: T, opts: ThisModule.ApplyOptions) !TypedResult(std.json.Parsed(T)) {
+            return self.applyInternal(io, name, body, opts, null);
         }
 
         /// Apply (SSA) to the /status subresource.
-        pub fn applyStatus(self: @This(), name: []const u8, body: T, opts: ThisModule.ApplyOptions) !TypedResult(std.json.Parsed(T)) {
-            return self.applyInternal(name, body, opts, "status");
+        pub fn applyStatus(self: @This(), io: std.Io, name: []const u8, body: T, opts: ThisModule.ApplyOptions) !TypedResult(std.json.Parsed(T)) {
+            return self.applyInternal(io, name, body, opts, "status");
         }
 
-        fn applyInternal(self: @This(), name: []const u8, body: T, opts: ThisModule.ApplyOptions, comptime subresource: ?[]const u8) !TypedResult(std.json.Parsed(T)) {
+        fn applyInternal(self: @This(), io: std.Io, name: []const u8, body: T, opts: ThisModule.ApplyOptions, comptime subresource: ?[]const u8) !TypedResult(std.json.Parsed(T)) {
             // Set apiVersion and kind on the body from resource_meta.
             var patched_body = body;
             if (@hasField(T, "apiVersion")) {
@@ -268,60 +268,60 @@ pub fn Api(comptime T: type) type {
             const path = try query.appendPatchQueryParams(alloc, apply_base, patch_opts);
             defer alloc.free(path);
 
-            return self.client.patch(T, path, json_body, ThisModule.PatchType.apply.contentType(), self.ctx);
+            return self.client.patch(io, T, path, json_body, ThisModule.PatchType.apply.contentType(), self.ctx);
         }
 
         // Subresource methods
         /// Get the /status subresource.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
-        pub fn getStatus(self: @This(), name: []const u8) !TypedResult(std.json.Parsed(T)) {
+        pub fn getStatus(self: @This(), io: std.Io, name: []const u8) !TypedResult(std.json.Parsed(T)) {
             const path = try self.pathBuilder().subresourcePath(name, "status");
             defer self.client.allocator.free(path);
-            return self.client.get(T, path, self.ctx);
+            return self.client.get(io, T, path, self.ctx);
         }
 
         /// Update (PUT) the /status subresource.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
-        pub fn updateStatus(self: @This(), name: []const u8, body: T) !TypedResult(std.json.Parsed(T)) {
+        pub fn updateStatus(self: @This(), io: std.Io, name: []const u8, body: T) !TypedResult(std.json.Parsed(T)) {
             const path = try self.pathBuilder().subresourcePath(name, "status");
             defer self.client.allocator.free(path);
-            return self.client.putValue(T, T, path, &body, self.ctx);
+            return self.client.putValue(io, T, T, path, &body, self.ctx);
         }
 
         /// Patch the /status subresource.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
-        pub fn patchStatus(self: @This(), name: []const u8, patch_body: []const u8, opts: ThisModule.PatchOptions) !TypedResult(std.json.Parsed(T)) {
+        pub fn patchStatus(self: @This(), io: std.Io, name: []const u8, patch_body: []const u8, opts: ThisModule.PatchOptions) !TypedResult(std.json.Parsed(T)) {
             const path = try self.pathBuilder().subresourcePatchPath(name, "status", opts);
             defer self.client.allocator.free(path);
-            return self.client.patch(T, path, patch_body, opts.patch_type.contentType(), self.ctx);
+            return self.client.patch(io, T, path, patch_body, opts.patch_type.contentType(), self.ctx);
         }
 
         /// Get the /scale subresource. Return `ApiResult(Parsed(ScaleT))`.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
         ///
         /// Example: `api.getScale(k8s.AutoscalingV1Scale, "my-deployment")`
-        pub fn getScale(self: @This(), comptime ScaleT: type, name: []const u8) !TypedResult(std.json.Parsed(ScaleT)) {
+        pub fn getScale(self: @This(), io: std.Io, comptime ScaleT: type, name: []const u8) !TypedResult(std.json.Parsed(ScaleT)) {
             const path = try self.pathBuilder().subresourcePath(name, "scale");
             defer self.client.allocator.free(path);
-            return self.client.get(ScaleT, path, self.ctx);
+            return self.client.get(io, ScaleT, path, self.ctx);
         }
 
         /// Update (PUT) the /scale subresource. Return `ApiResult(Parsed(ScaleT))`.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
         ///
         /// Example: `api.updateScale(k8s.AutoscalingV1Scale, "my-deployment", scale_body)`
-        pub fn updateScale(self: @This(), comptime ScaleT: type, name: []const u8, body: ScaleT) !TypedResult(std.json.Parsed(ScaleT)) {
+        pub fn updateScale(self: @This(), io: std.Io, comptime ScaleT: type, name: []const u8, body: ScaleT) !TypedResult(std.json.Parsed(ScaleT)) {
             const path = try self.pathBuilder().subresourcePath(name, "scale");
             defer self.client.allocator.free(path);
-            return self.client.putValue(ScaleT, ScaleT, path, &body, self.ctx);
+            return self.client.putValue(io, ScaleT, ScaleT, path, &body, self.ctx);
         }
 
         /// Patch the /scale subresource. Return `ApiResult(Parsed(ScaleT))`.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
-        pub fn patchScale(self: @This(), comptime ScaleT: type, name: []const u8, patch_body: []const u8, opts: ThisModule.PatchOptions) !TypedResult(std.json.Parsed(ScaleT)) {
+        pub fn patchScale(self: @This(), io: std.Io, comptime ScaleT: type, name: []const u8, patch_body: []const u8, opts: ThisModule.PatchOptions) !TypedResult(std.json.Parsed(ScaleT)) {
             const path = try self.pathBuilder().subresourcePatchPath(name, "scale", opts);
             defer self.client.allocator.free(path);
-            return self.client.patch(ScaleT, path, patch_body, opts.patch_type.contentType(), self.ctx);
+            return self.client.patch(io, ScaleT, path, patch_body, opts.patch_type.contentType(), self.ctx);
         }
 
         /// Post an eviction to the /eviction subresource.
@@ -329,19 +329,19 @@ pub fn Api(comptime T: type) type {
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
         ///
         /// Example: `api.evict(k8s.PolicyV1Eviction, "my-pod", eviction_body)`
-        pub fn evict(self: @This(), comptime EvictionT: type, name: []const u8, body: EvictionT) !Client.ApiResult(Client.RawResponse) {
+        pub fn evict(self: @This(), io: std.Io, comptime EvictionT: type, name: []const u8, body: EvictionT) !Client.ApiResult(Client.RawResponse) {
             const path = try self.pathBuilder().subresourcePath(name, "eviction");
             defer self.client.allocator.free(path);
-            return self.client.postValueRaw(EvictionT, path, &body, self.ctx);
+            return self.client.postValueRaw(io, EvictionT, path, &body, self.ctx);
         }
 
         /// Get the /log subresource. Return an `ApiResult` wrapping a `RawResponse`
         /// with raw plain text.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
-        pub fn getLogs(self: @This(), name: []const u8, opts: ThisModule.LogOptions) !Client.ApiResult(Client.RawResponse) {
+        pub fn getLogs(self: @This(), io: std.Io, name: []const u8, opts: ThisModule.LogOptions) !Client.ApiResult(Client.RawResponse) {
             const path = try self.pathBuilder().logPath(name, opts);
             defer self.client.allocator.free(path);
-            return self.client.getRaw(path, self.ctx);
+            return self.client.getRaw(io, path, self.ctx);
         }
 
         // Pagination helpers
@@ -382,10 +382,11 @@ pub fn Api(comptime T: type) type {
         pub fn collectAll(
             self: @This(),
             allocator: std.mem.Allocator,
+            io: std.Io,
             opts: ThisModule.ListOptions,
             pager_opts: PagerOptions,
         ) !CollectedList {
-            return self.collectPages(allocator, opts, pager_opts, false);
+            return self.collectPages(allocator, io, opts, pager_opts, false);
         }
 
         /// Like `collectAll`, but lists across all namespaces.
@@ -393,16 +394,18 @@ pub fn Api(comptime T: type) type {
         pub fn collectAllAcrossNamespaces(
             self: @This(),
             allocator: std.mem.Allocator,
+            io: std.Io,
             opts: ThisModule.ListOptions,
             pager_opts: PagerOptions,
         ) !CollectedList {
             if (!meta.namespaced) @compileError("collectAllAcrossNamespaces is only available for namespaced resources; use collectAll() instead");
-            return self.collectPages(allocator, opts, pager_opts, true);
+            return self.collectPages(allocator, io, opts, pager_opts, true);
         }
 
         fn collectPages(
             self: @This(),
             allocator: std.mem.Allocator,
+            io: std.Io,
             opts: ThisModule.ListOptions,
             pager_opts: PagerOptions,
             comptime use_list_all: bool,
@@ -421,9 +424,9 @@ pub fn Api(comptime T: type) type {
 
             while (true) {
                 const api_result = if (use_list_all)
-                    try self.listAll(page_opts)
+                    try self.listAll(io, page_opts)
                 else
-                    try self.list(page_opts);
+                    try self.list(io, page_opts);
                 const parsed = try api_result.value();
                 defer parsed.deinit();
 

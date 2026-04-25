@@ -231,9 +231,9 @@ pub fn WatchStream(comptime T: type) type {
         max_line_size: usize,
 
         /// Initialize a watch stream by opening an HTTP streaming connection.
-        pub fn init(client_ptr: *Client, ctx: Context, path: []const u8, max_line_size: usize) !Self {
+        pub fn init(client_ptr: *Client, io: std.Io, ctx: Context, path: []const u8, max_line_size: usize) !Self {
             client_ptr.logger.info("watch started", &.{});
-            const stream_resp = try client_ptr.watchStream(path, ctx);
+            const stream_resp = try client_ptr.watchStream(io, path, ctx);
             return .{
                 .allocator = client_ptr.allocator,
                 .client = client_ptr,
@@ -248,9 +248,9 @@ pub fn WatchStream(comptime T: type) type {
         /// Read the next watch event from the stream.
         /// Return `null` on clean end-of-stream (server timeout or connection close).
         /// The caller must call `deinit()` on the returned `ParsedEvent`.
-        pub fn next(self: *Self) !?ParsedEvent(T) {
+        pub fn next(self: *Self, io: std.Io) !?ParsedEvent(T) {
             if (self.closed) return null;
-            self.ctx.check() catch return error.Canceled;
+            self.ctx.check(io) catch return error.Canceled;
 
             const line = self.readLine() catch |err| switch (err) {
                 error.EndOfStream => return null,
@@ -315,8 +315,8 @@ pub fn WatchStream(comptime T: type) type {
 
         /// Shut down the underlying socket, causing any blocked `read()`
         /// in `next()` to return immediately. Safe to call from another thread.
-        pub fn interrupt(self: *Self) void {
-            self.state.interrupt();
+        pub fn interrupt(self: *Self, io: std.Io) void {
+            self.state.interrupt(io);
         }
 
         fn readLine(self: *Self) ![]const u8 {

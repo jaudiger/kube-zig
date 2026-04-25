@@ -12,7 +12,7 @@
 //!
 //! var handler = try signal.SignalHandler.init();
 //! // ... start controllers ...
-//! _ = handler.wait(); // blocks until SIGTERM/SIGINT
+//! _ = handler.wait(io); // blocks until SIGTERM/SIGINT
 //! // ... call shutdown/stop ...
 //! ```
 
@@ -60,10 +60,18 @@ pub const SignalHandler = struct {
 
     /// Block until SIGTERM or SIGINT is received.
     /// Returns the signal number that was received.
-    pub fn wait(self: SignalHandler) i32 {
+    ///
+    /// Uses a short polling timeout (100 ms) since POSIX signal handlers
+    /// cannot safely wake an Io futex directly. In practice this adds at
+    /// most one polling period of latency between signal delivery and return.
+    pub fn wait(self: SignalHandler, io: std.Io) i32 {
         _ = self;
+        const poll_timeout: std.Io.Timeout = .{ .duration = .{
+            .clock = .awake,
+            .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms },
+        } };
         while (signal_received.load(.acquire) == 0) {
-            std.Thread.Futex.wait(&signal_received, 0);
+            io.futexWaitTimeout(u32, &signal_received.raw, 0, poll_timeout) catch {};
         }
         return received_signal.load(.acquire);
     }
@@ -77,7 +85,7 @@ pub const SignalHandler = struct {
     /// Returns the signal number that was received, or null if none.
     pub fn getSignal(self: SignalHandler) ?i32 {
         _ = self;
-        if (!signal_received.load(.acquire)) return null;
+        if (signal_received.load(.acquire) == 0) return null;
         return received_signal.load(.acquire);
     }
 
@@ -90,11 +98,11 @@ pub const SignalHandler = struct {
 };
 
 /// Signal handler function. Must be async-signal-safe: only atomic stores
-/// and futex wake.
-fn signalHandler(sig: c_int) callconv(.c) void {
-    received_signal.store(sig, .release);
+/// are performed here. A consumer polls `signal_received` via futex with
+/// a short timeout to observe the change.
+fn signalHandler(sig: std.posix.SIG) callconv(.c) void {
+    received_signal.store(@intCast(@intFromEnum(sig)), .release);
     signal_received.store(1, .release);
-    std.Thread.Futex.wake(&signal_received, std.math.maxInt(u32));
 }
 
 /// Type-erased callback invoked when a signal is received.
@@ -129,7 +137,7 @@ pub const ShutdownHandle = struct {
 ///
 /// Usage:
 /// ```zig
-/// const handle = try signal.setupShutdown(&.{
+/// const handle = try signal.setupShutdown(io, &.{
 ///     signal.ShutdownCallback.fromTypedCtx(
 ///         Client, &client, Client.shutdown,
 ///     ),
@@ -137,15 +145,15 @@ pub const ShutdownHandle = struct {
 /// // ... run application ...
 /// handle.thread.join();
 /// ```
-pub fn setupShutdown(callbacks: []const ShutdownCallback) !ShutdownHandle {
+pub fn setupShutdown(io: std.Io, callbacks: []const ShutdownCallback) !ShutdownHandle {
     const handler = try SignalHandler.init();
-    const thread = try std.Thread.spawn(.{}, shutdownThreadFn, .{callbacks});
+    const thread = try std.Thread.spawn(.{}, shutdownThreadFn, .{ io, callbacks });
     return .{ .handler = handler, .thread = thread };
 }
 
-fn shutdownThreadFn(callbacks: []const ShutdownCallback) void {
+fn shutdownThreadFn(io: std.Io, callbacks: []const ShutdownCallback) void {
     const handler = SignalHandler{};
-    _ = handler.wait();
+    _ = handler.wait(io);
     for (callbacks) |cb| {
         cb.func(cb.ctx);
     }
@@ -179,10 +187,10 @@ test "SignalHandler: manual flag set simulates signal" {
     // Assert
     // Directly set the atomic to simulate signal receipt.
     signal_received.store(1, .release);
-    received_signal.store(std.posix.SIG.TERM, .release);
+    received_signal.store(@intFromEnum(std.posix.SIG.TERM), .release);
 
     try testing.expect(handler.isSignaled());
-    try testing.expectEqual(@as(i32, std.posix.SIG.TERM), handler.getSignal().?);
+    try testing.expectEqual(@as(i32, @intFromEnum(std.posix.SIG.TERM)), handler.getSignal().?);
 }
 
 test "ShutdownCallback: fromTypedCtx calls function" {

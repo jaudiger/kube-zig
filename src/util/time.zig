@@ -23,8 +23,10 @@ const std = @import("std");
 const testing = std.testing;
 
 /// Return nanoseconds elapsed since `epoch` on the monotonic clock.
-pub fn monotonicNowNs(epoch: std.time.Instant) error{ClockUnavailable}!u64 {
-    return (std.time.Instant.now() catch return error.ClockUnavailable).since(epoch);
+pub fn monotonicNowNs(io: std.Io, epoch: std.Io.Clock.Timestamp) error{ClockUnavailable}!u64 {
+    const elapsed_ns = epoch.untilNow(io).raw.nanoseconds;
+    if (elapsed_ns < 0) return error.ClockUnavailable;
+    return @intCast(elapsed_ns);
 }
 
 /// Timestamp precision for RFC 3339 formatting.
@@ -87,11 +89,11 @@ fn writeDateTime(w: anytype, dt: DateTime) !void {
 /// - `.seconds`: `YYYY-MM-DDThh:mm:ssZ`
 /// - `.micros`:  `YYYY-MM-DDThh:mm:ss.000000Z`
 /// - `.nanos`:   `YYYY-MM-DDThh:mm:ss.nnnnnnnnnZ`
-pub fn writeNow(comptime precision: Precision, w: anytype) !void {
+pub fn writeNow(io: std.Io, comptime precision: Precision, w: anytype) !void {
+    const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
     switch (precision) {
         .nanos => {
-            const nanos = std.time.nanoTimestamp();
-            const nanos_unsigned: u128 = @intCast(@max(0, nanos));
+            const nanos_unsigned: u128 = @intCast(@max(0, now_ns));
             const secs: u64 = std.math.cast(u64, nanos_unsigned / std.time.ns_per_s) orelse return error.Overflow;
             const frac: u32 = @intCast(nanos_unsigned % std.time.ns_per_s);
 
@@ -100,13 +102,13 @@ pub fn writeNow(comptime precision: Precision, w: anytype) !void {
             try w.print(".{d:0>9}Z", .{frac});
         },
         .micros => {
-            const secs: u64 = @intCast(@max(0, std.time.timestamp()));
+            const secs: u64 = @intCast(@max(0, @divTrunc(now_ns, std.time.ns_per_s)));
             const dt = decompose(secs);
             try writeDateTime(w, dt);
             try w.writeAll(".000000Z");
         },
         .seconds => {
-            const secs: u64 = @intCast(@max(0, std.time.timestamp()));
+            const secs: u64 = @intCast(@max(0, @divTrunc(now_ns, std.time.ns_per_s)));
             const dt = decompose(secs);
             try writeDateTime(w, dt);
             try w.writeByte('Z');
@@ -116,10 +118,10 @@ pub fn writeNow(comptime precision: Precision, w: anytype) !void {
 
 /// Format the current UTC time into a fixed-size buffer and return the
 /// written slice.  The buffer size is comptime-derived from the precision.
-pub fn bufNow(comptime precision: Precision, buf: *[precision.bufLen()]u8) []const u8 {
-    var fbs = std.io.fixedBufferStream(buf);
-    writeNow(precision, fbs.writer()) catch unreachable;
-    return fbs.getWritten();
+pub fn bufNow(io: std.Io, comptime precision: Precision, buf: *[precision.bufLen()]u8) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    writeNow(io, precision, &w) catch unreachable;
+    return w.buffered();
 }
 
 // Parsing
@@ -204,7 +206,7 @@ test "bufNow seconds: produces correct length and format" {
     var buf: [Precision.seconds.bufLen()]u8 = undefined;
 
     // Act
-    const result = bufNow(.seconds, &buf);
+    const result = bufNow(std.testing.io, .seconds, &buf);
 
     // Assert
     try testing.expectEqual(@as(usize, 20), result.len);
@@ -221,7 +223,7 @@ test "bufNow micros: produces correct length and format" {
     var buf: [Precision.micros.bufLen()]u8 = undefined;
 
     // Act
-    const result = bufNow(.micros, &buf);
+    const result = bufNow(std.testing.io, .micros, &buf);
 
     // Assert
     try testing.expectEqual(@as(usize, 27), result.len);
@@ -237,11 +239,11 @@ test "bufNow micros: produces correct length and format" {
 test "writeNow nanos: produces correct length and format" {
     // Arrange
     var buf: [Precision.nanos.bufLen()]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var w: std.Io.Writer = .fixed(&buf);
 
     // Act
-    try writeNow(.nanos, fbs.writer());
-    const result = fbs.getWritten();
+    try writeNow(std.testing.io, .nanos, &w);
+    const result = w.buffered();
 
     // Assert
     try testing.expectEqual(@as(usize, 30), result.len);

@@ -38,11 +38,11 @@ pub const SecondaryInformer = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
-    const VTable = struct {
-        run: *const fn (ptr: *anyopaque) anyerror!void,
-        cancel: *const fn (ptr: *anyopaque) void,
-        has_synced: *const fn (ptr: *anyopaque) bool,
-        deinit_fn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
+    pub const VTable = struct {
+        run: *const fn (ptr: *anyopaque, io: std.Io) anyerror!void,
+        cancel: *const fn (ptr: *anyopaque, io: std.Io) void,
+        has_synced: *const fn (ptr: *anyopaque, io: std.Io) bool,
+        deinit_fn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, io: std.Io) void,
     };
 };
 
@@ -61,7 +61,7 @@ pub const SecondaryInformer = struct {
 /// var ctrl = try Controller(k8s.CoreV1Pod).init(allocator, &client, client.context(), "default", .{
 ///     .reconcile_fn = ReconcileFn.fromFn(myReconcile),
 /// });
-/// defer ctrl.deinit();
+/// defer ctrl.deinit(std.testing.io);
 /// try ctrl.run(); // blocks until stop()
 /// ```
 pub fn Controller(comptime T: type) type {
@@ -132,6 +132,7 @@ pub fn Controller(comptime T: type) type {
         /// Create a new controller for resource type `T` in the given namespace.
         pub fn init(
             allocator: std.mem.Allocator,
+            io: std.Io,
             client: *Client,
             ctx: Context,
             namespace: if (T.resource_meta.namespaced) []const u8 else ?[]const u8,
@@ -154,15 +155,15 @@ pub fn Controller(comptime T: type) type {
                 .metrics = informer_m,
                 .logger = logger,
             });
-            errdefer informer.deinit();
+            errdefer informer.deinit(io);
 
             // Heap-allocate WorkQueue for pointer stability.
             const queue = try allocator.create(WorkQueue);
             errdefer {
-                queue.deinit();
+                queue.deinit(io);
                 allocator.destroy(queue);
             }
-            queue.* = WorkQueue.init(allocator, .{
+            queue.* = WorkQueue.init(allocator, io, .{
                 .retry_policy = opts.retry_policy,
                 .overall_rate_limit = opts.overall_rate_limit,
                 .metrics = queue_m,
@@ -197,18 +198,18 @@ pub fn Controller(comptime T: type) type {
         }
 
         /// Release all resources including secondary informers, queue, and store.
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self, io: std.Io) void {
             // Deinit secondary informers (via vtable).
             for (self.secondary_informers.items) |si| {
-                si.vtable.deinit_fn(si.ptr, self.allocator);
+                si.vtable.deinit_fn(si.ptr, self.allocator, io);
             }
             self.secondary_informers.deinit(self.allocator);
             self.secondary_threads.deinit(self.allocator);
 
             self.reconciler.deinit();
-            self.queue.deinit();
+            self.queue.deinit(io);
             self.allocator.destroy(self.queue);
-            self.informer.deinit();
+            self.informer.deinit(io);
         }
 
         /// Add a secondary resource watch. Events on type `S` are mapped to
@@ -225,13 +226,14 @@ pub fn Controller(comptime T: type) type {
         /// var ctrl = try Controller(k8s.AppsV1Deployment).init(allocator, &client, client.context(), "default", .{
         ///     .reconcile_fn = myReconcileFn,
         /// });
-        /// try ctrl.watchSecondary(k8s.CoreV1Pod, &client, "default", .{
+        /// try ctrl.watchSecondary(io, k8s.CoreV1Pod, &client, "default", .{
         ///     .map_fn = mapper.enqueueOwner(k8s.CoreV1Pod, "Deployment"),
         /// });
         /// try ctrl.run();
         /// ```
         pub fn watchSecondary(
             self: *Self,
+            io: std.Io,
             comptime S: type,
             client: *Client,
             namespace: if (S.resource_meta.namespaced) []const u8 else ?[]const u8,
@@ -262,7 +264,7 @@ pub fn Controller(comptime T: type) type {
             // Heap-allocate the secondary Informer(S).
             const sec_informer = try self.allocator.create(InformerS);
             errdefer {
-                sec_informer.deinit();
+                sec_informer.deinit(io);
                 self.allocator.destroy(sec_informer);
             }
             sec_informer.* = InformerS.init(self.allocator, client, self.ctx, namespace, .{
@@ -276,11 +278,11 @@ pub fn Controller(comptime T: type) type {
             // Create the mapping event handler that maps S events to T keys.
             const handler = EventHandlerS.fromTypedCtx(MappingCtx, mapping_ctx, .{
                 .on_add = struct {
-                    fn f(ctx: *MappingCtx, obj: *const S, _: bool) void {
+                    fn f(ctx: *MappingCtx, cb_io: std.Io, obj: *const S, _: bool) void {
                         if (ctx.map_fn(ctx.allocator, obj)) |key| {
                             // Skip enqueue if primary resource no longer exists in cache.
-                            if (!ctx.primary_store.contains(key)) return;
-                            ctx.queue.add(key, .{}) catch |err| {
+                            if (!ctx.primary_store.contains(cb_io, key)) return;
+                            ctx.queue.add(cb_io, key, .{}) catch |err| {
                                 ctx.queue.logger.warn("secondary event handler: failed to enqueue", &.{
                                     LogField.string("error", @errorName(err)),
                                 });
@@ -289,11 +291,11 @@ pub fn Controller(comptime T: type) type {
                     }
                 }.f,
                 .on_update = struct {
-                    fn f(ctx: *MappingCtx, _: *const S, new: *const S) void {
+                    fn f(ctx: *MappingCtx, cb_io: std.Io, _: *const S, new: *const S) void {
                         if (ctx.map_fn(ctx.allocator, new)) |key| {
                             // Skip enqueue if primary resource no longer exists in cache.
-                            if (!ctx.primary_store.contains(key)) return;
-                            ctx.queue.add(key, .{}) catch |err| {
+                            if (!ctx.primary_store.contains(cb_io, key)) return;
+                            ctx.queue.add(cb_io, key, .{}) catch |err| {
                                 ctx.queue.logger.warn("secondary event handler: failed to enqueue", &.{
                                     LogField.string("error", @errorName(err)),
                                 });
@@ -302,11 +304,11 @@ pub fn Controller(comptime T: type) type {
                     }
                 }.f,
                 .on_delete = struct {
-                    fn f(ctx: *MappingCtx, obj: *const S) void {
+                    fn f(ctx: *MappingCtx, cb_io: std.Io, obj: *const S) void {
                         if (ctx.map_fn(ctx.allocator, obj)) |key| {
                             // Skip enqueue if primary resource no longer exists in cache.
-                            if (!ctx.primary_store.contains(key)) return;
-                            ctx.queue.add(key, .{}) catch |err| {
+                            if (!ctx.primary_store.contains(cb_io, key)) return;
+                            ctx.queue.add(cb_io, key, .{}) catch |err| {
                                 ctx.queue.logger.warn("secondary event handler: failed to enqueue", &.{
                                     LogField.string("error", @errorName(err)),
                                 });
@@ -320,19 +322,19 @@ pub fn Controller(comptime T: type) type {
 
             // Build the type-erased vtable for this Informer(S).
             const Impl = struct {
-                fn run(ptr: *anyopaque) anyerror!void {
+                fn run(ptr: *anyopaque, vt_io: std.Io) anyerror!void {
                     const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    return inf.run();
+                    return inf.run(vt_io);
                 }
-                fn stop(ptr: *anyopaque) void {
+                fn stop(ptr: *anyopaque, vt_io: std.Io) void {
                     const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    inf.stop();
+                    inf.stop(vt_io);
                 }
-                fn hasSynced(ptr: *anyopaque) bool {
+                fn hasSynced(ptr: *anyopaque, vt_io: std.Io) bool {
                     const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    return inf.hasSynced();
+                    return inf.hasSynced(vt_io);
                 }
-                fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+                fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator, vt_io: std.Io) void {
                     const inf: *InformerS = @ptrCast(@alignCast(ptr));
                     // Free the mapping context. The handler holds a pointer to it,
                     // but we're tearing down, so that's fine.
@@ -343,7 +345,7 @@ pub fn Controller(comptime T: type) type {
                             allocator.destroy(ctx);
                         }
                     }
-                    inf.deinit();
+                    inf.deinit(vt_io);
                     allocator.destroy(inf);
                 }
             };
@@ -364,33 +366,33 @@ pub fn Controller(comptime T: type) type {
         /// Spawn N reconciler worker threads, 1 primary informer thread,
         /// and 1 thread per secondary informer.
         /// Returns immediately; call `stop()` to shut down.
-        pub fn start(self: *Self) !void {
+        pub fn start(self: *Self, io: std.Io) !void {
             self.logger.info("controller starting", &.{
                 LogField.string("resource", T.resource_meta.resource),
                 LogField.uint("workers", self.reconciler.max_concurrent_reconciles),
                 LogField.uint("secondaries", self.secondary_informers.items.len),
             });
-            try self.reconciler.start();
-            errdefer self.reconciler.stop();
+            try self.reconciler.start(io);
+            errdefer self.reconciler.stop(io);
 
-            self.informer_thread = try std.Thread.spawn(.{}, informerThreadFn, .{self});
+            self.informer_thread = try std.Thread.spawn(.{}, informerThreadFn, .{ self, io });
 
             // Start secondary informer threads.
             for (self.secondary_informers.items, 0..) |si, idx| {
-                const thread = std.Thread.spawn(.{}, secondaryInformerThreadFn, .{ self, si }) catch |err| {
+                const thread = std.Thread.spawn(.{}, secondaryInformerThreadFn, .{ self, io, si }) catch |err| {
                     self.logger.warn("secondary thread spawn failed, rolling back", &.{
                         LogField.uint("index", idx),
                         LogField.string("error", @errorName(err)),
                     });
-                    self.cancel();
+                    self.cancel(io);
                     self.joinSecondaryStartup(true);
                     return err;
                 };
                 self.secondary_threads.append(self.allocator, thread) catch |err| {
                     // Thread was spawned but we can't track it, so cancel it.
-                    si.vtable.cancel(si.ptr);
+                    si.vtable.cancel(si.ptr, io);
                     thread.join();
-                    self.cancel();
+                    self.cancel(io);
                     self.joinSecondaryStartup(true);
                     return err;
                 };
@@ -398,18 +400,18 @@ pub fn Controller(comptime T: type) type {
         }
 
         /// Signal all components to stop. Non-blocking.
-        pub fn cancel(self: *Self) void {
+        pub fn cancel(self: *Self, io: std.Io) void {
             self.logger.info("controller canceling", &.{
                 LogField.string("resource", T.resource_meta.resource),
             });
             // Cancel primary informer (sets flag + interrupts watch socket).
-            self.informer.stop();
+            self.informer.stop(io);
             // Cancel all secondary informers.
             for (self.secondary_informers.items) |si| {
-                si.vtable.cancel(si.ptr);
+                si.vtable.cancel(si.ptr, io);
             }
             // Shut down the work queue (unblocks reconciler workers).
-            self.reconciler.cancel();
+            self.reconciler.cancel(io);
         }
 
         /// Wait for all threads to complete. Blocks.
@@ -432,40 +434,40 @@ pub fn Controller(comptime T: type) type {
         }
 
         /// Convenience: cancel + join.
-        pub fn stop(self: *Self) void {
-            self.cancel();
+        pub fn stop(self: *Self, io: std.Io) void {
+            self.cancel(io);
             self.join();
         }
 
         /// Spawn 1 primary informer thread and secondary informer threads,
         /// then block the caller as a single reconcile worker.
         /// Returns when the queue is shut down.
-        pub fn run(self: *Self) !void {
+        pub fn run(self: *Self, io: std.Io) !void {
             self.logger.info("controller run", &.{
                 LogField.string("resource", T.resource_meta.resource),
                 LogField.uint("secondaries", self.secondary_informers.items.len),
             });
-            self.informer_thread = try std.Thread.spawn(.{}, informerThreadFn, .{self});
+            self.informer_thread = try std.Thread.spawn(.{}, informerThreadFn, .{ self, io });
 
             // Start secondary informer threads.
             for (self.secondary_informers.items) |si| {
-                const thread = std.Thread.spawn(.{}, secondaryInformerThreadFn, .{ self, si }) catch |err| {
-                    self.informer.stop();
-                    for (self.secondary_informers.items) |s| s.vtable.cancel(s.ptr);
+                const thread = std.Thread.spawn(.{}, secondaryInformerThreadFn, .{ self, io, si }) catch |err| {
+                    self.informer.stop(io);
+                    for (self.secondary_informers.items) |s| s.vtable.cancel(s.ptr, io);
                     self.joinSecondaryStartup(false);
                     return err;
                 };
                 self.secondary_threads.append(self.allocator, thread) catch |err| {
-                    si.vtable.cancel(si.ptr);
+                    si.vtable.cancel(si.ptr, io);
                     thread.join();
-                    self.informer.stop();
-                    for (self.secondary_informers.items) |s| s.vtable.cancel(s.ptr);
+                    self.informer.stop(io);
+                    for (self.secondary_informers.items) |s| s.vtable.cancel(s.ptr, io);
                     self.joinSecondaryStartup(false);
                     return err;
                 };
             }
 
-            self.reconciler.run();
+            self.reconciler.run(io);
         }
 
         /// Get a read-only handle to the informer's store for querying cached objects.
@@ -474,10 +476,10 @@ pub fn Controller(comptime T: type) type {
         }
 
         /// Has the primary informer completed its initial list-and-sync?
-        pub fn hasSynced(self: *Self) bool {
-            if (!self.informer.hasSynced()) return false;
+        pub fn hasSynced(self: *Self, io: std.Io) bool {
+            if (!self.informer.hasSynced(io)) return false;
             for (self.secondary_informers.items) |si| {
-                if (!si.vtable.has_synced(si.ptr)) return false;
+                if (!si.vtable.has_synced(si.ptr, io)) return false;
             }
             return true;
         }
@@ -516,8 +518,8 @@ pub fn Controller(comptime T: type) type {
             }
         }
 
-        fn informerThreadFn(self: *Self) void {
-            self.informer.run() catch |err| {
+        fn informerThreadFn(self: *Self, io: std.Io) void {
+            self.informer.run(io) catch |err| {
                 self.logger.err("informer thread exited with error", &.{
                     LogField.string("resource", T.resource_meta.resource),
                     LogField.string("error", @errorName(err)),
@@ -525,12 +527,12 @@ pub fn Controller(comptime T: type) type {
                 self.informer_error.store(@intFromError(err), .release);
                 // Shut down the work queue so reconciler workers unblock
                 // from get() and exit instead of waiting forever.
-                self.queue.shutdown();
+                self.queue.shutdown(io);
             };
         }
 
-        fn secondaryInformerThreadFn(self: *Self, si: SecondaryInformer) void {
-            si.vtable.run(si.ptr) catch |err| {
+        fn secondaryInformerThreadFn(self: *Self, io: std.Io, si: SecondaryInformer) void {
+            si.vtable.run(si.ptr, io) catch |err| {
                 self.logger.err("secondary informer thread exited with error", &.{
                     LogField.string("resource", T.resource_meta.resource),
                     LogField.string("error", @errorName(err)),
@@ -538,7 +540,7 @@ pub fn Controller(comptime T: type) type {
                 // Store only the first secondary error (preserve it from
                 // being overwritten by later failures).
                 _ = self.secondary_informer_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-                self.queue.shutdown();
+                self.queue.shutdown(io);
             };
         }
     };
@@ -766,11 +768,11 @@ test "Controller: init returns OutOfMemory without leaking" {
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = std.heap.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        const result = Controller(TestResource).init(failing.allocator(), dummy_client, Context.background(), "default", opts);
+        const result = Controller(TestResource).init(failing.allocator(), std.testing.io, dummy_client, Context.background(), "default", opts);
         if (result) |_| {
             // Succeeded: all allocations passed; clean up and stop.
             var ctrl = result.?;
-            ctrl.deinit();
+            ctrl.deinit(std.testing.io);
             break;
         } else |err| {
             try testing.expectEqual(error.OutOfMemory, err);
@@ -789,30 +791,30 @@ test "Controller: watchSecondary registers secondaries and blocks hasSynced unti
         }
     }.reconcile);
     const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
-    var ctrl = try Controller(TestResource).init(testing.allocator, dummy_client, Context.background(), "default", .{
+    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, dummy_client, Context.background(), "default", .{
         .reconcile_fn = reconcile_fn,
     });
     defer {
-        ctrl.cancel();
-        ctrl.deinit();
+        ctrl.cancel(std.testing.io);
+        ctrl.deinit(std.testing.io);
     }
 
     // Act
-    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
     });
-    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
     });
 
     // Simulate the primary store having completed its initial list sync.
-    const sync = try ctrl.informer.store.replace(&.{});
+    const sync = try ctrl.informer.store.replace(std.testing.io, &.{});
     sync.release();
 
     // Assert: both secondaries registered; hasSynced is false because neither has started.
     try testing.expectEqual(@as(usize, 2), ctrl.secondary_informers.items.len);
-    try testing.expect(ctrl.informer.hasSynced());
-    try testing.expect(!ctrl.hasSynced());
+    try testing.expect(ctrl.informer.hasSynced(std.testing.io));
+    try testing.expect(!ctrl.hasSynced(std.testing.io));
 }
 
 test "Controller: watchSecondary returns OutOfMemory without leaking" {
@@ -830,17 +832,17 @@ test "Controller: watchSecondary returns OutOfMemory without leaking" {
         var failing = std.heap.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
         const alloc = failing.allocator();
 
-        var ctrl = Controller(TestResource).init(alloc, dummy_client, Context.background(), "default", .{
+        var ctrl = Controller(TestResource).init(alloc, std.testing.io, dummy_client, Context.background(), "default", .{
             .reconcile_fn = reconcile_fn,
         }) catch |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
-        const ws_result = ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+        const ws_result = ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
             .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
         });
-        ctrl.cancel();
-        ctrl.deinit();
+        ctrl.cancel(std.testing.io);
+        ctrl.deinit(std.testing.io);
         if (ws_result) |_| break;
         try testing.expectError(error.OutOfMemory, ws_result);
     }
@@ -857,14 +859,14 @@ test "Controller: secondary handler enqueues primary key on all event types" {
         }
     }.reconcile);
     const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
-    var ctrl = try Controller(TestResource).init(testing.allocator, dummy_client, Context.background(), "default", .{
+    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, dummy_client, Context.background(), "default", .{
         .reconcile_fn = reconcile_fn,
     });
     defer {
-        ctrl.cancel();
-        ctrl.deinit();
+        ctrl.cancel(std.testing.io);
+        ctrl.deinit(std.testing.io);
     }
-    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "my-deploy"),
     });
 
@@ -872,6 +874,7 @@ test "Controller: secondary handler enqueues primary key on all event types" {
     const arena = try testing.allocator.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(testing.allocator);
     const old_entry = try ctrl.informer.store.put(
+        std.testing.io,
         .{ .namespace = "default", .name = "my-deploy" },
         TestResource{ .metadata = .{ .name = "my-deploy", .namespace = "default" } },
         arena,
@@ -884,28 +887,28 @@ test "Controller: secondary handler enqueues primary key on all event types" {
     const sec_obj = TestSecondary{};
 
     // Act / Assert: on_add enqueues the mapped primary key.
-    handler.onAdd(&sec_obj, false);
+    handler.onAdd(std.testing.io, &sec_obj, false);
     {
-        const key = (try ctrl.queue.get()).?;
+        const key = (try ctrl.queue.get(std.testing.io)).?;
         try testing.expectEqualStrings("default", key.namespace);
         try testing.expectEqualStrings("my-deploy", key.name);
-        ctrl.queue.done(key, .success);
+        ctrl.queue.done(std.testing.io, key, .success);
     }
 
     // Act / Assert: on_update enqueues the mapped primary key.
-    handler.onUpdate(&sec_obj, &sec_obj);
+    handler.onUpdate(std.testing.io, &sec_obj, &sec_obj);
     {
-        const key = (try ctrl.queue.get()).?;
+        const key = (try ctrl.queue.get(std.testing.io)).?;
         try testing.expectEqualStrings("my-deploy", key.name);
-        ctrl.queue.done(key, .success);
+        ctrl.queue.done(std.testing.io, key, .success);
     }
 
     // Act / Assert: on_delete enqueues the mapped primary key.
-    handler.onDelete(&sec_obj);
+    handler.onDelete(std.testing.io, &sec_obj);
     {
-        const key = (try ctrl.queue.get()).?;
+        const key = (try ctrl.queue.get(std.testing.io)).?;
         try testing.expectEqualStrings("my-deploy", key.name);
-        ctrl.queue.done(key, .success);
+        ctrl.queue.done(std.testing.io, key, .success);
     }
 }
 
@@ -917,19 +920,19 @@ test "Controller: secondary handler skips enqueue when conditions are not met" {
         }
     }.reconcile);
     const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
-    var ctrl = try Controller(TestResource).init(testing.allocator, dummy_client, Context.background(), "default", .{
+    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, dummy_client, Context.background(), "default", .{
         .reconcile_fn = reconcile_fn,
     });
     defer {
-        ctrl.cancel();
-        ctrl.deinit();
+        ctrl.cancel(std.testing.io);
+        ctrl.deinit(std.testing.io);
     }
     // First secondary: map_fn returns a key but the primary is not in the store.
-    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "my-deploy"),
     });
     // Second secondary: map_fn returns null for objects without a matching ownerRef.
-    try ctrl.watchSecondary(TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
         .map_fn = mapper_mod.enqueueOwner(TestSecondary, "Deployment"),
     });
 
@@ -939,10 +942,10 @@ test "Controller: secondary handler skips enqueue when conditions are not met" {
     const sec_obj = TestSecondary{};
 
     // Act
-    h0.onAdd(&sec_obj, false);
-    h1.onAdd(&sec_obj, false);
+    h0.onAdd(std.testing.io, &sec_obj, false);
+    h1.onAdd(std.testing.io, &sec_obj, false);
 
     // Assert: neither condition allows an enqueue.
-    ctrl.queue.shutdown();
-    try testing.expect(try ctrl.queue.get() == null);
+    ctrl.queue.shutdown(std.testing.io);
+    try testing.expect(try ctrl.queue.get(std.testing.io) == null);
 }

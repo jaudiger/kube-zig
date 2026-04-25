@@ -80,25 +80,25 @@ pub fn FilteredState(comptime T: type) type {
             });
         }
 
-        fn onAddFiltered(self: *Self, obj: *const T, is_initial_list: bool) void {
+        fn onAddFiltered(self: *Self, io: std.Io, obj: *const T, is_initial_list: bool) void {
             if (self.config.on_add) |pred| {
                 if (!pred(obj, is_initial_list)) return;
             }
-            self.inner.onAdd(obj, is_initial_list);
+            self.inner.onAdd(io, obj, is_initial_list);
         }
 
-        fn onUpdateFiltered(self: *Self, old: *const T, new: *const T) void {
+        fn onUpdateFiltered(self: *Self, io: std.Io, old: *const T, new: *const T) void {
             if (self.config.on_update) |pred| {
                 if (!pred(old, new)) return;
             }
-            self.inner.onUpdate(old, new);
+            self.inner.onUpdate(io, old, new);
         }
 
-        fn onDeleteFiltered(self: *Self, obj: *const T) void {
+        fn onDeleteFiltered(self: *Self, io: std.Io, obj: *const T) void {
             if (self.config.on_delete) |pred| {
                 if (!pred(obj)) return;
             }
-            self.inner.onDelete(obj);
+            self.inner.onDelete(io, obj);
         }
     };
 }
@@ -536,15 +536,15 @@ const Counter = struct {
     update_count: u32 = 0,
     delete_count: u32 = 0,
 
-    fn onAdd(self: *Counter, _: *const TestResource, _: bool) void {
+    fn onAdd(self: *Counter, _: std.Io, _: *const TestResource, _: bool) void {
         self.add_count += 1;
     }
 
-    fn onUpdate(self: *Counter, _: *const TestResource, _: *const TestResource) void {
+    fn onUpdate(self: *Counter, _: std.Io, _: *const TestResource, _: *const TestResource) void {
         self.update_count += 1;
     }
 
-    fn onDelete(self: *Counter, _: *const TestResource) void {
+    fn onDelete(self: *Counter, _: std.Io, _: *const TestResource) void {
         self.delete_count += 1;
     }
 };
@@ -565,14 +565,14 @@ test "FilteredState: generationChanged filters same-generation updates" {
     // Act
     const old1 = TestResource{ .metadata = .{ .generation = 1 } };
     const new1 = TestResource{ .metadata = .{ .generation = 1 } };
-    h.onUpdate(&old1, &new1);
+    h.onUpdate(testing.io, &old1, &new1);
 
     // Assert
     try testing.expectEqual(@as(u32, 0), counter.update_count);
 
     const old2 = TestResource{ .metadata = .{ .generation = 1 } };
     const new2 = TestResource{ .metadata = .{ .generation = 2 } };
-    h.onUpdate(&old2, &new2);
+    h.onUpdate(testing.io, &old2, &new2);
 
     try testing.expectEqual(@as(u32, 1), counter.update_count);
 }
@@ -591,7 +591,7 @@ test "FilteredState: delete passes through when on_delete is null" {
     const obj = TestResource{};
 
     // Act
-    h.onDelete(&obj);
+    h.onDelete(testing.io, &obj);
 
     // Assert
     try testing.expectEqual(@as(u32, 1), counter.delete_count);
@@ -610,7 +610,7 @@ test "FilteredState: add events filtered when predicate returns false" {
     const obj = TestResource{};
 
     // Act
-    h.onAdd(&obj, false);
+    h.onAdd(testing.io, &obj, false);
 
     // Assert
     try testing.expectEqual(@as(u32, 0), counter.add_count);
@@ -629,7 +629,7 @@ test "FilteredState: add events pass when predicate returns true" {
     const obj = TestResource{};
 
     // Act
-    h.onAdd(&obj, false);
+    h.onAdd(testing.io, &obj, false);
 
     // Assert
     try testing.expectEqual(@as(u32, 1), counter.add_count);

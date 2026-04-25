@@ -18,11 +18,11 @@ const testing = std.testing;
 /// Limits request throughput to a configured QPS with burst capacity
 /// (default: 5 QPS, burst 10).
 pub const RateLimiter = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     tokens: f64,
     max_tokens: f64,
     refill_rate_ns: f64, // tokens per nanosecond
-    last_refill: std.time.Instant,
+    last_refill: std.Io.Clock.Timestamp,
     logger: Logger = Logger.noop,
 
     /// Configuration for the token bucket rate limiter.
@@ -40,10 +40,10 @@ pub const RateLimiter = struct {
 
     /// Initialize a rate limiter from the given config.
     /// Returns null if the config disables rate limiting.
-    pub fn init(config: Config) error{TimerUnsupported}!?RateLimiter {
+    pub fn init(io: std.Io, config: Config) error{TimerUnsupported}!?RateLimiter {
         if (config.qps <= 0.0 or config.burst == 0) return null;
 
-        const now = std.time.Instant.now() catch return error.TimerUnsupported;
+        const now: std.Io.Clock.Timestamp = .now(io, .awake);
         const max: f64 = @floatFromInt(config.burst);
 
         return .{
@@ -57,15 +57,15 @@ pub const RateLimiter = struct {
 
     /// Block until a token is available, or return `error.Canceled`
     /// when the context signals cancellation.
-    pub fn acquire(self: *RateLimiter, ctx: Context) error{Canceled}!void {
+    pub fn acquire(self: *RateLimiter, io: std.Io, ctx: Context) error{Canceled}!void {
         while (true) {
-            try ctx.check();
+            try ctx.check(io);
 
             const sleep_ns = blk: {
-                self.mutex.lock();
-                defer self.mutex.unlock();
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
 
-                self.refill();
+                self.refill(io);
 
                 if (self.tokens >= 1.0) {
                     self.tokens -= 1.0;
@@ -80,7 +80,7 @@ pub const RateLimiter = struct {
             self.logger.debug("rate limited", &.{
                 LogField.uint("wait_ms", sleep_ns / std.time.ns_per_ms),
             });
-            try context_mod.interruptibleSleep(ctx, sleep_ns);
+            try context_mod.interruptibleSleep(io, ctx, sleep_ns);
         }
     }
 
@@ -90,11 +90,11 @@ pub const RateLimiter = struct {
     ///
     /// Used by the overall rate limiter in WorkQueue to compute a global
     /// delay that is combined (via max) with per-key backoff.
-    pub fn reserve(self: *RateLimiter) u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn reserve(self: *RateLimiter, io: std.Io) u64 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        self.refill();
+        self.refill(io);
 
         if (self.tokens >= 1.0) {
             self.tokens -= 1.0;
@@ -108,11 +108,11 @@ pub const RateLimiter = struct {
 
     /// Try to acquire a token without blocking.
     /// Returns true if a token was consumed, false otherwise.
-    pub fn tryAcquire(self: *RateLimiter) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn tryAcquire(self: *RateLimiter, io: std.Io) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
-        self.refill();
+        self.refill(io);
 
         if (self.tokens >= 1.0) {
             self.tokens -= 1.0;
@@ -122,9 +122,11 @@ pub const RateLimiter = struct {
     }
 
     /// Refill tokens based on elapsed time. Must be called with mutex held.
-    fn refill(self: *RateLimiter) void {
-        const now = std.time.Instant.now() catch return;
-        const elapsed_ns: f64 = @floatFromInt(now.since(self.last_refill));
+    fn refill(self: *RateLimiter, io: std.Io) void {
+        const now: std.Io.Clock.Timestamp = .now(io, .awake);
+        const elapsed_ns_i: i96 = self.last_refill.durationTo(now).raw.nanoseconds;
+        if (elapsed_ns_i <= 0) return;
+        const elapsed_ns: f64 = @floatFromInt(elapsed_ns_i);
         const new_tokens = elapsed_ns * self.refill_rate_ns;
 
         if (new_tokens > 0.0) {
@@ -136,7 +138,7 @@ pub const RateLimiter = struct {
 
 test "init with defaults returns non-null" {
     // Act
-    const limiter = try RateLimiter.init(.{});
+    const limiter = try RateLimiter.init(std.testing.io, .{});
 
     // Assert
     try testing.expect(limiter != null);
@@ -144,7 +146,7 @@ test "init with defaults returns non-null" {
 
 test "init with disabled config returns null" {
     // Act
-    const limiter = try RateLimiter.init(RateLimiter.Config.disabled);
+    const limiter = try RateLimiter.init(std.testing.io, RateLimiter.Config.disabled);
 
     // Assert
     try testing.expect(limiter == null);
@@ -152,7 +154,7 @@ test "init with disabled config returns null" {
 
 test "init with zero qps returns null" {
     // Act
-    const limiter = try RateLimiter.init(.{ .qps = 0.0, .burst = 10 });
+    const limiter = try RateLimiter.init(std.testing.io, .{ .qps = 0.0, .burst = 10 });
 
     // Assert
     try testing.expect(limiter == null);
@@ -160,7 +162,7 @@ test "init with zero qps returns null" {
 
 test "init with zero burst returns null" {
     // Act
-    const limiter = try RateLimiter.init(.{ .qps = 5.0, .burst = 0 });
+    const limiter = try RateLimiter.init(std.testing.io, .{ .qps = 5.0, .burst = 0 });
 
     // Assert
     try testing.expect(limiter == null);
@@ -168,7 +170,7 @@ test "init with zero burst returns null" {
 
 test "init: starts with full bucket" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 5 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 5 })).?;
     _ = &limiter;
 
     // Act / Assert
@@ -178,23 +180,23 @@ test "init: starts with full bucket" {
 
 test "tryAcquire: consumes tokens" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 3 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 3 })).?;
 
     // Act
-    try testing.expect(limiter.tryAcquire());
-    try testing.expect(limiter.tryAcquire());
-    try testing.expect(limiter.tryAcquire());
+    try testing.expect(limiter.tryAcquire(std.testing.io));
+    try testing.expect(limiter.tryAcquire(std.testing.io));
+    try testing.expect(limiter.tryAcquire(std.testing.io));
 
     // Assert
-    try testing.expect(!limiter.tryAcquire());
+    try testing.expect(!limiter.tryAcquire(std.testing.io));
 }
 
 test "acquire: consumes token from full bucket" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 5 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 5 })).?;
 
     // Act
-    try limiter.acquire(Context.background());
+    try limiter.acquire(std.testing.io, Context.background());
 
     // Assert
     try testing.expect(limiter.tokens < limiter.max_tokens);
@@ -202,37 +204,37 @@ test "acquire: consumes token from full bucket" {
 
 test "refill: tokens accumulate over time" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 1000.0, .burst = 5 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 1000.0, .burst = 5 })).?;
 
     // Act
     // Drain all tokens.
     for (0..5) |_| {
-        try testing.expect(limiter.tryAcquire());
+        try testing.expect(limiter.tryAcquire(std.testing.io));
     }
-    try testing.expect(!limiter.tryAcquire());
+    try testing.expect(!limiter.tryAcquire(std.testing.io));
 
     // Assert
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
-    try testing.expect(limiter.tryAcquire());
+    try testing.expect(limiter.tryAcquire(std.testing.io));
 }
 
 test "acquire: returns Canceled when context is already canceled" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 5 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 5 })).?;
     var cs = context_mod.CancelSource.init();
-    cs.cancel();
+    cs.cancel(std.testing.io);
     const ctx = cs.context();
 
     // Act / Assert
-    try testing.expectError(error.Canceled, limiter.acquire(ctx));
+    try testing.expectError(error.Canceled, limiter.acquire(std.testing.io, ctx));
 }
 
 test "acquire: returns Canceled when context is canceled while waiting" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 1.0, .burst = 1 })).?;
-    try testing.expect(limiter.tryAcquire());
-    try testing.expect(!limiter.tryAcquire());
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 1.0, .burst = 1 })).?;
+    try testing.expect(limiter.tryAcquire(std.testing.io));
+    try testing.expect(!limiter.tryAcquire(std.testing.io));
 
     // Act
     var cs = context_mod.CancelSource.init();
@@ -241,27 +243,27 @@ test "acquire: returns Canceled when context is canceled while waiting" {
     // Assert
     // Cancel from another thread after a short delay.
     const cancel_thread = try std.Thread.spawn(.{}, struct {
-        fn run(cancel_source: *context_mod.CancelSource) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            cancel_source.cancel();
+        fn run(io: std.Io, cancel_source: *context_mod.CancelSource) void {
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, io) catch {};
+            cancel_source.cancel(io);
         }
-    }.run, .{&cs});
+    }.run, .{ std.testing.io, &cs });
 
-    try testing.expectError(error.Canceled, limiter.acquire(ctx));
+    try testing.expectError(error.Canceled, limiter.acquire(std.testing.io, ctx));
 
     cancel_thread.join();
 }
 
 test "tryAcquire: concurrent access from multiple threads" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 1.0, .burst = 10 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 1.0, .burst = 10 })).?;
     var success_count = std.atomic.Value(u32).init(0);
 
     // Act
     const Worker = struct {
-        fn run(lim: *RateLimiter, counter: *std.atomic.Value(u32)) void {
+        fn run(io: std.Io, lim: *RateLimiter, counter: *std.atomic.Value(u32)) void {
             for (0..5) |_| {
-                if (lim.tryAcquire()) {
+                if (lim.tryAcquire(io)) {
                     _ = counter.fetchAdd(1, .monotonic);
                 }
             }
@@ -271,7 +273,7 @@ test "tryAcquire: concurrent access from multiple threads" {
     // Assert
     var threads: [4]std.Thread = undefined;
     for (&threads) |*t| {
-        t.* = try std.Thread.spawn(.{}, Worker.run, .{ &limiter, &success_count });
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{ std.testing.io, &limiter, &success_count });
     }
     for (&threads) |t| {
         t.join();
@@ -284,10 +286,10 @@ test "tryAcquire: concurrent access from multiple threads" {
 
 test "reserve: returns 0 when token available" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 5 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 5 })).?;
 
     // Act
-    const delay = limiter.reserve();
+    const delay = limiter.reserve(std.testing.io);
 
     // Assert
     try testing.expectEqual(@as(u64, 0), delay);
@@ -296,12 +298,12 @@ test "reserve: returns 0 when token available" {
 
 test "reserve: returns positive delay when exhausted" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 2 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 2 })).?;
 
     // Act
-    const d1 = limiter.reserve();
-    const d2 = limiter.reserve();
-    const d3 = limiter.reserve(); // bucket now empty, should return delay
+    const d1 = limiter.reserve(std.testing.io);
+    const d2 = limiter.reserve(std.testing.io);
+    const d3 = limiter.reserve(std.testing.io); // bucket now empty, should return delay
 
     // Assert
     try testing.expectEqual(@as(u64, 0), d1);
@@ -311,12 +313,12 @@ test "reserve: returns positive delay when exhausted" {
 
 test "reserve: debt accumulates across calls" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 10.0, .burst = 1 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 10.0, .burst = 1 })).?;
 
     // Act
-    _ = limiter.reserve(); // consumes the 1 available token
-    const d1 = limiter.reserve(); // first debt call
-    const d2 = limiter.reserve(); // second debt call, more debt
+    _ = limiter.reserve(std.testing.io); // consumes the 1 available token
+    const d1 = limiter.reserve(std.testing.io); // first debt call
+    const d2 = limiter.reserve(std.testing.io); // second debt call, more debt
 
     // Assert
     try testing.expect(d1 > 0);
@@ -325,19 +327,19 @@ test "reserve: debt accumulates across calls" {
 
 test "reserve: debt repays over time" {
     // Arrange
-    var limiter = (try RateLimiter.init(.{ .qps = 1000.0, .burst = 1 })).?;
+    var limiter = (try RateLimiter.init(std.testing.io, .{ .qps = 1000.0, .burst = 1 })).?;
 
     // Act
-    _ = limiter.reserve(); // consume the one token
-    const d1 = limiter.reserve(); // go into debt
+    _ = limiter.reserve(std.testing.io); // consume the one token
+    const d1 = limiter.reserve(std.testing.io); // go into debt
 
     // Assert
     try testing.expect(d1 > 0);
 
     // Wait for refill to repay the debt.
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // After waiting, a token should be available again.
-    const d2 = limiter.reserve();
+    const d2 = limiter.reserve(std.testing.io);
     try testing.expectEqual(@as(u64, 0), d2);
 }

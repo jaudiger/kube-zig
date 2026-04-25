@@ -21,10 +21,10 @@ const testing = std.testing;
 ///
 /// Thread-safe: uses a mutex to protect state transitions.
 pub const CircuitBreaker = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.closed),
     consecutive_failures: u32 = 0,
-    last_failure_time: ?std.time.Instant = null,
+    last_failure_time: ?std.Io.Clock.Timestamp = null,
     half_open_sent: bool = false,
     config: Config,
     logger: Logger = Logger.noop,
@@ -56,25 +56,26 @@ pub const CircuitBreaker = struct {
     pub fn init(config: Config) error{TimerUnsupported}!?CircuitBreaker {
         if (config.failure_threshold == 0) return null;
 
-        // Verify monotonic timer support (same pattern as RateLimiter).
-        _ = std.time.Instant.now() catch return error.TimerUnsupported;
-
+        // The monotonic clock is always supported in the Io-based runtime,
+        // so there's nothing to probe here anymore. The error is retained
+        // for ABI compatibility with callers.
         return .{ .config = config, .logger = config.logger.withScope("circuit_breaker") };
     }
 
     /// Check if a request is allowed. Returns error.CircuitBreakerOpen if the
     /// circuit is open. In half-open state, allows exactly one probe request.
-    pub fn allowRequest(self: *CircuitBreaker) error{CircuitBreakerOpen}!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn allowRequest(self: *CircuitBreaker, io: std.Io) error{CircuitBreakerOpen}!void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         switch (self.state.raw) {
             .closed => return,
             .open => {
                 // Check if recovery timeout has elapsed.
                 if (self.last_failure_time) |lft| {
-                    const now = std.time.Instant.now() catch return error.CircuitBreakerOpen;
-                    if (now.since(lft) >= self.config.recovery_timeout_ns) {
+                    const elapsed_ns: i96 = lft.untilNow(io).raw.nanoseconds;
+                    const elapsed: u64 = if (elapsed_ns < 0) 0 else @intCast(elapsed_ns);
+                    if (elapsed >= self.config.recovery_timeout_ns) {
                         self.state.store(.half_open, .release);
                         self.half_open_sent = true;
                         self.logger.info("circuit breaker half-open", &.{
@@ -95,9 +96,9 @@ pub const CircuitBreaker = struct {
     }
 
     /// Record a successful outcome. Resets failure count and closes the circuit.
-    pub fn recordSuccess(self: *CircuitBreaker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn recordSuccess(self: *CircuitBreaker, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         const prev = self.state.raw;
         self.consecutive_failures = 0;
@@ -111,12 +112,12 @@ pub const CircuitBreaker = struct {
 
     /// Record a failure. Increments consecutive failure count.
     /// Trips to open if threshold is reached.
-    pub fn recordFailure(self: *CircuitBreaker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn recordFailure(self: *CircuitBreaker, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         self.consecutive_failures +|= 1;
-        self.last_failure_time = std.time.Instant.now() catch self.last_failure_time;
+        self.last_failure_time = .now(io, .awake);
 
         switch (self.state.raw) {
             .closed => {
@@ -178,7 +179,7 @@ test "closed state allows requests" {
     var cb = (try CircuitBreaker.init(.{ .failure_threshold = 5 })).?;
 
     // Act / Assert
-    try cb.allowRequest();
+    try cb.allowRequest(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.closed, cb.getState());
 }
 
@@ -188,12 +189,12 @@ test "failures below threshold keep circuit closed" {
 
     // Act
     for (0..4) |_| {
-        cb.recordFailure();
+        cb.recordFailure(std.testing.io);
     }
 
     // Assert
     try testing.expectEqual(CircuitBreaker.State.closed, cb.getState());
-    try cb.allowRequest();
+    try cb.allowRequest(std.testing.io);
 }
 
 test "failures at threshold trip to open" {
@@ -201,9 +202,9 @@ test "failures at threshold trip to open" {
     var cb = (try CircuitBreaker.init(.{ .failure_threshold = 3 })).?;
 
     // Act
-    cb.recordFailure();
-    cb.recordFailure();
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
 
     // Assert
     try testing.expectEqual(CircuitBreaker.State.open, cb.getState());
@@ -217,12 +218,12 @@ test "open state rejects requests" {
     })).?;
 
     // Act
-    cb.recordFailure();
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
 
     // Assert
     try testing.expectEqual(CircuitBreaker.State.open, cb.getState());
-    try testing.expectError(error.CircuitBreakerOpen, cb.allowRequest());
+    try testing.expectError(error.CircuitBreakerOpen, cb.allowRequest(std.testing.io));
 }
 
 test "recovery timeout transitions to half-open" {
@@ -234,15 +235,15 @@ test "recovery timeout transitions to half-open" {
 
     // Act
     // Trip the circuit.
-    cb.recordFailure();
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.open, cb.getState());
 
     // Assert
     // Wait for recovery timeout.
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 2 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
-    try cb.allowRequest();
+    try cb.allowRequest(std.testing.io);
 
     try testing.expectEqual(CircuitBreaker.State.half_open, cb.getState());
 }
@@ -256,17 +257,17 @@ test "half-open probe success closes circuit" {
 
     // Act
     // Trip to open, wait for recovery, allow probe.
-    cb.recordFailure();
-    cb.recordFailure();
-    std.Thread.sleep(2 * std.time.ns_per_ms);
-    try cb.allowRequest();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 2 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    try cb.allowRequest(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.half_open, cb.getState());
 
     // Assert
-    cb.recordSuccess();
+    cb.recordSuccess(std.testing.io);
 
     try testing.expectEqual(CircuitBreaker.State.closed, cb.getState());
-    try cb.allowRequest(); // requests flow normally again
+    try cb.allowRequest(std.testing.io); // requests flow normally again
 }
 
 test "half-open probe failure re-opens circuit" {
@@ -278,16 +279,16 @@ test "half-open probe failure re-opens circuit" {
 
     // Act
     // Trip to open, wait for recovery, allow probe.
-    cb.recordFailure();
-    cb.recordFailure();
-    std.Thread.sleep(2 * std.time.ns_per_ms);
-    try cb.allowRequest();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 2 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    try cb.allowRequest(std.testing.io);
 
     // Assert
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
 
     try testing.expectEqual(CircuitBreaker.State.open, cb.getState());
-    try testing.expectError(error.CircuitBreakerOpen, cb.allowRequest());
+    try testing.expectError(error.CircuitBreakerOpen, cb.allowRequest(std.testing.io));
 }
 
 test "success resets consecutive failure count" {
@@ -296,16 +297,16 @@ test "success resets consecutive failure count" {
 
     // Act
     // Accumulate some failures (but not enough to trip).
-    cb.recordFailure();
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
 
     // Assert
-    cb.recordSuccess();
+    cb.recordSuccess(std.testing.io);
 
-    cb.recordFailure();
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.closed, cb.getState());
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.open, cb.getState());
 }
 
@@ -318,13 +319,13 @@ test "concurrent access is safe" {
 
     // Act
     const Worker = struct {
-        fn run(circuit_breaker: *CircuitBreaker) void {
+        fn run(io: std.Io, circuit_breaker: *CircuitBreaker) void {
             for (0..50) |i| {
-                _ = circuit_breaker.allowRequest() catch {};
+                _ = circuit_breaker.allowRequest(io) catch {};
                 if (i % 3 == 0) {
-                    circuit_breaker.recordFailure();
+                    circuit_breaker.recordFailure(io);
                 } else {
-                    circuit_breaker.recordSuccess();
+                    circuit_breaker.recordSuccess(io);
                 }
             }
         }
@@ -333,7 +334,7 @@ test "concurrent access is safe" {
     // Assert
     var threads: [4]std.Thread = undefined;
     for (&threads) |*t| {
-        t.* = try std.Thread.spawn(.{}, Worker.run, .{&cb});
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{ std.testing.io, &cb });
     }
     for (&threads) |t| {
         t.join();
@@ -351,19 +352,19 @@ test "half-open allows only one probe" {
 
     // Act
     // Trip to open, wait for recovery.
-    cb.recordFailure();
-    cb.recordFailure();
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 2 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // Assert
-    try cb.allowRequest();
+    try cb.allowRequest(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.half_open, cb.getState());
 
-    try testing.expectError(error.CircuitBreakerOpen, cb.allowRequest());
+    try testing.expectError(error.CircuitBreakerOpen, cb.allowRequest(std.testing.io));
 
     // Complete probe, then requests flow again.
-    cb.recordSuccess();
-    try cb.allowRequest();
+    cb.recordSuccess(std.testing.io);
+    try cb.allowRequest(std.testing.io);
 }
 
 test "consecutive_failures saturates instead of wrapping" {
@@ -372,7 +373,7 @@ test "consecutive_failures saturates instead of wrapping" {
     cb.consecutive_failures = std.math.maxInt(u32);
 
     // Act
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
 
     // Assert
     try testing.expectEqual(std.math.maxInt(u32), cb.consecutive_failures);
@@ -390,16 +391,16 @@ test "getState returns correct state after various transitions" {
 
     // Assert
     // Trip to open.
-    cb.recordFailure();
-    cb.recordFailure();
+    cb.recordFailure(std.testing.io);
+    cb.recordFailure(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.open, cb.getState());
 
     // Wait and transition to half-open.
-    std.Thread.sleep(2 * std.time.ns_per_ms);
-    try cb.allowRequest();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 2 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    try cb.allowRequest(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.half_open, cb.getState());
 
     // Close on success.
-    cb.recordSuccess();
+    cb.recordSuccess(std.testing.io);
     try testing.expectEqual(CircuitBreaker.State.closed, cb.getState());
 }

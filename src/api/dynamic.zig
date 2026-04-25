@@ -41,11 +41,11 @@ pub const ResourceMeta = struct {
     /// Reject empty or slash-containing version/resource, slash-containing group
     /// (empty group is valid for the core API group), and empty kind.
     pub fn validate(self: ResourceMeta) !void {
-        if (self.version.len == 0 or std.mem.indexOfScalar(u8, self.version, '/') != null)
+        if (self.version.len == 0 or std.mem.findScalar(u8, self.version, '/') != null)
             return error.InvalidResourceMeta;
-        if (self.resource.len == 0 or std.mem.indexOfScalar(u8, self.resource, '/') != null)
+        if (self.resource.len == 0 or std.mem.findScalar(u8, self.resource, '/') != null)
             return error.InvalidResourceMeta;
-        if (std.mem.indexOfScalar(u8, self.group, '/') != null)
+        if (std.mem.findScalar(u8, self.group, '/') != null)
             return error.InvalidResourceMeta;
         if (self.kind.len == 0)
             return error.InvalidResourceMeta;
@@ -103,57 +103,57 @@ pub const DynamicApi = struct {
 
     // CRUD methods
     /// List all resources in the configured namespace, or cluster-wide for cluster-scoped resources.
-    pub fn list(self: DynamicApi, opts: ListOptions) !JsonResult {
+    pub fn list(self: DynamicApi, io: std.Io, opts: ListOptions) !JsonResult {
         const path = try self.pathBuilder().listPath(opts);
         defer self.client.allocator.free(path);
-        return self.client.get(Json, path, self.ctx);
+        return self.client.get(io, Json, path, self.ctx);
     }
 
     /// List all resources across all namespaces (cluster-wide).
     /// Only available for namespaced resources; returns `error.NotNamespaced`
     /// for cluster-scoped resources.
-    pub fn listAll(self: DynamicApi, opts: ListOptions) !JsonResult {
+    pub fn listAll(self: DynamicApi, io: std.Io, opts: ListOptions) !JsonResult {
         if (!self.meta.namespaced) return error.NotNamespaced;
         const path = try self.pathBuilder().listAllPath(opts);
         defer self.client.allocator.free(path);
-        return self.client.get(Json, path, self.ctx);
+        return self.client.get(io, Json, path, self.ctx);
     }
 
     /// Get a single resource by name.
-    pub fn get(self: DynamicApi, name: []const u8) !JsonResult {
+    pub fn get(self: DynamicApi, io: std.Io, name: []const u8) !JsonResult {
         const path = try self.pathBuilder().resourcePath(name);
         defer self.client.allocator.free(path);
-        return self.client.get(Json, path, self.ctx);
+        return self.client.get(io, Json, path, self.ctx);
     }
 
     /// Create a new resource from pre-serialized JSON.
-    pub fn create(self: DynamicApi, body: []const u8, opts: WriteOptions) !JsonResult {
+    pub fn create(self: DynamicApi, io: std.Io, body: []const u8, opts: WriteOptions) !JsonResult {
         const path = try self.pathBuilder().createPath(opts);
         defer self.client.allocator.free(path);
-        return self.client.post(Json, path, body, self.ctx);
+        return self.client.post(io, Json, path, body, self.ctx);
     }
 
     /// Update (PUT) an existing resource by name from pre-serialized JSON.
-    pub fn update(self: DynamicApi, name: []const u8, body: []const u8, opts: WriteOptions) !JsonResult {
+    pub fn update(self: DynamicApi, io: std.Io, name: []const u8, body: []const u8, opts: WriteOptions) !JsonResult {
         const path = try self.pathBuilder().updatePath(name, opts);
         defer self.client.allocator.free(path);
-        return self.client.put(Json, path, body, self.ctx);
+        return self.client.put(io, Json, path, body, self.ctx);
     }
 
     /// Delete a resource by name.
-    pub fn delete(self: DynamicApi, name: []const u8, opts: DeleteOptions) !Client.ApiResult(Client.RawResponse) {
+    pub fn delete(self: DynamicApi, io: std.Io, name: []const u8, opts: DeleteOptions) !Client.ApiResult(Client.RawResponse) {
         const path = try self.pathBuilder().resourcePath(name);
         defer self.client.allocator.free(path);
         const delete_body = try query.serializeDeleteOpts(self.client.allocator, opts);
         defer if (delete_body) |b| self.client.allocator.free(b);
-        return self.client.delete(path, delete_body, self.ctx);
+        return self.client.delete(io, path, delete_body, self.ctx);
     }
 
     /// Patch a resource by name with a raw patch body.
-    pub fn patch(self: DynamicApi, name: []const u8, patch_body: []const u8, opts: PatchOptions) !JsonResult {
+    pub fn patch(self: DynamicApi, io: std.Io, name: []const u8, patch_body: []const u8, opts: PatchOptions) !JsonResult {
         const path = try self.pathBuilder().patchPath(name, opts);
         defer self.client.allocator.free(path);
-        return self.client.patch(Json, path, patch_body, opts.patch_type.contentType(), self.ctx);
+        return self.client.patch(io, Json, path, patch_body, opts.patch_type.contentType(), self.ctx);
     }
 
     /// Apply (SSA) a resource using a JSON value body.
@@ -161,16 +161,16 @@ pub const DynamicApi = struct {
     /// Set `apiVersion` and `kind` on the body from `ResourceMeta` before
     /// serializing. Send as an `application/apply-patch+yaml` PATCH request.
     /// The `kind` field must be set on `ResourceMeta` for this to work correctly.
-    pub fn apply(self: DynamicApi, name: []const u8, body: Json, opts: ApplyOptions) !JsonResult {
-        return self.applyInternal(name, body, opts, null);
+    pub fn apply(self: DynamicApi, io: std.Io, name: []const u8, body: Json, opts: ApplyOptions) !JsonResult {
+        return self.applyInternal(io, name, body, opts, null);
     }
 
     /// Apply (SSA) to the /status subresource.
-    pub fn applyStatus(self: DynamicApi, name: []const u8, body: Json, opts: ApplyOptions) !JsonResult {
-        return self.applyInternal(name, body, opts, "status");
+    pub fn applyStatus(self: DynamicApi, io: std.Io, name: []const u8, body: Json, opts: ApplyOptions) !JsonResult {
+        return self.applyInternal(io, name, body, opts, "status");
     }
 
-    fn applyInternal(self: DynamicApi, name: []const u8, body: Json, opts: ApplyOptions, subresource: ?[]const u8) !JsonResult {
+    fn applyInternal(self: DynamicApi, io: std.Io, name: []const u8, body: Json, opts: ApplyOptions, subresource: ?[]const u8) !JsonResult {
         std.debug.assert(self.meta.kind.len > 0);
         const alloc = self.client.allocator;
 
@@ -189,8 +189,8 @@ pub const DynamicApi = struct {
         var patched = try deepClone(Json, clone_arena.allocator(), body);
         switch (patched) {
             .object => |*obj| {
-                try obj.put("apiVersion", .{ .string = api_version });
-                try obj.put("kind", .{ .string = self.meta.kind });
+                try obj.put(clone_arena.allocator(), "apiVersion", .{ .string = api_version });
+                try obj.put(clone_arena.allocator(), "kind", .{ .string = self.meta.kind });
             },
             else => {},
         }
@@ -216,76 +216,76 @@ pub const DynamicApi = struct {
         const path = try query.appendPatchQueryParams(alloc, apply_base, patch_opts);
         defer alloc.free(path);
 
-        return self.client.patch(Json, path, json_body, PatchType.apply.contentType(), self.ctx);
+        return self.client.patch(io, Json, path, json_body, PatchType.apply.contentType(), self.ctx);
     }
 
     /// Watch for changes to resources in the configured namespace.
-    pub fn watch(self: DynamicApi, opts: WatchOptions) !watch_mod.WatchStream(Json) {
+    pub fn watch(self: DynamicApi, io: std.Io, opts: WatchOptions) !watch_mod.WatchStream(Json) {
         const path = try self.pathBuilder().watchPath(opts);
         defer self.client.allocator.free(path);
-        return watch_mod.WatchStream(Json).init(self.client, self.ctx, path, opts.max_line_size);
+        return watch_mod.WatchStream(Json).init(self.client, io, self.ctx, path, opts.max_line_size);
     }
 
     /// Watch for changes to resources across all namespaces.
     /// Only available for namespaced resources; returns `error.NotNamespaced`
     /// for cluster-scoped resources.
-    pub fn watchAll(self: DynamicApi, opts: WatchOptions) !watch_mod.WatchStream(Json) {
+    pub fn watchAll(self: DynamicApi, io: std.Io, opts: WatchOptions) !watch_mod.WatchStream(Json) {
         if (!self.meta.namespaced) return error.NotNamespaced;
         const path = try self.pathBuilder().watchAllPath(opts);
         defer self.client.allocator.free(path);
-        return watch_mod.WatchStream(Json).init(self.client, self.ctx, path, opts.max_line_size);
+        return watch_mod.WatchStream(Json).init(self.client, io, self.ctx, path, opts.max_line_size);
     }
 
     // Subresource methods
     /// Get a named subresource (e.g. "status", "scale").
-    pub fn getSubresource(self: DynamicApi, name: []const u8, subresource: []const u8) !JsonResult {
+    pub fn getSubresource(self: DynamicApi, io: std.Io, name: []const u8, subresource: []const u8) !JsonResult {
         const path = try self.pathBuilder().subresourcePath(name, subresource);
         defer self.client.allocator.free(path);
-        return self.client.get(Json, path, self.ctx);
+        return self.client.get(io, Json, path, self.ctx);
     }
 
     /// Update (PUT) a named subresource from pre-serialized JSON.
-    pub fn updateSubresource(self: DynamicApi, name: []const u8, subresource: []const u8, body: []const u8) !JsonResult {
+    pub fn updateSubresource(self: DynamicApi, io: std.Io, name: []const u8, subresource: []const u8, body: []const u8) !JsonResult {
         const path = try self.pathBuilder().subresourcePath(name, subresource);
         defer self.client.allocator.free(path);
-        return self.client.put(Json, path, body, self.ctx);
+        return self.client.put(io, Json, path, body, self.ctx);
     }
 
     /// Patch a named subresource with a raw patch body.
-    pub fn patchSubresource(self: DynamicApi, name: []const u8, subresource: []const u8, patch_body: []const u8, opts: PatchOptions) !JsonResult {
+    pub fn patchSubresource(self: DynamicApi, io: std.Io, name: []const u8, subresource: []const u8, patch_body: []const u8, opts: PatchOptions) !JsonResult {
         const path = try self.pathBuilder().subresourcePatchPath(name, subresource, opts);
         defer self.client.allocator.free(path);
-        return self.client.patch(Json, path, patch_body, opts.patch_type.contentType(), self.ctx);
+        return self.client.patch(io, Json, path, patch_body, opts.patch_type.contentType(), self.ctx);
     }
 
     /// Get the /status subresource.
-    pub fn getStatus(self: DynamicApi, name: []const u8) !JsonResult {
-        return self.getSubresource(name, "status");
+    pub fn getStatus(self: DynamicApi, io: std.Io, name: []const u8) !JsonResult {
+        return self.getSubresource(io, name, "status");
     }
 
     /// Update (PUT) the /status subresource from pre-serialized JSON.
-    pub fn updateStatus(self: DynamicApi, name: []const u8, body: []const u8) !JsonResult {
-        return self.updateSubresource(name, "status", body);
+    pub fn updateStatus(self: DynamicApi, io: std.Io, name: []const u8, body: []const u8) !JsonResult {
+        return self.updateSubresource(io, name, "status", body);
     }
 
     /// Patch the /status subresource with a raw patch body.
-    pub fn patchStatus(self: DynamicApi, name: []const u8, patch_body: []const u8, opts: PatchOptions) !JsonResult {
-        return self.patchSubresource(name, "status", patch_body, opts);
+    pub fn patchStatus(self: DynamicApi, io: std.Io, name: []const u8, patch_body: []const u8, opts: PatchOptions) !JsonResult {
+        return self.patchSubresource(io, name, "status", patch_body, opts);
     }
 
     /// Get a raw subresource (e.g. /log). Return raw bytes rather than parsed JSON.
-    pub fn getRaw(self: DynamicApi, name: []const u8, subresource: []const u8) !Client.ApiResult(Client.RawResponse) {
+    pub fn getRaw(self: DynamicApi, io: std.Io, name: []const u8, subresource: []const u8) !Client.ApiResult(Client.RawResponse) {
         const path = try self.pathBuilder().subresourcePath(name, subresource);
         defer self.client.allocator.free(path);
-        return self.client.getRaw(path, self.ctx);
+        return self.client.getRaw(io, path, self.ctx);
     }
 };
 
 // listAll guard
 test "listAll: cluster-scoped returns error.NotNamespaced" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
     const api = try DynamicApi.init(&client, client.context(), .{
         .group = "",
         .version = "v1",
@@ -295,14 +295,14 @@ test "listAll: cluster-scoped returns error.NotNamespaced" {
     }, null);
 
     // Act / Assert
-    try testing.expectError(error.NotNamespaced, api.listAll(.{}));
+    try testing.expectError(error.NotNamespaced, api.listAll(std.testing.io, .{}));
 }
 
 // watchAll guard
 test "watchAll: cluster-scoped returns error.NotNamespaced" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
     const api = try DynamicApi.init(&client, client.context(), .{
         .group = "",
         .version = "v1",
@@ -312,7 +312,7 @@ test "watchAll: cluster-scoped returns error.NotNamespaced" {
     }, null);
 
     // Act / Assert
-    try testing.expectError(error.NotNamespaced, api.watchAll(.{}));
+    try testing.expectError(error.NotNamespaced, api.watchAll(std.testing.io, .{}));
 }
 
 // ResourceMeta validation tests
@@ -429,8 +429,8 @@ test "ResourceMeta validate: empty kind returns error" {
 
 test "DynamicApi.init: invalid metadata returns error" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act / Assert
     try testing.expectError(error.InvalidResourceMeta, DynamicApi.init(&client, client.context(), .{
@@ -444,8 +444,8 @@ test "DynamicApi.init: invalid metadata returns error" {
 
 test "DynamicApi.init: resource with slash returns error" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act / Assert
     try testing.expectError(error.InvalidResourceMeta, DynamicApi.init(&client, client.context(), .{

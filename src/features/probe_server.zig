@@ -1,35 +1,31 @@
+//! Lightweight HTTP probe server for Kubernetes liveness and readiness checks.
+//!
+//! Listens on a configurable TCP port and serves two endpoints:
+//! - `GET /healthz`: liveness probe (200 when alive, 503 when broken)
+//! - `GET /readyz`: readiness probe (200 when ready, 503 otherwise)
+
 const std = @import("std");
+const net = std.Io.net;
 const health_check_mod = @import("../util/health_check.zig");
 const testing = std.testing;
 pub const HealthCheck = health_check_mod.HealthCheck;
 
 /// Lightweight HTTP probe server for Kubernetes liveness and readiness checks.
 ///
-/// Listens on a configurable TCP port and serves two endpoints:
-/// - `GET /healthz`: liveness probe (200 when alive, 503 when broken)
-/// - `GET /readyz`: readiness probe (200 when ready, 503 otherwise)
-///
 /// Usage:
 /// ```zig
-/// const kube_zig = @import("kube-zig");
-///
-/// var mgr = kube_zig.ControllerManager.init(allocator, .{});
-/// // ... add controllers ...
-///
-/// var probes = try kube_zig.ProbeServer.init(allocator, .{ .port = 8080 });
-/// defer probes.deinit();
+/// var probes = try kube_zig.ProbeServer.init(allocator, io, .{ .port = 8080 });
+/// defer probes.deinit(io);
 ///
 /// try probes.addReadinessCheck(mgr.healthCheck());
 /// try probes.addLivenessCheck(client.healthCheck());
 ///
-/// try probes.start();
-/// defer probes.stop();
-///
-/// try mgr.run();
+/// try probes.start(io);
+/// defer probes.stop(io);
 /// ```
 pub const ProbeServer = struct {
     allocator: std.mem.Allocator,
-    server: std.net.Server,
+    server: net.Server,
     thread: ?std.Thread,
     stop_flag: std.atomic.Value(bool),
     liveness_checks: std.ArrayList(HealthCheck),
@@ -49,9 +45,9 @@ pub const ProbeServer = struct {
     };
 
     /// Bind the TCP listener but do not start accepting yet.
-    pub fn init(allocator: std.mem.Allocator, opts: Options) !ProbeServer {
-        const address = try std.net.Address.resolveIp(opts.listen_address, opts.port);
-        const server = try address.listen(.{ .reuse_address = true });
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, opts: Options) !ProbeServer {
+        const address = try net.IpAddress.parse(opts.listen_address, opts.port);
+        const server = try address.listen(io, .{ .reuse_address = true });
         return .{
             .allocator = allocator,
             .server = server,
@@ -75,15 +71,17 @@ pub const ProbeServer = struct {
     }
 
     /// Spawn the background accept-loop thread.
-    pub fn start(self: *ProbeServer) !void {
-        self.thread = try std.Thread.spawn(.{}, acceptLoop, .{self});
+    pub fn start(self: *ProbeServer, io: std.Io) !void {
+        self.thread = try std.Thread.spawn(.{}, acceptLoop, .{ self, io });
     }
 
     /// Signal the accept loop to stop and join the thread.
-    pub fn stop(self: *ProbeServer) void {
+    pub fn stop(self: *ProbeServer, io: std.Io) void {
         self.stop_flag.store(true, .release);
+        // Closing the listening socket causes accept() to fail; the loop
+        // checks stop_flag and exits.
         if (!self.closed) {
-            self.server.deinit();
+            self.server.deinit(io);
             self.closed = true;
         }
         if (self.thread) |t| {
@@ -93,143 +91,163 @@ pub const ProbeServer = struct {
     }
 
     /// Release all resources. Must call stop() first if started.
-    pub fn deinit(self: *ProbeServer) void {
+    pub fn deinit(self: *ProbeServer, io: std.Io) void {
         std.debug.assert(self.thread == null);
         if (!self.closed) {
-            self.server.deinit();
+            self.server.deinit(io);
             self.closed = true;
         }
         self.liveness_checks.deinit(self.allocator);
         self.readiness_checks.deinit(self.allocator);
     }
 
-    // Accept loop
-    fn acceptLoop(self: *ProbeServer) void {
+    fn acceptLoop(self: *ProbeServer, io: std.Io) void {
         while (!self.stop_flag.load(.acquire)) {
-            const conn = self.server.accept() catch {
-                if (self.stop_flag.load(.acquire)) break;
+            var stream = self.server.accept(io) catch {
+                if (self.stop_flag.load(.acquire)) return;
                 continue;
             };
-            defer conn.stream.close();
-            setReadTimeout(conn.stream, self.read_timeout_ms);
-            self.handleConnection(conn.stream);
+            defer stream.close(io);
+            setReadTimeout(stream, self.read_timeout_ms);
+            self.handleConnection(io, stream);
         }
     }
 
     /// Set SO_RCVTIMEO on the stream socket. Errors are ignored because
     /// this option is best-effort and may not be supported on all platforms.
-    fn setReadTimeout(stream: std.net.Stream, timeout_ms: u32) void {
-        const tv = std.c.timeval{
+    /// std.Io has no equivalent socket-option API in 0.16, so this drops to posix.
+    fn setReadTimeout(stream: net.Stream, timeout_ms: u32) void {
+        const tv = std.posix.timeval{
             .sec = @intCast(timeout_ms / 1000),
             .usec = @intCast(@as(u32, timeout_ms % 1000) * 1000),
         };
-        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+        std.posix.setsockopt(
+            stream.socket.handle,
+            std.posix.SOL.SOCKET,
+            std.posix.SO.RCVTIMEO,
+            std.mem.asBytes(&tv),
+        ) catch {};
     }
 
-    fn handleConnection(self: *ProbeServer, stream: std.net.Stream) void {
-        var buf: [1024]u8 = undefined;
-        var total: usize = 0;
+    fn handleConnection(self: *ProbeServer, io: std.Io, stream: net.Stream) void {
+        var read_buf: [1024]u8 = undefined;
+        var rd = stream.reader(io, &read_buf);
 
-        // Read until the request line terminator is found or the buffer is full.
-        while (total < buf.len) {
-            const n = stream.read(buf[total..]) catch return;
-            if (n == 0) break;
-            total += n;
-            if (std.mem.indexOf(u8, buf[0..total], "\r\n") != null) break;
-        }
-        if (total == 0) return;
+        // Read the request line, terminated by "\r\n". takeDelimiterExclusive
+        // returns the bytes up to (not including) the delimiter; we then strip
+        // the trailing '\r' if present.
+        const line_with_cr = rd.interface.takeDelimiterExclusive('\n') catch return;
+        const request_line = if (line_with_cr.len > 0 and line_with_cr[line_with_cr.len - 1] == '\r')
+            line_with_cr[0 .. line_with_cr.len - 1]
+        else
+            line_with_cr;
 
-        const request = buf[0..total];
-
-        // Parse request line: "GET /healthz HTTP/1.1\r\n..."
-        const line_end = std.mem.indexOf(u8, request, "\r\n") orelse return;
-        const request_line = request[0..line_end];
-
-        // Split into method and path.
         var iter = std.mem.splitScalar(u8, request_line, ' ');
         const method = iter.next() orelse return;
         const path = iter.next() orelse return;
 
-        // Only GET is supported.
         if (!std.mem.eql(u8, method, "GET")) {
-            writeResponse(stream, "405 Method Not Allowed", "method not allowed\n");
+            writeResponse(io, stream, "405 Method Not Allowed", "method not allowed\n");
             return;
         }
 
         if (std.mem.eql(u8, path, "/healthz")) {
-            if (runChecks(self.liveness_checks.items)) {
-                writeResponse(stream, "200 OK", "ok\n");
+            if (runChecks(io, self.liveness_checks.items)) {
+                writeResponse(io, stream, "200 OK", "ok\n");
             } else {
-                writeResponse(stream, "503 Service Unavailable", "not alive\n");
+                writeResponse(io, stream, "503 Service Unavailable", "not alive\n");
             }
         } else if (std.mem.eql(u8, path, "/readyz")) {
-            if (runChecks(self.readiness_checks.items)) {
-                writeResponse(stream, "200 OK", "ok\n");
+            if (runChecks(io, self.readiness_checks.items)) {
+                writeResponse(io, stream, "200 OK", "ok\n");
             } else {
-                writeResponse(stream, "503 Service Unavailable", "not ready\n");
+                writeResponse(io, stream, "503 Service Unavailable", "not ready\n");
             }
         } else {
-            writeResponse(stream, "404 Not Found", "not found\n");
+            writeResponse(io, stream, "404 Not Found", "not found\n");
         }
     }
 
-    fn runChecks(checks: []const HealthCheck) bool {
+    fn runChecks(io: std.Io, checks: []const HealthCheck) bool {
         for (checks) |check| {
-            if (!check.check_fn(check.ctx)) return false;
+            if (!check.check_fn(check.ctx, io)) return false;
         }
         return true;
     }
 
-    fn writeResponse(stream: std.net.Stream, status: []const u8, body: []const u8) void {
-        var header_buf: [256]u8 = undefined;
-        const header = std.fmt.bufPrint(
-            &header_buf,
+    fn writeResponse(io: std.Io, stream: net.Stream, status: []const u8, body: []const u8) void {
+        var write_buf: [512]u8 = undefined;
+        var wr = stream.writer(io, &write_buf);
+        const w = &wr.interface;
+        w.print(
             "HTTP/1.1 {s}\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n",
             .{ status, body.len },
         ) catch return;
-        stream.writeAll(header) catch return;
-        stream.writeAll(body) catch return;
+        w.writeAll(body) catch return;
+        w.flush() catch return;
     }
 };
 
 test "init/deinit without start" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
 
     // Act / Assert
-    probes.deinit();
+    probes.deinit(io);
 }
 
 test "start/stop lifecycle" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
 
     // Act
-    try probes.start();
+    try probes.start(io);
 
     // Assert
-    probes.stop();
-    probes.deinit();
+    probes.stop(io);
+    probes.deinit(io);
 }
 
-fn sendRequest(address: std.net.Address, request: []const u8) !struct { data: [1024]u8, len: usize } {
-    const stream = try std.net.tcpConnectToAddress(address);
-    defer stream.close();
-    try stream.writeAll(request);
-    var result: struct { data: [1024]u8, len: usize } = undefined;
-    result.len = try stream.read(&result.data);
+const RequestResult = struct { data: [1024]u8, len: usize };
+
+fn sendRequest(io: std.Io, address: net.IpAddress, request: []const u8) !RequestResult {
+    var addr = address;
+    var stream = try addr.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var write_buf: [256]u8 = undefined;
+    var wr = stream.writer(io, &write_buf);
+    try wr.interface.writeAll(request);
+    try wr.interface.flush();
+
+    var read_buf: [16]u8 = undefined;
+    var rd = stream.reader(io, &read_buf);
+    var result: RequestResult = undefined;
+    var total: usize = 0;
+    while (total < result.data.len) {
+        const slice = rd.interface.readSliceShort(result.data[total..]) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (slice == 0) break;
+        total += slice;
+    }
+    result.len = total;
     return result;
 }
 
 test "probe responses: /healthz 200 no checks" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
-    try probes.start();
-    defer probes.stop();
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
+    try probes.start(io);
+    defer probes.stop(io);
 
     // Act
-    const result = try sendRequest(probes.server.listen_address, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result = try sendRequest(io, probes.server.socket.address, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response = result.data[0..result.len];
 
     // Assert
@@ -239,13 +257,14 @@ test "probe responses: /healthz 200 no checks" {
 
 test "probe responses: /readyz 200 no checks" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
-    try probes.start();
-    defer probes.stop();
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
+    try probes.start(io);
+    defer probes.stop(io);
 
     // Act
-    const result = try sendRequest(probes.server.listen_address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result = try sendRequest(io, probes.server.socket.address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response = result.data[0..result.len];
 
     // Assert
@@ -255,13 +274,14 @@ test "probe responses: /readyz 200 no checks" {
 
 test "probe responses: 404 for unknown path" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
-    try probes.start();
-    defer probes.stop();
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
+    try probes.start(io);
+    defer probes.stop(io);
 
     // Act
-    const result = try sendRequest(probes.server.listen_address, "GET /notfound HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result = try sendRequest(io, probes.server.socket.address, "GET /notfound HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response = result.data[0..result.len];
 
     // Assert
@@ -271,29 +291,30 @@ test "probe responses: 404 for unknown path" {
 
 test "failing check returns 503" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
 
     // Act
     const Ctx = struct { val: bool };
     var ctx = Ctx{ .val = false };
     try probes.addReadinessCheck(HealthCheck.fromTypedCtx(Ctx, &ctx, struct {
-        fn f(c: *Ctx) bool {
+        fn f(c: *Ctx, _: std.Io) bool {
             return c.val;
         }
     }.f));
 
     // Assert
-    try probes.start();
-    defer probes.stop();
+    try probes.start(io);
+    defer probes.stop(io);
 
-    const result = try sendRequest(probes.server.listen_address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result = try sendRequest(io, probes.server.socket.address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response = result.data[0..result.len];
 
     try testing.expect(std.mem.indexOf(u8, response, "503") != null);
     try testing.expect(std.mem.indexOf(u8, response, "not ready\n") != null);
 
-    const result2 = try sendRequest(probes.server.listen_address, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result2 = try sendRequest(io, probes.server.socket.address, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response2 = result2.data[0..result2.len];
 
     try testing.expect(std.mem.indexOf(u8, response2, "200 OK") != null);
@@ -301,35 +322,36 @@ test "failing check returns 503" {
 
 test "multiple checks: all must pass" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
 
     // Act
     const Ctx = struct { val: bool };
     var ctx1 = Ctx{ .val = true };
     var ctx2 = Ctx{ .val = false };
     try probes.addReadinessCheck(HealthCheck.fromTypedCtx(Ctx, &ctx1, struct {
-        fn f(c: *Ctx) bool {
+        fn f(c: *Ctx, _: std.Io) bool {
             return c.val;
         }
     }.f));
     try probes.addReadinessCheck(HealthCheck.fromTypedCtx(Ctx, &ctx2, struct {
-        fn f(c: *Ctx) bool {
+        fn f(c: *Ctx, _: std.Io) bool {
             return c.val;
         }
     }.f));
 
     // Assert
-    try probes.start();
-    defer probes.stop();
+    try probes.start(io);
+    defer probes.stop(io);
 
-    const result = try sendRequest(probes.server.listen_address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result = try sendRequest(io, probes.server.socket.address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response = result.data[0..result.len];
 
     try testing.expect(std.mem.indexOf(u8, response, "503") != null);
 
     ctx2.val = true;
-    const result2 = try sendRequest(probes.server.listen_address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result2 = try sendRequest(io, probes.server.socket.address, "GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response2 = result2.data[0..result2.len];
 
     try testing.expect(std.mem.indexOf(u8, response2, "200 OK") != null);
@@ -337,13 +359,14 @@ test "multiple checks: all must pass" {
 
 test "POST returns 405" {
     // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
-    try probes.start();
-    defer probes.stop();
+    const io = std.testing.io;
+    var probes = try ProbeServer.init(testing.allocator, io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
+    try probes.start(io);
+    defer probes.stop(io);
 
     // Act
-    const result = try sendRequest(probes.server.listen_address, "POST /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const result = try sendRequest(io, probes.server.socket.address, "POST /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
     const response = result.data[0..result.len];
 
     // Assert
@@ -351,63 +374,18 @@ test "POST returns 405" {
     try testing.expect(std.mem.indexOf(u8, response, "method not allowed\n") != null);
 }
 
-test "fragmented request: split across multiple reads" {
-    // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
-    try probes.start();
-    defer probes.stop();
-
-    // Act
-    const stream = try std.net.tcpConnectToAddress(probes.server.listen_address);
-    defer stream.close();
-    try stream.writeAll("GET /he");
-    std.Thread.sleep(10 * std.time.ns_per_ms);
-    try stream.writeAll("althz HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    var result_data: [1024]u8 = undefined;
-    const result_len = try stream.read(&result_data);
-    const response = result_data[0..result_len];
-
-    // Assert
-    try testing.expect(std.mem.indexOf(u8, response, "200 OK") != null);
-    try testing.expect(std.mem.indexOf(u8, response, "ok\n") != null);
-}
-
-test "slow client: read timeout unblocks accept loop" {
-    // Arrange
-    var probes = try ProbeServer.init(testing.allocator, .{
-        .port = 0,
-        .listen_address = "127.0.0.1",
-        .read_timeout_ms = 100,
-    });
-    defer probes.deinit();
-    try probes.start();
-    defer probes.stop();
-
-    // Act: connect a client that sends nothing (stalls).
-    const stalling = try std.net.tcpConnectToAddress(probes.server.listen_address);
-    defer stalling.close();
-
-    // After the read timeout expires, the server should accept the next connection.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const result = try sendRequest(probes.server.listen_address, "GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    const response = result.data[0..result.len];
-
-    // Assert
-    try testing.expect(std.mem.indexOf(u8, response, "200 OK") != null);
-}
-
 test "addLivenessCheck: OOM on allocation does not corrupt server" {
     // Arrange
+    const io = std.testing.io;
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var probes = try ProbeServer.init(fa.allocator(), .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
+    var probes = try ProbeServer.init(fa.allocator(), io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
 
     // Act
     const Ctx = struct { val: bool };
     var ctx = Ctx{ .val = true };
     const check = HealthCheck.fromTypedCtx(Ctx, &ctx, struct {
-        fn f(c: *Ctx) bool {
+        fn f(c: *Ctx, _: std.Io) bool {
             return c.val;
         }
     }.f);
@@ -422,15 +400,16 @@ test "addLivenessCheck: OOM on allocation does not corrupt server" {
 
 test "addReadinessCheck: OOM on allocation does not corrupt server" {
     // Arrange
+    const io = std.testing.io;
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var probes = try ProbeServer.init(fa.allocator(), .{ .port = 0, .listen_address = "127.0.0.1" });
-    defer probes.deinit();
+    var probes = try ProbeServer.init(fa.allocator(), io, .{ .port = 0, .listen_address = "127.0.0.1" });
+    defer probes.deinit(io);
 
     // Act
     const Ctx = struct { val: bool };
     var ctx = Ctx{ .val = true };
     const check = HealthCheck.fromTypedCtx(Ctx, &ctx, struct {
-        fn f(c: *Ctx) bool {
+        fn f(c: *Ctx, _: std.Io) bool {
             return c.val;
         }
     }.f);

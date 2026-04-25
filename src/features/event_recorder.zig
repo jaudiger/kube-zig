@@ -72,6 +72,7 @@ pub const EventRecorder = struct {
     /// Errors are silently discarded.
     pub fn event(
         self: EventRecorder,
+        io: std.Io,
         ref: CoreV1ObjectReference,
         namespace: ?[]const u8,
         event_type: EventType,
@@ -84,7 +85,7 @@ pub const EventRecorder = struct {
             LogField.string("name", ref.name orelse ""),
             LogField.string("reason", reason),
         });
-        self.eventInner(ref, namespace, event_type, reason, message) catch |err| {
+        self.eventInner(io, ref, namespace, event_type, reason, message) catch |err| {
             self.client.logger.warn("event creation failed", &.{
                 LogField.string("error", @errorName(err)),
             });
@@ -105,6 +106,7 @@ pub const EventRecorder = struct {
 
     fn eventInner(
         self: EventRecorder,
+        io: std.Io,
         ref: CoreV1ObjectReference,
         namespace: ?[]const u8,
         event_type: EventType,
@@ -117,7 +119,7 @@ pub const EventRecorder = struct {
         const effective_ns = resolveNamespace(namespace, ref);
 
         var ts_buf: [27]u8 = undefined;
-        const now_str = time_mod.bufNow(.micros, &ts_buf);
+        const now_str = time_mod.bufNow(io, .micros, &ts_buf);
 
         var name_buf: [253]u8 = undefined;
         const event_name = generateEventName(&name_buf, ref, reason);
@@ -142,7 +144,7 @@ pub const EventRecorder = struct {
         };
 
         const api = EventApi.init(self.client, self.client.context(), effective_ns);
-        const result = try api.create(ev, .{});
+        const result = try api.create(io, ev, .{});
         switch (result) {
             .ok => |parsed| parsed.deinit(),
             .api_error => |err_resp| err_resp.deinit(),

@@ -37,20 +37,22 @@ const ResourceEntry = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
 
-    const config = kube_zig.ProxyConfig.init();
-    var text_logger = kube_zig.TextStdoutLogger.init(.info);
+    const config = kube_zig.ProxyConfig.init(init.environ_map);
+    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
 
     const logger = text_logger.logger();
-    var client = try kube_zig.Client.init(allocator, config.base_url, .{ .logger = logger });
-    defer client.deinit();
+    var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = logger });
+    defer client.deinit(io);
 
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     defer w.flush() catch {};
 
@@ -67,7 +69,7 @@ pub fn main() !void {
     defer for (&entries) |*e| e.deinit(allocator);
 
     inline for (resources, 0..) |res, i| {
-        queryAndCollect(res[1], &client, namespace, allocator, &entries[i], logger);
+        queryAndCollect(res[1], &client, io, namespace, allocator, &entries[i], logger);
     }
 
     // Print summary table.
@@ -102,13 +104,14 @@ pub fn main() !void {
 fn queryAndCollect(
     comptime T: type,
     client: *kube_zig.Client,
+    io: std.Io,
     namespace: []const u8,
     allocator: std.mem.Allocator,
     entry: *ResourceEntry,
     logger: kube_zig.Logger,
 ) void {
     const api = kube_zig.Api(T).init(client, client.context(), namespace);
-    const result = api.list(.{}) catch |err| {
+    const result = api.list(io, .{}) catch |err| {
         logger.err("failed to list resources", &.{ kube_zig.LogField.string("kind", entry.kind), kube_zig.LogField.err("error", err) });
         entry.failed = true;
         return;

@@ -9,19 +9,21 @@ const std = @import("std");
 const kube_zig = @import("kube-zig");
 const k8s = kube_zig.types;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
 
-    const config = kube_zig.ProxyConfig.init();
-    var text_logger = kube_zig.TextStdoutLogger.init(.info);
+    const config = kube_zig.ProxyConfig.init(init.environ_map);
+    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
 
-    var client = try kube_zig.Client.init(allocator, config.base_url, .{ .logger = text_logger.logger() });
-    defer client.deinit();
+    var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = text_logger.logger() });
+    defer client.deinit(io);
 
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     defer w.flush() catch {};
 
@@ -31,10 +33,10 @@ pub fn main() !void {
 
     const pods = kube_zig.Api(k8s.CoreV1Pod).init(&client, client.context(), config.namespace);
 
-    var stream = try pods.watch(.{ .timeout_seconds = 300 });
+    var stream = try pods.watch(io, .{ .timeout_seconds = 300 });
     defer stream.close();
 
-    while (try stream.next()) |event| {
+    while (try stream.next(io)) |event| {
         defer event.deinit();
         switch (event.event) {
             .added => |pod| {

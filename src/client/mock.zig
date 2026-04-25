@@ -28,10 +28,10 @@ const CircuitBreaker = @import("../util/circuit_breaker.zig").CircuitBreaker;
 ///
 /// mock.respondWith(.ok, "{\"items\":[]}");
 ///
-/// var c = mock.client();
-/// defer c.deinit();
+/// var c = mock.client(io);
+/// defer c.deinit(io);
 ///
-/// const result = try c.get(SomeType, "/api/v1/pods");
+/// const result = try c.get(io, SomeType, "/api/v1/pods", ctx);
 /// ```
 pub const MockTransport = struct {
     allocator: std.mem.Allocator,
@@ -111,19 +111,19 @@ pub const MockTransport = struct {
 
     /// Create a `Client` wired to this mock transport.
     /// The returned client has no retry, no rate limiting, and base_url "http://mock".
-    pub fn client(self: *MockTransport) Client {
-        return self.clientWithTracer(@import("../util/tracing.zig").TracerProvider.noop);
+    pub fn client(self: *MockTransport, io: std.Io) Client {
+        return self.clientWithTracer(io, @import("../util/tracing.zig").TracerProvider.noop);
     }
 
     /// Create a `Client` wired to this mock transport with a custom tracer.
-    pub fn clientWithTracer(self: *MockTransport, tracer: @import("../util/tracing.zig").TracerProvider) Client {
+    pub fn clientWithTracer(self: *MockTransport, io: std.Io, tracer: @import("../util/tracing.zig").TracerProvider) Client {
         return .{
             .allocator = self.allocator,
             .base_url = self.allocator.dupe(u8, "http://mock") catch @panic("OOM in MockTransport.client"),
             .transport = self.transport(),
             .auth = AuthProvider.none(self.allocator),
             .retry_policy = RetryPolicy.disabled,
-            .rate_limiter = RateLimiter.init(RateLimiter.Config.disabled) catch null,
+            .rate_limiter = RateLimiter.init(io, RateLimiter.Config.disabled) catch null,
             .circuit_breaker = CircuitBreaker.init(CircuitBreaker.Config.disabled) catch null,
             .keep_alive = true,
             .shutdown_source = CancelSource.init(),
@@ -209,22 +209,22 @@ pub const MockTransport = struct {
     }
 
     // vtable implementation
-    fn vtableSend(ptr: *anyopaque, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+    fn vtableSend(ptr: *anyopaque, _: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
         const self: *MockTransport = @ptrCast(@alignCast(ptr));
         return self.sendImpl(opts, body, allocator);
     }
 
-    fn vtableSendStream(ptr: *anyopaque, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+    fn vtableSendStream(ptr: *anyopaque, _: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
         const self: *MockTransport = @ptrCast(@alignCast(ptr));
         return self.sendStreamImpl(opts, allocator);
     }
 
-    fn vtableDeinit(_: *anyopaque) void {
+    fn vtableDeinit(_: *anyopaque, _: std.Io) void {
         // MockTransport is stack-allocated; nothing to free here.
         // The caller owns and deinits the MockTransport directly.
     }
 
-    fn vtablePoolStats(_: *anyopaque) client_mod.PoolStats {
+    fn vtablePoolStats(_: *anyopaque, _: std.Io) client_mod.PoolStats {
         return .{ .pool_size = 0, .free_connections = 0, .active_connections = 0 };
     }
 
@@ -420,6 +420,7 @@ pub const MockTransport = struct {
 
 test "MockTransport: send returns canned response and records request" {
     // Arrange
+    const io = std.testing.io;
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
@@ -427,36 +428,38 @@ test "MockTransport: send returns canned response and records request" {
     mock.respondWith(.ok, "{\"items\":[]}");
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(io);
+    defer c.deinit(io);
     const ctx = c.context();
 
-    const result = try c.get(struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
+    const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
     try testing.expectEqual(1, mock.requestCount());
     const req = mock.getRequest(0).?;
     try testing.expectEqual(http.Method.GET, req.method);
-    try testing.expect(std.mem.indexOf(u8, req.path, "/api/v1/pods") != null);
+    try testing.expect(std.mem.find(u8, req.path, "/api/v1/pods") != null);
 }
 
 test "MockTransport: empty queue returns error" {
     // Arrange
+    const io = std.testing.io;
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
     // Act
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(io);
+    defer c.deinit(io);
     const ctx = c.context();
 
     // Assert
-    const result = c.get(struct {}, "/api/v1/pods", ctx);
+    const result = c.get(io, struct {}, "/api/v1/pods", ctx);
     try testing.expectError(error.HttpRequestFailed, result);
 }
 
 test "MockTransport: flow control headers are surfaced on client" {
     // Arrange
+    const io = std.testing.io;
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
@@ -464,19 +467,20 @@ test "MockTransport: flow control headers are surfaced on client" {
     mock.respondWithFlowControl(.ok, "{\"items\":[]}", "fs-uid-123", "pl-uid-456");
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(io);
+    defer c.deinit(io);
     const ctx = c.context();
 
-    const result = try c.get(struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
+    const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
-    try testing.expectEqualStrings("fs-uid-123", c.flowControl().flow_schema_uid.?);
-    try testing.expectEqualStrings("pl-uid-456", c.flowControl().priority_level_uid.?);
+    try testing.expectEqualStrings("fs-uid-123", c.flowControl(io).flow_schema_uid.?);
+    try testing.expectEqualStrings("pl-uid-456", c.flowControl(io).priority_level_uid.?);
 }
 
 test "MockTransport: flow control headers are null when absent" {
     // Arrange
+    const io = std.testing.io;
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
@@ -484,19 +488,20 @@ test "MockTransport: flow control headers are null when absent" {
     mock.respondWith(.ok, "{\"items\":[]}");
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(io);
+    defer c.deinit(io);
     const ctx = c.context();
 
-    const result = try c.get(struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
+    const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
-    try testing.expect(c.flowControl().flow_schema_uid == null);
-    try testing.expect(c.flowControl().priority_level_uid == null);
+    try testing.expect(c.flowControl(io).flow_schema_uid == null);
+    try testing.expect(c.flowControl(io).priority_level_uid == null);
 }
 
 test "MockTransport: flow control headers are updated on each request" {
     // Arrange
+    const io = std.testing.io;
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
@@ -505,23 +510,24 @@ test "MockTransport: flow control headers are updated on each request" {
     mock.respondWithFlowControl(.ok, "{}", "fs-2", null);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(io);
+    defer c.deinit(io);
     const ctx = c.context();
 
-    const r1 = try c.get(struct {}, "/first", ctx);
+    const r1 = try c.get(io, struct {}, "/first", ctx);
     defer r1.deinit();
-    try testing.expectEqualStrings("fs-1", c.flowControl().flow_schema_uid.?);
-    try testing.expectEqualStrings("pl-1", c.flowControl().priority_level_uid.?);
+    try testing.expectEqualStrings("fs-1", c.flowControl(io).flow_schema_uid.?);
+    try testing.expectEqualStrings("pl-1", c.flowControl(io).priority_level_uid.?);
 
-    const r2 = try c.get(struct {}, "/second", ctx);
+    const r2 = try c.get(io, struct {}, "/second", ctx);
     defer r2.deinit();
-    try testing.expectEqualStrings("fs-2", c.flowControl().flow_schema_uid.?);
-    try testing.expect(c.flowControl().priority_level_uid == null);
+    try testing.expectEqualStrings("fs-2", c.flowControl(io).flow_schema_uid.?);
+    try testing.expect(c.flowControl(io).priority_level_uid == null);
 }
 
 test "MockTransport: noop tracer does not add traceparent header" {
     // Arrange
+    const io = std.testing.io;
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
@@ -529,11 +535,11 @@ test "MockTransport: noop tracer does not add traceparent header" {
     mock.respondWith(.ok, "{\"items\":[]}");
 
     // Assert
-    var c = mock.client(); // uses noop tracer by default
-    defer c.deinit();
+    var c = mock.client(io); // uses noop tracer by default
+    defer c.deinit(io);
     const ctx = c.context();
 
-    const result = try c.get(struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
+    const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
     try testing.expectEqual(1, mock.requestCount());
@@ -543,6 +549,7 @@ test "MockTransport: noop tracer does not add traceparent header" {
 
 test "MockTransport: test tracer adds traceparent header and calls startSpan/endSpan" {
     // Arrange
+    const io = std.testing.io;
     const tracing = @import("../util/tracing.zig");
 
     const TestTracer = struct {
@@ -551,14 +558,15 @@ test "MockTransport: test tracer adds traceparent header and calls startSpan/end
         last_status: tracing.SpanStatus = .unset,
         last_kind: tracing.SpanKind = .internal,
         generated_ctx: tracing.SpanContext = tracing.SpanContext.invalid,
+        io: std.Io,
 
         fn startSpan(raw: ?*anyopaque, _: []const u8, _: ?tracing.SpanContext, kind: tracing.SpanKind, _: ?[]const tracing.Attribute) tracing.SpanContext {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.start_count += 1;
             self.last_kind = kind;
             self.generated_ctx = .{
-                .trace_id = tracing.TraceId.generate(),
-                .span_id = tracing.SpanId.generate(),
+                .trace_id = tracing.TraceId.generate(self.io),
+                .span_id = tracing.SpanId.generate(self.io),
                 .trace_flags = tracing.SpanContext.sampled_flag,
             };
             return self.generated_ctx;
@@ -576,7 +584,7 @@ test "MockTransport: test tracer adds traceparent header and calls startSpan/end
         };
     };
 
-    var tracer = TestTracer{};
+    var tracer = TestTracer{ .io = io };
     const provider: tracing.TracerProvider = .{ .ptr = @ptrCast(&tracer), .vtable = &TestTracer.vtable };
 
     var mock = MockTransport.init(testing.allocator);
@@ -584,12 +592,12 @@ test "MockTransport: test tracer adds traceparent header and calls startSpan/end
 
     mock.respondWith(.ok, "{\"items\":[]}");
 
-    var c = mock.clientWithTracer(provider);
-    defer c.deinit();
+    var c = mock.clientWithTracer(io, provider);
+    defer c.deinit(io);
     const ctx = c.context();
 
     // Act
-    const result = try c.get(struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
+    const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
     // Assert
@@ -610,17 +618,19 @@ test "MockTransport: test tracer adds traceparent header and calls startSpan/end
 
 test "MockTransport: test tracer endSpan called with error on non-2xx" {
     // Arrange
+    const io = std.testing.io;
     const tracing = @import("../util/tracing.zig");
 
     const TestTracer = struct {
         end_count: u32 = 0,
         last_status: tracing.SpanStatus = .unset,
+        io: std.Io,
 
         fn startSpan(raw: ?*anyopaque, _: []const u8, _: ?tracing.SpanContext, _: tracing.SpanKind, _: ?[]const tracing.Attribute) tracing.SpanContext {
-            _ = raw;
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
             return .{
-                .trace_id = tracing.TraceId.generate(),
-                .span_id = tracing.SpanId.generate(),
+                .trace_id = tracing.TraceId.generate(self.io),
+                .span_id = tracing.SpanId.generate(self.io),
                 .trace_flags = tracing.SpanContext.sampled_flag,
             };
         }
@@ -637,7 +647,7 @@ test "MockTransport: test tracer endSpan called with error on non-2xx" {
         };
     };
 
-    var tracer = TestTracer{};
+    var tracer = TestTracer{ .io = io };
     const provider: tracing.TracerProvider = .{ .ptr = @ptrCast(&tracer), .vtable = &TestTracer.vtable };
 
     var mock = MockTransport.init(testing.allocator);
@@ -645,12 +655,12 @@ test "MockTransport: test tracer endSpan called with error on non-2xx" {
 
     mock.respondWith(.not_found, "{\"message\":\"not found\"}");
 
-    var c = mock.clientWithTracer(provider);
-    defer c.deinit();
+    var c = mock.clientWithTracer(io, provider);
+    defer c.deinit(io);
     const ctx = c.context();
 
     // Act
-    const result = try c.get(struct {}, "/api/v1/pods/missing", ctx);
+    const result = try c.get(io, struct {}, "/api/v1/pods/missing", ctx);
     defer result.deinit();
 
     // Assert

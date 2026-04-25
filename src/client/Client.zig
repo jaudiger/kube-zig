@@ -131,10 +131,9 @@ pub const StreamState = struct {
     /// Shut down the underlying socket, causing any blocked `read()` to
     /// return immediately.  Safe to call from another thread because the fd
     /// remains valid for the owning thread's subsequent `deinit()`.
-    pub fn interrupt(self: *StreamState) void {
+    pub fn interrupt(self: *StreamState, io: std.Io) void {
         if (self.request.connection) |conn| {
-            const fd = conn.stream_writer.getStream().handle;
-            std.posix.shutdown(fd, .both) catch {};
+            conn.stream_reader.stream.shutdown(io, .both) catch {};
         }
     }
 };
@@ -155,37 +154,39 @@ pub const Transport = struct {
     pub const VTable = struct {
         send_fn: *const fn (
             ptr: *anyopaque,
+            io: std.Io,
             opts: RequestOptions,
             body: ?BodySerializer,
             allocator: std.mem.Allocator,
         ) anyerror!TransportResponse,
         send_stream_fn: *const fn (
             ptr: *anyopaque,
+            io: std.Io,
             opts: RequestOptions,
             allocator: std.mem.Allocator,
         ) anyerror!StreamResponse,
-        deinit_fn: *const fn (ptr: *anyopaque) void,
-        pool_stats_fn: ?*const fn (ptr: *anyopaque) PoolStats = null,
+        deinit_fn: *const fn (ptr: *anyopaque, io: std.Io) void,
+        pool_stats_fn: ?*const fn (ptr: *anyopaque, io: std.Io) PoolStats = null,
     };
 
     /// Send a request and return the full response.
-    pub fn send(self: Transport, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
-        return self.vtable.send_fn(self.ptr, opts, body, allocator);
+    pub fn send(self: Transport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+        return self.vtable.send_fn(self.ptr, io, opts, body, allocator);
     }
 
     /// Open a streaming connection and return a `StreamResponse`.
-    pub fn sendStream(self: Transport, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
-        return self.vtable.send_stream_fn(self.ptr, opts, allocator);
+    pub fn sendStream(self: Transport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+        return self.vtable.send_stream_fn(self.ptr, io, opts, allocator);
     }
 
     /// Release the transport and its resources.
-    pub fn deinit(self: Transport) void {
-        self.vtable.deinit_fn(self.ptr);
+    pub fn deinit(self: Transport, io: std.Io) void {
+        self.vtable.deinit_fn(self.ptr, io);
     }
 
     /// Return connection pool statistics, if supported by this transport.
-    pub fn poolStats(self: Transport) ?PoolStats {
-        if (self.vtable.pool_stats_fn) |f| return f(self.ptr);
+    pub fn poolStats(self: Transport, io: std.Io) ?PoolStats {
+        if (self.vtable.pool_stats_fn) |f| return f(self.ptr, io);
         return null;
     }
 };
@@ -220,28 +221,29 @@ pub const StdHttpTransport = struct {
         };
     }
 
-    fn vtableSend(ptr: *anyopaque, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+    fn vtableSend(ptr: *anyopaque, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ptr));
-        return self.sendImpl(opts, body, allocator);
+        return self.sendImpl(io, opts, body, allocator);
     }
 
-    fn vtableSendStream(ptr: *anyopaque, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+    fn vtableSendStream(ptr: *anyopaque, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ptr));
-        return self.sendStreamImpl(opts, allocator);
+        return self.sendStreamImpl(io, opts, allocator);
     }
 
-    fn vtableDeinit(ptr: *anyopaque) void {
+    fn vtableDeinit(ptr: *anyopaque, _: std.Io) void {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ptr));
+        // http.Client.deinit reads its stored io field; do not pass our io.
         self.http_client.deinit();
         if (self.self_allocator) |alloc| {
             alloc.destroy(self);
         }
     }
 
-    fn vtablePoolStats(ptr: *anyopaque) PoolStats {
+    fn vtablePoolStats(ptr: *anyopaque, io: std.Io) PoolStats {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ptr));
-        self.http_client.connection_pool.mutex.lock();
-        defer self.http_client.connection_pool.mutex.unlock();
+        self.http_client.connection_pool.mutex.lockUncancelable(io);
+        defer self.http_client.connection_pool.mutex.unlock(io);
         var active: u32 = 0;
         var node = self.http_client.connection_pool.used.first;
         while (node) |n| : (node = n.next) {
@@ -254,7 +256,9 @@ pub const StdHttpTransport = struct {
         };
     }
 
-    fn sendImpl(self: *StdHttpTransport, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) !TransportResponse {
+    fn sendImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) !TransportResponse {
+        // io is unused: http.Client reads its own io field from `self.http_client.io`.
+        _ = io;
         const has_body = opts.payload != null or body != null;
         const accept_header = std.http.Header{ .name = "Accept", .value = opts.accept orelse "application/json" };
         const traceparent_header = std.http.Header{ .name = "traceparent", .value = opts.traceparent orelse "" };
@@ -304,7 +308,9 @@ pub const StdHttpTransport = struct {
         return self.receiveResponse(&req, allocator);
     }
 
-    fn sendStreamImpl(self: *StdHttpTransport, opts: RequestOptions, allocator: std.mem.Allocator) !StreamResponse {
+    fn sendStreamImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) !StreamResponse {
+        // io is unused: http.Client reads its own io field from `self.http_client.io`.
+        _ = io;
         const state = try allocator.create(StreamState);
         errdefer allocator.destroy(state);
 
@@ -333,8 +339,8 @@ pub const StdHttpTransport = struct {
         const watch_timeout = self.watch_read_timeout_ms orelse self.read_timeout_ms;
         if (watch_timeout) |ms| {
             if (state.request.connection) |conn| {
-                const fd = conn.stream_writer.getStream().handle;
-                const tv = std.c.timeval{
+                const fd = conn.stream_reader.stream.socket.handle;
+                const tv = std.posix.timeval{
                     .sec = @intCast(ms / 1000),
                     .usec = @intCast(@as(u32, ms % 1000) * 1000),
                 };
@@ -391,14 +397,7 @@ pub const StdHttpTransport = struct {
         errdefer if (pl_uid) |uid| allocator.free(uid);
 
         var transfer_buf: [8192]u8 = undefined;
-        // Workaround: Zig 0.15.x std.http.Method.responseHasBody() incorrectly
-        // returns false for PUT, causing Response.reader() to return an EOF
-        // reader that discards the response body. Temporarily override the
-        // method for the reader() call so the body is read normally.
-        const needs_put_fixup = req.method == .PUT;
-        if (needs_put_fixup) req.method = .GET;
         const reader = response.reader(&transfer_buf);
-        if (needs_put_fixup) req.method = .PUT;
         const resp_body = try reader.allocRemaining(allocator, std.Io.Limit.limited(self.max_response_bytes));
 
         // Detect if the response was truncated by the limit. If we read
@@ -444,10 +443,10 @@ pub const StdHttpTransport = struct {
     /// platforms; failures are logged as warnings rather than propagated.
     fn configureSocket(self: *StdHttpTransport, req: *http.Client.Request) void {
         const conn = req.connection orelse return;
-        const fd = conn.stream_writer.getStream().handle;
+        const fd = conn.stream_reader.stream.socket.handle;
 
         if (self.read_timeout_ms) |ms| {
-            const tv = std.c.timeval{
+            const tv = std.posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast(@as(u32, ms % 1000) * 1000),
             };
@@ -457,7 +456,7 @@ pub const StdHttpTransport = struct {
         }
 
         if (self.write_timeout_ms) |ms| {
-            const tv = std.c.timeval{
+            const tv = std.posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast(@as(u32, ms % 1000) * 1000),
             };
@@ -713,133 +712,133 @@ pub const Client = struct {
     };
 
     /// Release all resources owned by the client.
-    pub fn deinit(self: *Client) void {
-        self.flow_tracker.deinit();
+    pub fn deinit(self: *Client, io: std.Io) void {
+        self.flow_tracker.deinit(io);
         self.auth.deinit();
         self.allocator.free(self.base_url);
-        self.transport.deinit();
+        self.transport.deinit(io);
     }
 
     /// Return the current API Priority and Fairness flow-control state.
-    pub fn flowControl(self: *Client) FlowControl {
-        return self.flow_tracker.get();
+    pub fn flowControl(self: *Client, io: std.Io) FlowControl {
+        return self.flow_tracker.get(io);
     }
 
     /// Return connection pool statistics, if supported by the transport.
-    pub fn poolStats(self: *Client) ?PoolStats {
-        return self.transport.poolStats();
+    pub fn poolStats(self: *Client, io: std.Io) ?PoolStats {
+        return self.transport.poolStats(io);
     }
 
     /// GET a resource and parse the JSON response into T.
-    pub fn get(self: *Client, comptime T: type, path: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
-        const raw = try self.doRequest(.GET, path, null, null, null, null, ctx);
+    pub fn get(self: *Client, io: std.Io, comptime T: type, path: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
+        const raw = try self.doRequest(io, .GET, path, null, null, null, null, ctx);
         return self.wrapResult(T, raw);
     }
 
     /// POST a JSON body and parse the response into T.
-    pub fn post(self: *Client, comptime T: type, path: []const u8, payload: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
-        const raw = try self.doRequest(.POST, path, payload, null, null, null, ctx);
+    pub fn post(self: *Client, io: std.Io, comptime T: type, path: []const u8, payload: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
+        const raw = try self.doRequest(io, .POST, path, payload, null, null, null, ctx);
         return self.wrapResult(T, raw);
     }
 
     /// PUT a JSON body and parse the response into T.
-    pub fn put(self: *Client, comptime T: type, path: []const u8, payload: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
-        const raw = try self.doRequest(.PUT, path, payload, null, null, null, ctx);
+    pub fn put(self: *Client, io: std.Io, comptime T: type, path: []const u8, payload: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
+        const raw = try self.doRequest(io, .PUT, path, payload, null, null, null, ctx);
         return self.wrapResult(T, raw);
     }
 
     /// PATCH a resource with a custom content type and parse the response into T.
-    pub fn patch(self: *Client, comptime T: type, path: []const u8, payload: []const u8, content_type: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
-        const raw = try self.doRequest(.PATCH, path, payload, content_type, null, null, ctx);
+    pub fn patch(self: *Client, io: std.Io, comptime T: type, path: []const u8, payload: []const u8, content_type: []const u8, ctx: Context) RequestError!ApiResult(std.json.Parsed(T)) {
+        const raw = try self.doRequest(io, .PATCH, path, payload, content_type, null, null, ctx);
         return self.wrapResult(T, raw);
     }
 
     /// DELETE a resource. Returns the raw response body.
-    pub fn delete(self: *Client, path: []const u8, payload: ?[]const u8, ctx: Context) RequestError!ApiResult(RawResponse) {
-        const raw = try self.doRequest(.DELETE, path, payload, null, null, null, ctx);
+    pub fn delete(self: *Client, io: std.Io, path: []const u8, payload: ?[]const u8, ctx: Context) RequestError!ApiResult(RawResponse) {
+        const raw = try self.doRequest(io, .DELETE, path, payload, null, null, null, ctx);
         return wrapRawResult(self.allocator, raw);
     }
 
     /// GET a resource and return the raw response body.
-    pub fn getRaw(self: *Client, path: []const u8, ctx: Context) RequestError!ApiResult(RawResponse) {
-        const raw = try self.doRequest(.GET, path, null, null, "*/*", null, ctx);
+    pub fn getRaw(self: *Client, io: std.Io, path: []const u8, ctx: Context) RequestError!ApiResult(RawResponse) {
+        const raw = try self.doRequest(io, .GET, path, null, null, "*/*", null, ctx);
         return wrapRawResult(self.allocator, raw);
     }
 
     /// POST a JSON body and return the raw response body.
-    pub fn postRaw(self: *Client, path: []const u8, payload: []const u8, ctx: Context) RequestError!ApiResult(RawResponse) {
-        const raw = try self.doRequest(.POST, path, payload, null, null, null, ctx);
+    pub fn postRaw(self: *Client, io: std.Io, path: []const u8, payload: []const u8, ctx: Context) RequestError!ApiResult(RawResponse) {
+        const raw = try self.doRequest(io, .POST, path, payload, null, null, null, ctx);
         return wrapRawResult(self.allocator, raw);
     }
 
     /// POST a value serialized as JSON and parse the response into T.
-    pub fn postValue(self: *Client, comptime RespT: type, comptime BodyT: type, path: []const u8, body: *const BodyT, ctx: Context) RequestError!ApiResult(std.json.Parsed(RespT)) {
+    pub fn postValue(self: *Client, io: std.Io, comptime RespT: type, comptime BodyT: type, path: []const u8, body: *const BodyT, ctx: Context) RequestError!ApiResult(std.json.Parsed(RespT)) {
         const serializer = makeBodySerializer(BodyT, body);
-        const raw = try self.doRequest(.POST, path, null, null, null, serializer, ctx);
+        const raw = try self.doRequest(io, .POST, path, null, null, null, serializer, ctx);
         return self.wrapResult(RespT, raw);
     }
 
     /// PUT a value serialized as JSON and parse the response into T.
-    pub fn putValue(self: *Client, comptime RespT: type, comptime BodyT: type, path: []const u8, body: *const BodyT, ctx: Context) RequestError!ApiResult(std.json.Parsed(RespT)) {
+    pub fn putValue(self: *Client, io: std.Io, comptime RespT: type, comptime BodyT: type, path: []const u8, body: *const BodyT, ctx: Context) RequestError!ApiResult(std.json.Parsed(RespT)) {
         const serializer = makeBodySerializer(BodyT, body);
-        const raw = try self.doRequest(.PUT, path, null, null, null, serializer, ctx);
+        const raw = try self.doRequest(io, .PUT, path, null, null, null, serializer, ctx);
         return self.wrapResult(RespT, raw);
     }
 
     /// POST a value serialized as JSON and return the raw response body.
-    pub fn postValueRaw(self: *Client, comptime BodyT: type, path: []const u8, body: *const BodyT, ctx: Context) RequestError!ApiResult(RawResponse) {
+    pub fn postValueRaw(self: *Client, io: std.Io, comptime BodyT: type, path: []const u8, body: *const BodyT, ctx: Context) RequestError!ApiResult(RawResponse) {
         const serializer = makeBodySerializer(BodyT, body);
-        const raw = try self.doRequest(.POST, path, null, null, null, serializer, ctx);
+        const raw = try self.doRequest(io, .POST, path, null, null, null, serializer, ctx);
         return wrapRawResult(self.allocator, raw);
     }
 
     /// Open a streaming connection for watch requests. Returns a `StreamResponse`
     /// that the caller can use to read newline-delimited JSON events.
     /// The caller owns the returned `StreamState` and must call `state.deinit()`.
-    pub fn watchStream(self: *Client, path: []const u8, ctx: Context) !StreamResponse {
-        try self.preflight(ctx);
+    pub fn watchStream(self: *Client, io: std.Io, path: []const u8, ctx: Context) !StreamResponse {
+        try self.preflight(io, ctx);
 
         self.metrics.request_total.inc();
-        const request_start = std.time.Instant.now() catch null;
+        const request_start: std.Io.Clock.Timestamp = .now(io, .awake);
 
-        const auth_header = try self.auth.getAuthHeader(self.auth.shouldForceRefresh());
+        const auth_header = try self.auth.getAuthHeader(io, self.auth.shouldForceRefresh());
         defer if (auth_header) |ah| self.allocator.free(ah);
 
         var uri_buf: [uri_buf_size]u8 = undefined;
         const owned = try self.buildUri(path, &uri_buf);
         defer owned.deinit(self.allocator);
 
-        const stream_resp = self.transport.sendStream(.{
+        const stream_resp = self.transport.sendStream(io, .{
             .method = .GET,
             .uri = owned.uri,
             .accept = "application/json",
             .auth_header = auth_header,
             .keep_alive = false,
         }, self.allocator) catch |err| {
-            self.recordRequestLatency(request_start);
+            self.recordRequestLatency(io, request_start);
 
             if (err == error.HttpGone) {
                 // Server responded with 410; it's alive.
-                if (self.circuit_breaker) |*cb| cb.recordSuccess();
+                if (self.circuit_breaker) |*cb| cb.recordSuccess(io);
                 self.updateCircuitBreakerGauge();
                 return error.HttpGone;
             }
             self.metrics.request_error_total.inc();
             const mapped = mapTransportError(err);
             if (self.circuit_breaker) |*cb| {
-                if (isRetryableTransport(mapped)) cb.recordFailure();
+                if (isRetryableTransport(mapped)) cb.recordFailure(io);
             }
             self.updateCircuitBreakerGauge();
             return mapped;
         };
 
-        self.recordRequestLatency(request_start);
+        self.recordRequestLatency(io, request_start);
         self.logger.trace("watch stream opened", &.{
             LogField.string("path", path),
         });
         // Stream opened successfully; server is alive.
         self.auth.clearUnauthorized();
-        if (self.circuit_breaker) |*cb| cb.recordSuccess();
+        if (self.circuit_breaker) |*cb| cb.recordSuccess(io);
         self.updateCircuitBreakerGauge();
         return stream_resp;
     }
@@ -891,9 +890,9 @@ pub const Client = struct {
     };
 
     /// Signal the client to stop making new requests.
-    pub fn shutdown(self: *Client) void {
+    pub fn shutdown(self: *Client, io: std.Io) void {
         self.logger.info("client shutting down", &.{});
-        self.shutdown_source.cancel();
+        self.shutdown_source.cancel(io);
     }
 
     /// Check if the client has been shut down.
@@ -904,7 +903,7 @@ pub const Client = struct {
     /// Return a health check that reports healthy when the client is not shut down.
     pub fn healthCheck(self: *Client) HealthCheck {
         return HealthCheck.fromTypedCtx(Client, self, struct {
-            fn check(c: *Client) bool {
+            fn check(c: *Client, _: std.Io) bool {
                 return !c.isShutdown();
             }
         }.check);
@@ -996,7 +995,7 @@ pub const Client = struct {
         return .{ .uri = Uri.parse(url) catch return error.HttpRequestFailed, .heap_buf = null };
     }
 
-    fn doRequestOnce(self: *Client, method: http.Method, uri: Uri, payload: ?[]const u8, content_type: ?[]const u8, accept: ?[]const u8, body: ?BodySerializer, parent_span: ?SpanContext) TransportError!RawResult {
+    fn doRequestOnce(self: *Client, io: std.Io, method: http.Method, uri: Uri, payload: ?[]const u8, content_type: ?[]const u8, accept: ?[]const u8, body: ?BodySerializer, parent_span: ?SpanContext) TransportError!RawResult {
         const method_name = @tagName(method);
         const path = uri.path.percent_encoded;
 
@@ -1020,10 +1019,10 @@ pub const Client = struct {
             null;
 
         const force = self.auth.shouldForceRefresh();
-        const auth_header = try self.auth.getAuthHeader(force);
+        const auth_header = try self.auth.getAuthHeader(io, force);
         defer if (auth_header) |ah| self.allocator.free(ah);
 
-        var resp = self.transport.send(.{
+        var resp = self.transport.send(io, .{
             .method = method,
             .uri = uri,
             .content_type = content_type,
@@ -1038,7 +1037,7 @@ pub const Client = struct {
         };
         defer resp.deinit();
 
-        try self.flow_tracker.update(resp.flow_control);
+        try self.flow_tracker.update(io, resp.flow_control);
 
         if (resp.status.class() != .success) {
             if (resp.status == .unauthorized) self.auth.markUnauthorized();
@@ -1055,8 +1054,8 @@ pub const Client = struct {
         return .{ .ok = resp.takeBody() };
     }
 
-    fn doRequest(self: *Client, method: http.Method, path: []const u8, payload: ?[]const u8, content_type: ?[]const u8, accept: ?[]const u8, body: ?BodySerializer, ctx: Context) RequestError!RawResult {
-        return self.retryLoop(struct {
+    fn doRequest(self: *Client, io: std.Io, method: http.Method, path: []const u8, payload: ?[]const u8, content_type: ?[]const u8, accept: ?[]const u8, body: ?BodySerializer, ctx: Context) RequestError!RawResult {
+        return self.retryLoop(io, struct {
             method: http.Method,
             payload: ?[]const u8,
             content_type: ?[]const u8,
@@ -1064,29 +1063,26 @@ pub const Client = struct {
             body: ?BodySerializer,
             parent_span: ?SpanContext,
 
-            fn call(req_ctx: @This(), s: *Client, uri: Uri) TransportError!RawResult {
-                return s.doRequestOnce(req_ctx.method, uri, req_ctx.payload, req_ctx.content_type, req_ctx.accept, req_ctx.body, req_ctx.parent_span);
+            fn call(req_ctx: @This(), s: *Client, req_io: std.Io, uri: Uri) TransportError!RawResult {
+                return s.doRequestOnce(req_io, req_ctx.method, uri, req_ctx.payload, req_ctx.content_type, req_ctx.accept, req_ctx.body, req_ctx.parent_span);
             }
         }{ .method = method, .payload = payload, .content_type = content_type, .accept = accept, .body = body, .parent_span = ctx.span_context }, path, ctx);
     }
 
     /// Context cancellation, rate limiting, and circuit breaker gate.
-    fn preflight(self: *Client, ctx: Context) !void {
-        ctx.check() catch return error.Canceled;
+    fn preflight(self: *Client, io: std.Io, ctx: Context) !void {
+        ctx.check(io) catch return error.Canceled;
 
         if (self.rate_limiter) |*rl| {
-            const before = std.time.Instant.now() catch null;
-            rl.acquire(ctx) catch return error.Canceled;
-            if (before) |b| {
-                if (std.time.Instant.now() catch null) |after| {
-                    const wait_ns: f64 = @floatFromInt(after.since(b));
-                    self.metrics.rate_limiter_latency.observe(wait_ns / @as(f64, std.time.ns_per_s));
-                }
-            }
+            const before: std.Io.Clock.Timestamp = .now(io, .awake);
+            rl.acquire(io, ctx) catch return error.Canceled;
+            const wait_ns_i: i96 = before.untilNow(io).raw.nanoseconds;
+            const wait_ns: f64 = @floatFromInt(if (wait_ns_i < 0) 0 else wait_ns_i);
+            self.metrics.rate_limiter_latency.observe(wait_ns / @as(f64, std.time.ns_per_s));
         }
 
         if (self.circuit_breaker) |*cb| {
-            cb.allowRequest() catch {
+            cb.allowRequest(io) catch {
                 self.metrics.circuit_breaker_trip_total.inc();
                 return error.CircuitBreakerOpen;
             };
@@ -1094,8 +1090,8 @@ pub const Client = struct {
     }
 
     /// Shared retry loop.
-    fn retryLoop(self: *Client, req_ctx: anytype, path: []const u8, ctx: Context) RequestError!RawResult {
-        try self.preflight(ctx);
+    fn retryLoop(self: *Client, io: std.Io, req_ctx: anytype, path: []const u8, ctx: Context) RequestError!RawResult {
+        try self.preflight(io, ctx);
 
         var uri_buf: [uri_buf_size]u8 = undefined;
         const owned = try self.buildUri(path, &uri_buf);
@@ -1104,23 +1100,23 @@ pub const Client = struct {
         var attempt: u32 = 0;
         while (true) {
             self.metrics.request_total.inc();
-            const request_start = std.time.Instant.now() catch null;
+            const request_start: std.Io.Clock.Timestamp = .now(io, .awake);
 
-            const raw = req_ctx.call(self, owned.uri) catch |err| {
-                self.recordRequestLatency(request_start);
-                self.recordPoolStats();
+            const raw = req_ctx.call(self, io, owned.uri) catch |err| {
+                self.recordRequestLatency(io, request_start);
+                self.recordPoolStats(io);
                 self.metrics.request_error_total.inc();
 
                 if (self.circuit_breaker) |*cb| {
-                    if (isRetryableTransport(err)) cb.recordFailure();
+                    if (isRetryableTransport(err)) cb.recordFailure(io);
                 }
                 self.updateCircuitBreakerGauge();
 
                 if (attempt < self.retry_policy.max_retries and isRetryableTransport(err)) {
                     self.metrics.retry_total.inc();
-                    const sleep_ns = self.retry_policy.sleepNs(attempt, null);
+                    const sleep_ns = self.retry_policy.sleepNs(io, attempt, null);
                     self.logRetry(req_ctx, path, attempt, sleep_ns, .{ .transport = err });
-                    context_mod.interruptibleSleep(ctx, sleep_ns) catch return error.Canceled;
+                    context_mod.interruptibleSleep(io, ctx, sleep_ns) catch return error.Canceled;
                     attempt += 1;
                     continue;
                 }
@@ -1134,8 +1130,8 @@ pub const Client = struct {
                 return err;
             };
 
-            self.recordRequestLatency(request_start);
-            self.recordPoolStats();
+            self.recordRequestLatency(io, request_start);
+            self.recordPoolStats(io);
 
             switch (raw) {
                 .ok => {
@@ -1143,26 +1139,26 @@ pub const Client = struct {
                         LogField.string("method", @tagName(req_ctx.method)),
                         LogField.string("path", path),
                     });
-                    if (self.circuit_breaker) |*cb| cb.recordSuccess();
+                    if (self.circuit_breaker) |*cb| cb.recordSuccess(io);
                     self.updateCircuitBreakerGauge();
                     return raw;
                 },
                 .api_error => |e| {
                     if (isCircuitBreakerFailure(e.status)) {
                         self.metrics.request_error_total.inc();
-                        if (self.circuit_breaker) |*cb| cb.recordFailure();
+                        if (self.circuit_breaker) |*cb| cb.recordFailure(io);
                     } else {
                         // Server responded (even with 4xx/429); it's alive.
-                        if (self.circuit_breaker) |*cb| cb.recordSuccess();
+                        if (self.circuit_breaker) |*cb| cb.recordSuccess(io);
                     }
                     self.updateCircuitBreakerGauge();
 
                     if (attempt < self.retry_policy.max_retries and RetryPolicy.isRetryableStatus(e.status)) {
                         self.metrics.retry_total.inc();
-                        const sleep_ns = self.retry_policy.sleepNs(attempt, e.retry_after_ns);
+                        const sleep_ns = self.retry_policy.sleepNs(io, attempt, e.retry_after_ns);
                         self.logRetry(req_ctx, path, attempt, sleep_ns, .{ .api_status = e.status });
                         self.allocator.free(e.body);
-                        context_mod.interruptibleSleep(ctx, sleep_ns) catch return error.Canceled;
+                        context_mod.interruptibleSleep(io, ctx, sleep_ns) catch return error.Canceled;
                         attempt += 1;
                         continue;
                     }
@@ -1273,17 +1269,17 @@ pub const Client = struct {
     // Construction
     /// Create a plain-HTTP client (e.g. for `kubectl proxy` on localhost).
     /// Heap-allocates a `StdHttpTransport` internally.
-    pub fn init(allocator: std.mem.Allocator, base_url: []const u8, options: ClientOptions) !Client {
-        return initInternal(allocator, base_url, null, null, options);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8, options: ClientOptions) !Client {
+        return initInternal(allocator, io, base_url, null, null, options);
     }
 
     /// Create an HTTPS client using in-cluster service-account credentials.
     /// Heap-allocates a `StdHttpTransport` internally.
-    pub fn initInCluster(allocator: std.mem.Allocator, config: InClusterConfig, options: ClientOptions) !Client {
-        return initInternal(allocator, config.base_url, config.ca_cert_path, config.token_path, options);
+    pub fn initInCluster(allocator: std.mem.Allocator, io: std.Io, config: InClusterConfig, options: ClientOptions) !Client {
+        return initInternal(allocator, io, config.base_url, config.ca_cert_path, config.token_path, options);
     }
 
-    fn initInternal(allocator: std.mem.Allocator, base_url: []const u8, ca_cert_path: ?[]const u8, token_path: ?[]const u8, options: ClientOptions) !Client {
+    fn initInternal(allocator: std.mem.Allocator, io: std.Io, base_url: []const u8, ca_cert_path: ?[]const u8, token_path: ?[]const u8, options: ClientOptions) !Client {
         const owned_url = try allocator.dupe(u8, base_url);
         errdefer allocator.free(owned_url);
 
@@ -1294,7 +1290,7 @@ pub const Client = struct {
         }
 
         tp.* = .{
-            .http_client = .{ .allocator = allocator },
+            .http_client = .{ .allocator = allocator, .io = io },
             .read_timeout_ms = options.read_timeout_ms,
             .write_timeout_ms = options.write_timeout_ms,
             .watch_read_timeout_ms = options.watch_read_timeout_ms,
@@ -1312,8 +1308,9 @@ pub const Client = struct {
         }
 
         if (ca_cert_path) |path| {
-            try tp.http_client.ca_bundle.addCertsFromFilePathAbsolute(allocator, path);
-            tp.http_client.next_https_rescan_certs = false;
+            const now: std.Io.Timestamp = .now(io, .real);
+            try tp.http_client.ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, path);
+            tp.http_client.now = now;
         }
 
         return .{
@@ -1322,7 +1319,7 @@ pub const Client = struct {
             .transport = tp.transport(),
             .auth = AuthProvider.init(allocator, token_path, options.logger.withScope("client")),
             .retry_policy = options.retry,
-            .rate_limiter = try RateLimiter.init(.{ .qps = options.rate_limit.qps, .burst = options.rate_limit.burst, .logger = options.logger }),
+            .rate_limiter = try RateLimiter.init(io, .{ .qps = options.rate_limit.qps, .burst = options.rate_limit.burst, .logger = options.logger }),
             .circuit_breaker = try CircuitBreaker.init(.{ .failure_threshold = options.circuit_breaker.failure_threshold, .recovery_timeout_ns = options.circuit_breaker.recovery_timeout_ns, .logger = options.logger }),
             .keep_alive = options.keep_alive,
             .shutdown_source = CancelSource.init(),
@@ -1333,15 +1330,14 @@ pub const Client = struct {
         };
     }
 
-    fn recordRequestLatency(self: *Client, start: ?std.time.Instant) void {
-        const s = start orelse return;
-        const end = std.time.Instant.now() catch return;
-        const dur_ns: f64 = @floatFromInt(end.since(s));
+    fn recordRequestLatency(self: *Client, io: std.Io, start: std.Io.Clock.Timestamp) void {
+        const dur_ns_i: i96 = start.untilNow(io).raw.nanoseconds;
+        const dur_ns: f64 = @floatFromInt(if (dur_ns_i < 0) 0 else dur_ns_i);
         self.metrics.request_latency.observe(dur_ns / @as(f64, std.time.ns_per_s));
     }
 
-    fn recordPoolStats(self: *Client) void {
-        const stats = self.transport.poolStats() orelse return;
+    fn recordPoolStats(self: *Client, io: std.Io) void {
+        const stats = self.transport.poolStats(io) orelse return;
         self.metrics.pool_size.set(@floatFromInt(stats.pool_size));
         self.metrics.pool_idle_connections.set(@floatFromInt(stats.free_connections));
         self.metrics.pool_active_connections.set(@floatFromInt(stats.active_connections));
@@ -1361,8 +1357,9 @@ pub const Client = struct {
 
 test "buildUri constructs valid URL from standard path using stack buffer" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(io);
     var buf: [Client.uri_buf_size]u8 = undefined;
 
     // Act
@@ -1378,8 +1375,9 @@ test "buildUri constructs valid URL from standard path using stack buffer" {
 
 test "buildUri constructs valid URL from empty path" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(io);
     var buf: [Client.uri_buf_size]u8 = undefined;
 
     // Act
@@ -1394,8 +1392,9 @@ test "buildUri constructs valid URL from empty path" {
 
 test "buildUri parses custom host and port correctly" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://localhost:9090", .{});
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://localhost:9090", .{});
+    defer client.deinit(io);
     var buf: [Client.uri_buf_size]u8 = undefined;
 
     // Act
@@ -1411,8 +1410,9 @@ test "buildUri parses custom host and port correctly" {
 
 test "buildUri falls back to heap allocation when stack buffer is too small" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(io);
     var tiny_buf: [4]u8 = undefined;
 
     // Act
@@ -1451,8 +1451,9 @@ test "findHeaderInBytes: header not present" {
 
 test "buildUri with long path still produces correct URI via heap" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(io);
     const long_path = "/api/v1/namespaces/very-long-namespace-name-for-testing/pods/my-very-long-pod-name-that-exceeds-normal-lengths";
     var tiny_buf: [8]u8 = undefined;
 
@@ -1467,11 +1468,12 @@ test "buildUri with long path still produces correct URI via heap" {
 
 test "poolStats: returns configured pool_size from StdHttpTransport" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{ .pool_size = 16 });
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://127.0.0.1:8001", .{ .pool_size = 16 });
+    defer client.deinit(io);
 
     // Act
-    const stats = client.poolStats();
+    const stats = client.poolStats(io);
 
     // Assert
     try testing.expect(stats != null);
@@ -1482,15 +1484,16 @@ test "poolStats: returns configured pool_size from StdHttpTransport" {
 
 test "healthCheck: reflects shutdown state" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    const io = std.testing.io;
+    var client = try Client.init(testing.allocator, io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(io);
     const check = client.healthCheck();
 
     // Act / Assert
-    try testing.expect(check.check_fn(check.ctx));
+    try testing.expect(check.check_fn(check.ctx, io));
 
-    client.shutdown();
-    try testing.expect(!check.check_fn(check.ctx));
+    client.shutdown(io);
+    try testing.expect(!check.check_fn(check.ctx, io));
 }
 
 test "mapTransportError: maps known transport errors" {

@@ -49,6 +49,7 @@ const test_policy: RetryPolicy = .{
 /// Works for both `E!void` and `E!T` return types. The action function
 /// may use any error set (not restricted to `anyerror`).
 pub fn retryOnConflict(
+    io: std.Io,
     comptime Ctx: type,
     ctx: Ctx,
     comptime actionFn: anytype,
@@ -59,8 +60,8 @@ pub fn retryOnConflict(
     while (true) {
         return actionFn(ctx) catch |err| {
             if (err == error.HttpConflict and attempt < policy.max_retries) {
-                const sleep_ns = policy.sleepNs(attempt, null);
-                context_mod.interruptibleSleep(cancel_ctx, sleep_ns) catch return error.Canceled;
+                const sleep_ns = policy.sleepNs(io, attempt, null);
+                context_mod.interruptibleSleep(io, cancel_ctx, sleep_ns) catch return error.Canceled;
                 attempt += 1;
                 continue;
             }
@@ -83,7 +84,7 @@ test "retryOnConflict: void action succeeds on first try" {
     // Assert
     var calls: u32 = 0;
 
-    try retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
+    try retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
 
     try testing.expectEqual(@as(u32, 1), calls);
 }
@@ -103,7 +104,7 @@ test "retryOnConflict: void action retries on HttpConflict then succeeds" {
     // Assert
     var calls: u32 = 0;
 
-    try retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
+    try retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
 
     try testing.expectEqual(@as(u32, 3), calls);
 }
@@ -123,7 +124,7 @@ test "retryOnConflict: void action exhausts retries" {
     // Assert
     var calls: u32 = 0;
 
-    const result = retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
+    const result = retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
     try testing.expectError(error.HttpConflict, result);
 
     try testing.expectEqual(@as(u32, 4), calls);
@@ -144,7 +145,7 @@ test "retryOnConflict: success returns value" {
     // Assert
     var calls: u32 = 0;
 
-    const result = try retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
+    const result = try retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
 
     try testing.expectEqual(@as(u32, 42), result);
     try testing.expectEqual(@as(u32, 1), calls);
@@ -166,7 +167,7 @@ test "retryOnConflict: retries on HttpConflict then returns value" {
     // Assert
     var calls: u32 = 0;
 
-    const result = try retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
+    const result = try retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
 
     try testing.expectEqual(@as(u32, 3), result);
     try testing.expectEqual(@as(u32, 3), calls);
@@ -187,7 +188,7 @@ test "retryOnConflict: propagates non-conflict error" {
     // Assert
     var calls: u32 = 0;
 
-    const result = retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
+    const result = retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, Context.background());
     try testing.expectError(error.HttpNotFound, result);
 
     try testing.expectEqual(@as(u32, 1), calls);
@@ -227,7 +228,7 @@ test "retryOnConflict: max_retries=0 does not retry" {
         .jitter = false,
     };
 
-    const result = retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, no_retry_policy, Context.background());
+    const result = retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, no_retry_policy, Context.background());
     try testing.expectError(error.HttpConflict, result);
 
     try testing.expectEqual(@as(u32, 1), calls);
@@ -248,10 +249,10 @@ test "retryOnConflict: returns Canceled when context is already canceled" {
     // Assert
     var calls: u32 = 0;
     var cs = context_mod.CancelSource.init();
-    cs.cancel();
+    cs.cancel(std.testing.io);
 
     // returns Canceled immediately.
-    const result = retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, test_policy, cs.context());
+    const result = retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, test_policy, cs.context());
     try testing.expectError(error.Canceled, result);
 
     try testing.expectEqual(@as(u32, 1), calls);
@@ -282,13 +283,13 @@ test "retryOnConflict: returns Canceled when context is canceled while retrying"
 
     // Cancel from another thread after a short delay.
     const cancel_thread = try std.Thread.spawn(.{}, struct {
-        fn run(cancel_source: *context_mod.CancelSource) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            cancel_source.cancel();
+        fn run(io: std.Io, cancel_source: *context_mod.CancelSource) void {
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, io) catch {};
+            cancel_source.cancel(io);
         }
-    }.run, .{&cs});
+    }.run, .{ std.testing.io, &cs });
 
-    const result = retryOnConflict(Ctx, .{ .calls = &calls }, Ctx.action, long_backoff_policy, cs.context());
+    const result = retryOnConflict(std.testing.io, Ctx, .{ .calls = &calls }, Ctx.action, long_backoff_policy, cs.context());
     try testing.expectError(error.Canceled, result);
 
     try testing.expectEqual(@as(u32, 1), calls);

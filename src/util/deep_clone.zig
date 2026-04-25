@@ -168,8 +168,8 @@ fn cloneJsonValue(allocator: Allocator, value: json.Value) Allocator.Error!json.
             return .{ .array = new_arr };
         },
         .object => |obj| {
-            var new_obj = @TypeOf(obj).init(allocator);
-            try new_obj.ensureTotalCapacity(obj.count());
+            var new_obj: @TypeOf(obj) = .empty;
+            try new_obj.ensureTotalCapacity(allocator, obj.count());
             var it = obj.iterator();
             while (it.next()) |entry| {
                 const new_key = try allocator.dupe(u8, entry.key_ptr.*);

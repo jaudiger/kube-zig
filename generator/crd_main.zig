@@ -1,31 +1,30 @@
 const std = @import("std");
 const crd_emitter = @import("crd_emitter.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Parse CLI arguments.
-    const args = try std.process.argsAlloc(allocator);
+    var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_it.deinit();
+    _ = args_it.skip(); // program name
 
     // Parse --types-import option and collect positional args.
     var types_import: []const u8 = "types.zig";
-    var positional = std.ArrayList([]const u8){};
+    var positional: std.ArrayList([]const u8) = .empty;
 
-    var i: usize = 1; // skip program name
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--types-import")) {
-            i += 1;
-            if (i >= args.len) {
+    while (args_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--types-import")) {
+            const value = args_it.next() orelse
                 std.process.fatal("--types-import requires a value\n", .{});
-            }
-            types_import = args[i];
+            types_import = value;
         } else {
-            try positional.append(allocator, args[i]);
+            try positional.append(allocator, arg);
         }
     }
 
@@ -48,13 +47,13 @@ pub fn main() !void {
     std.debug.print("Input CRDs: {d} file(s)\n\n", .{crd_files.len});
 
     // Open output file.
-    const output_file = std.fs.cwd().createFile(output_path, .{}) catch |err| {
+    const output_file = std.Io.Dir.cwd().createFile(io, output_path, .{}) catch |err| {
         std.process.fatal("Failed to create output file {s}: {}\n", .{ output_path, err });
     };
-    defer output_file.close();
+    defer output_file.close(io);
 
     var write_buf: [8192]u8 = undefined;
-    var file_writer = output_file.writer(&write_buf);
+    var file_writer = output_file.writer(io, &write_buf);
     const writer = &file_writer.interface;
 
     // Track whether we need IntOrString and whether any CRD was written.
@@ -63,7 +62,7 @@ pub fn main() !void {
 
     // First pass: check if any CRD uses IntOrString.
     for (crd_files) |crd_path| {
-        const crd_data = std.fs.cwd().readFileAlloc(allocator, crd_path, 16 * 1024 * 1024) catch |err| {
+        const crd_data = std.Io.Dir.cwd().readFileAlloc(io, crd_path, allocator, .limited(16 * 1024 * 1024)) catch |err| {
             std.process.fatal("Failed to read {s}: {}\n", .{ crd_path, err });
         };
 
@@ -81,7 +80,7 @@ pub fn main() !void {
     for (crd_files) |crd_path| {
         std.debug.print("Processing: {s}\n", .{crd_path});
 
-        const crd_data = std.fs.cwd().readFileAlloc(allocator, crd_path, 16 * 1024 * 1024) catch |err| {
+        const crd_data = std.Io.Dir.cwd().readFileAlloc(io, crd_path, allocator, .limited(16 * 1024 * 1024)) catch |err| {
             std.process.fatal("Failed to read {s}: {}\n", .{ crd_path, err });
         };
 

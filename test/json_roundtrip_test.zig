@@ -174,8 +174,8 @@ test "Status: parse forbidden fixture round-trip" {
     try testing.expectEqualStrings("Failure", status.status.?);
     try testing.expectEqualStrings("Forbidden", status.reason.?);
     try testing.expectEqual(@as(?i32, 403), status.code);
-    try testing.expect(std.mem.indexOf(u8, status.message.?, "forbidden") != null);
-    try testing.expect(std.mem.indexOf(u8, status.message.?, "system:anonymous") != null);
+    try testing.expect(std.mem.find(u8, status.message.?, "forbidden") != null);
+    try testing.expect(std.mem.find(u8, status.message.?, "system:anonymous") != null);
 }
 
 test "Status: parse not_found fixture round-trip" {

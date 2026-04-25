@@ -50,17 +50,21 @@ pub const RetryPolicy = struct {
     }
 
     /// Compute backoff with optional jitter (uniform random in [0, backoff]).
-    pub fn backoffWithJitterNs(self: RetryPolicy, attempt: u32) u64 {
+    pub fn backoffWithJitterNs(self: RetryPolicy, io: std.Io, attempt: u32) u64 {
         const base = self.backoffNs(attempt);
         if (!self.jitter or base == 0) return base;
-        return std.crypto.random.uintAtMost(u64, base);
+        // Uniformly sample [0, base] using an 8-byte CSPRNG draw.
+        var raw: [8]u8 = undefined;
+        io.random(&raw);
+        const r: u64 = std.mem.readInt(u64, &raw, .little);
+        return r % (base +| 1);
     }
 
     /// Compute the sleep duration for a retry attempt.
     /// If the server sent a Retry-After header, use the larger of
     /// the computed backoff and the server-requested delay.
-    pub fn sleepNs(self: RetryPolicy, attempt: u32, retry_after_ns: ?u64) u64 {
-        const backoff = if (self.jitter) self.backoffWithJitterNs(attempt) else self.backoffNs(attempt);
+    pub fn sleepNs(self: RetryPolicy, io: std.Io, attempt: u32, retry_after_ns: ?u64) u64 {
+        const backoff = if (self.jitter) self.backoffWithJitterNs(io, attempt) else self.backoffNs(attempt);
         if (retry_after_ns) |ra| {
             return @max(backoff, ra);
         }
@@ -162,7 +166,7 @@ test "backoffWithJitterNs: result within bounds" {
     // Run several times; result must be in [0, backoff].
     for (0..20) |_| {
         const base = policy.backoffNs(2);
-        const jittered = policy.backoffWithJitterNs(2);
+        const jittered = policy.backoffWithJitterNs(std.testing.io, 2);
         try testing.expect(jittered <= base);
     }
 }
@@ -177,7 +181,7 @@ test "backoffWithJitterNs: no jitter returns exact backoff" {
     };
 
     // Act / Assert
-    try testing.expectEqual(policy.backoffNs(1), policy.backoffWithJitterNs(1));
+    try testing.expectEqual(policy.backoffNs(1), policy.backoffWithJitterNs(std.testing.io, 1));
 }
 
 test "parseRetryAfterNs: valid integer" {
@@ -236,8 +240,8 @@ test "sleepNs: without retry-after uses backoff" {
     };
 
     // Act / Assert
-    try testing.expectEqual(@as(u64, 1000), policy.sleepNs(0, null));
-    try testing.expectEqual(@as(u64, 2000), policy.sleepNs(1, null));
+    try testing.expectEqual(@as(u64, 1000), policy.sleepNs(std.testing.io, 0, null));
+    try testing.expectEqual(@as(u64, 2000), policy.sleepNs(std.testing.io, 1, null));
 }
 
 test "sleepNs: retry-after overrides when larger" {
@@ -251,7 +255,7 @@ test "sleepNs: retry-after overrides when larger" {
 
     // Act / Assert
     // retry-after = 50_000 is larger than backoff of 1000
-    try testing.expectEqual(@as(u64, 50_000), policy.sleepNs(0, 50_000));
+    try testing.expectEqual(@as(u64, 50_000), policy.sleepNs(std.testing.io, 0, 50_000));
 }
 
 test "sleepNs: backoff used when larger than retry-after" {
@@ -265,7 +269,7 @@ test "sleepNs: backoff used when larger than retry-after" {
 
     // Act / Assert
     // backoff of 100_000 is larger than retry-after of 500
-    try testing.expectEqual(@as(u64, 100_000), policy.sleepNs(0, 500));
+    try testing.expectEqual(@as(u64, 100_000), policy.sleepNs(std.testing.io, 0, 500));
 }
 
 test "disabled policy has zero max_retries" {

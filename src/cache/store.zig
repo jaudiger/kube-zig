@@ -32,7 +32,7 @@ pub fn Store(comptime T: type) type {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        mutex: std.Thread.RwLock = .{},
+        mutex: std.Io.RwLock = .init,
         items: ItemMap = .empty,
         synced: bool = false,
         logger: Logger = Logger.noop,
@@ -83,9 +83,9 @@ pub fn Store(comptime T: type) type {
         }
 
         /// Free all stored objects and internal map storage.
-        pub fn deinit(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn deinit(self: *Self, io: std.Io) void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
             var it = self.items.iterator();
             while (it.next()) |entry| {
                 entry.value_ptr.*.release();
@@ -97,9 +97,9 @@ pub fn Store(comptime T: type) type {
         /// Get a single object by key.
         /// Returns a retained `*Entry`. The caller must call `entry.release()`
         /// when done. The lock is NOT held across the caller boundary.
-        pub fn get(self: *Self, key: ObjectKey) ?*Entry {
-            self.mutex.lockShared();
-            defer self.mutex.unlockShared();
+        pub fn get(self: *Self, io: std.Io, key: ObjectKey) ?*Entry {
+            self.mutex.lockSharedUncancelable(io);
+            defer self.mutex.unlockShared(io);
             const entry = self.items.get(key) orelse return null;
             entry.retain();
             return entry;
@@ -122,15 +122,15 @@ pub fn Store(comptime T: type) type {
         /// Get a single object by key, deep-cloned into a caller-owned arena.
         /// The lock is released before returning. Use this instead of `get()`
         /// when the data must outlive the lock (e.g. across I/O operations).
-        pub fn getCloned(self: *Self, allocator: std.mem.Allocator, key: ObjectKey) error{OutOfMemory}!?GetResult {
+        pub fn getCloned(self: *Self, allocator: std.mem.Allocator, io: std.Io, key: ObjectKey) error{OutOfMemory}!?GetResult {
             // Retain the entry under the shared lock, then release the lock
             // before deep-cloning. Entries are immutable after creation, so
             // reading the object outside the lock is safe. This keeps the
             // lock held only for the HashMap lookup + atomic increment,
             // not for the potentially expensive deep clone.
             const entry = blk: {
-                self.mutex.lockShared();
-                defer self.mutex.unlockShared();
+                self.mutex.lockSharedUncancelable(io);
+                defer self.mutex.unlockShared(io);
                 const e = self.items.get(key) orelse return null;
                 e.retain();
                 break :blk e;
@@ -149,23 +149,23 @@ pub fn Store(comptime T: type) type {
 
         /// Check whether a key exists in the store without returning an entry.
         /// Cheaper than `get()` when the caller only needs an existence check.
-        pub fn contains(self: *Self, key: ObjectKey) bool {
-            self.mutex.lockShared();
-            defer self.mutex.unlockShared();
+        pub fn contains(self: *Self, io: std.Io, key: ObjectKey) bool {
+            self.mutex.lockSharedUncancelable(io);
+            defer self.mutex.unlockShared(io);
             return self.items.contains(key);
         }
 
         /// Get the number of cached objects.
-        pub fn len(self: *Self) u32 {
-            self.mutex.lockShared();
-            defer self.mutex.unlockShared();
+        pub fn len(self: *Self, io: std.Io) u32 {
+            self.mutex.lockSharedUncancelable(io);
+            defer self.mutex.unlockShared(io);
             return self.items.count();
         }
 
         /// Has the store been populated by at least one complete list?
-        pub fn hasSynced(self: *Self) bool {
-            self.mutex.lockShared();
-            defer self.mutex.unlockShared();
+        pub fn hasSynced(self: *Self, io: std.Io) bool {
+            self.mutex.lockSharedUncancelable(io);
+            defer self.mutex.unlockShared(io);
             return self.synced;
         }
 
@@ -212,9 +212,9 @@ pub fn Store(comptime T: type) type {
         ///
         /// The caller must call `release()` on the returned `ListResult`
         /// when done.
-        pub fn list(self: *Self, allocator: std.mem.Allocator) !ListResult {
-            self.mutex.lockShared();
-            defer self.mutex.unlockShared();
+        pub fn list(self: *Self, allocator: std.mem.Allocator, io: std.Io) !ListResult {
+            self.mutex.lockSharedUncancelable(io);
+            defer self.mutex.unlockShared(io);
 
             // Allocate
             const entries = try allocator.alloc(*Entry, self.items.count());
@@ -242,33 +242,33 @@ pub fn Store(comptime T: type) type {
             store: *Self,
 
             /// Get a single object by key. See `Store.get()`.
-            pub fn get(self: View, key: ObjectKey) ?*Entry {
-                return self.store.get(key);
+            pub fn get(self: View, io: std.Io, key: ObjectKey) ?*Entry {
+                return self.store.get(io, key);
             }
 
             /// Get a deep-cloned copy of an object by key. See `Store.getCloned()`.
-            pub fn getCloned(self: View, allocator: std.mem.Allocator, key: ObjectKey) error{OutOfMemory}!?GetResult {
-                return self.store.getCloned(allocator, key);
+            pub fn getCloned(self: View, allocator: std.mem.Allocator, io: std.Io, key: ObjectKey) error{OutOfMemory}!?GetResult {
+                return self.store.getCloned(allocator, io, key);
             }
 
             /// Check whether a key exists in the store.
-            pub fn contains(self: View, key: ObjectKey) bool {
-                return self.store.contains(key);
+            pub fn contains(self: View, io: std.Io, key: ObjectKey) bool {
+                return self.store.contains(io, key);
             }
 
             /// Return the number of cached objects.
-            pub fn len(self: View) u32 {
-                return self.store.len();
+            pub fn len(self: View, io: std.Io) u32 {
+                return self.store.len(io);
             }
 
             /// Return whether the store has been populated by at least one complete list.
-            pub fn hasSynced(self: View) bool {
-                return self.store.hasSynced();
+            pub fn hasSynced(self: View, io: std.Io) bool {
+                return self.store.hasSynced(io);
             }
 
             /// Return a snapshot of all cached objects as retained entries.
-            pub fn list(self: View, allocator: std.mem.Allocator) !ListResult {
-                return self.store.list(allocator);
+            pub fn list(self: View, allocator: std.mem.Allocator, io: std.Io) !ListResult {
+                return self.store.list(allocator, io);
             }
         };
 
@@ -336,18 +336,18 @@ pub fn Store(comptime T: type) type {
         /// function; the caller must only free the `new_items` slice itself.
         /// On success, the caller must call `result.release()` after
         /// dispatching delete events for the removed entries.
-        pub fn replace(self: *Self, new_items: []const ReplaceItem) !ReplaceResult {
+        pub fn replace(self: *Self, io: std.Io, new_items: []const ReplaceItem) !ReplaceResult {
             const new_map = try self.buildNewMap(new_items);
 
             // Take exclusive lock for swap and classification of old entries.
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io);
             const old_count = self.items.count();
 
             // Fast path: nothing to remove.
             if (old_count == 0) {
                 self.items = new_map;
                 self.synced = true;
-                self.mutex.unlock();
+                self.mutex.unlock(io);
                 return .{
                     .entries = &.{},
                     .allocation = &.{},
@@ -358,7 +358,7 @@ pub fn Store(comptime T: type) type {
             // Pre-allocate removed buffer BEFORE the swap (point of no return).
             const removed_buf = self.allocator.alloc(*Entry, old_count) catch {
                 // Pre-alloc failed: swap never happened, release new_map entries.
-                self.mutex.unlock();
+                self.mutex.unlock(io);
                 var it = new_map.iterator();
                 while (it.next()) |entry| {
                     entry.value_ptr.*.release();
@@ -389,7 +389,7 @@ pub fn Store(comptime T: type) type {
                     entry.value_ptr.*.release();
                 }
             }
-            self.mutex.unlock();
+            self.mutex.unlock(io);
 
             // old_map backing storage is exclusively owned; safe to free unlocked.
             old_map.deinit(self.allocator);
@@ -407,7 +407,7 @@ pub fn Store(comptime T: type) type {
         /// Returns the old entry if one existed. The caller must call
         /// `entry.release()` on it after handler dispatch.
         /// On error, ownership is NOT transferred.
-        pub fn put(self: *Self, key: ObjectKey, object: T, arena: *std.heap.ArenaAllocator) !?*Entry {
+        pub fn put(self: *Self, io: std.Io, key: ObjectKey, object: T, arena: *std.heap.ArenaAllocator) !?*Entry {
             const entry = try self.allocator.create(Entry);
             entry.* = .{
                 .key = key,
@@ -417,8 +417,8 @@ pub fn Store(comptime T: type) type {
             };
             errdefer self.allocator.destroy(entry);
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             const gop = try self.items.getOrPut(self.allocator, key);
             if (gop.found_existing) {
@@ -437,9 +437,9 @@ pub fn Store(comptime T: type) type {
         /// Remove an item from the store by key.
         /// Returns the removed entry. The caller must call `entry.release()`.
         /// Returns null if the key was not found.
-        pub fn remove(self: *Self, key: ObjectKey) ?*Entry {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn remove(self: *Self, io: std.Io, key: ObjectKey) ?*Entry {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             const result = self.items.fetchRemove(key);
             if (result) |kv| {
@@ -550,55 +550,55 @@ test "ObjectKey: different keys have different hashes (basic)" {
 test "Store: empty store" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act / Assert
-    try testing.expectEqual(@as(u32, 0), store.len());
-    try testing.expect(!store.hasSynced());
-    try testing.expect(store.get(.{ .namespace = "ns", .name = "x" }) == null);
+    try testing.expectEqual(@as(u32, 0), store.len(std.testing.io));
+    try testing.expect(!store.hasSynced(std.testing.io));
+    try testing.expect(store.get(std.testing.io, .{ .namespace = "ns", .name = "x" }) == null);
 }
 
 test "Store: contains returns true for existing key and false for missing" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 
     // Assert
-    try testing.expect(store.contains(.{ .namespace = "default", .name = "pod-1" }));
-    try testing.expect(!store.contains(.{ .namespace = "default", .name = "pod-2" }));
-    try testing.expect(!store.contains(.{ .namespace = "other", .name = "pod-1" }));
+    try testing.expect(store.contains(std.testing.io, .{ .namespace = "default", .name = "pod-1" }));
+    try testing.expect(!store.contains(std.testing.io, .{ .namespace = "default", .name = "pod-2" }));
+    try testing.expect(!store.contains(std.testing.io, .{ .namespace = "other", .name = "pod-1" }));
 }
 
 test "Store: contains returns false for empty store" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act / Assert
-    try testing.expect(!store.contains(.{ .namespace = "default", .name = "pod-1" }));
+    try testing.expect(!store.contains(std.testing.io, .{ .namespace = "default", .name = "pod-1" }));
 }
 
 test "Store: get returns retained entry" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 
     // Assert
-    const entry = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
+    const entry = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
     defer entry.release();
 
     try testing.expectEqual(@as(i64, 1), entry.object.spec.?.replicas.?);
@@ -607,20 +607,20 @@ test "Store: get returns retained entry" {
 test "Store: getCloned returns owned copy independent of store" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
     };
-    const replace_result1 = try store.replace(&items);
+    const replace_result1 = try store.replace(std.testing.io, &items);
     replace_result1.release();
 
     // Act
-    const result = (try store.getCloned(testing.allocator, .{ .namespace = "default", .name = "pod-1" })).?;
+    const result = (try store.getCloned(testing.allocator, std.testing.io, .{ .namespace = "default", .name = "pod-1" })).?;
     defer result.deinit();
 
     // Mutate store; the cloned data must remain valid.
-    const replace_result2 = try store.replace(&.{});
+    const replace_result2 = try store.replace(std.testing.io, &.{});
     replace_result2.release();
 
     // Assert
@@ -631,34 +631,34 @@ test "Store: getCloned returns owned copy independent of store" {
 test "Store: getCloned returns null for missing key" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act / Assert
-    try testing.expect(try store.getCloned(testing.allocator, .{ .namespace = "ns", .name = "x" }) == null);
+    try testing.expect(try store.getCloned(testing.allocator, std.testing.io, .{ .namespace = "ns", .name = "x" }) == null);
 }
 
 test "Store: replace populates store and marks synced" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
         try makeEntry(testing.allocator, "default", "pod-2", 2),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 
     // Assert
-    try testing.expectEqual(@as(u32, 2), store.len());
-    try testing.expect(store.hasSynced());
+    try testing.expectEqual(@as(u32, 2), store.len(std.testing.io));
+    try testing.expect(store.hasSynced(std.testing.io));
 
-    const e1 = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
+    const e1 = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
     defer e1.release();
     try testing.expectEqual(@as(i64, 1), e1.object.spec.?.replicas.?);
 
-    const e2 = store.get(.{ .namespace = "default", .name = "pod-2" }).?;
+    const e2 = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-2" }).?;
     defer e2.release();
     try testing.expectEqual(@as(i64, 2), e2.object.spec.?.replicas.?);
 }
@@ -666,31 +666,31 @@ test "Store: replace populates store and marks synced" {
 test "Store: replace removes old items not in new list" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items1 = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
         try makeEntry(testing.allocator, "default", "pod-2", 2),
     };
-    const replace_result1 = try store.replace(&items1);
+    const replace_result1 = try store.replace(std.testing.io, &items1);
     replace_result1.release();
-    try testing.expectEqual(@as(u32, 2), store.len());
+    try testing.expectEqual(@as(u32, 2), store.len(std.testing.io));
 
     // Replace with only pod-2
     var items2 = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-2", 20),
     };
-    const replace_result2 = try store.replace(&items2);
+    const replace_result2 = try store.replace(std.testing.io, &items2);
 
     // Assert
     try testing.expectEqual(@as(usize, 1), replace_result2.entries.len);
     replace_result2.release();
 
-    try testing.expectEqual(@as(u32, 1), store.len());
-    try testing.expect(store.get(.{ .namespace = "default", .name = "pod-1" }) == null);
+    try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
+    try testing.expect(store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }) == null);
 
-    const e2 = store.get(.{ .namespace = "default", .name = "pod-2" }).?;
+    const e2 = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-2" }).?;
     defer e2.release();
     try testing.expectEqual(@as(i64, 20), e2.object.spec.?.replicas.?);
 }
@@ -698,39 +698,39 @@ test "Store: replace removes old items not in new list" {
 test "Store: replace with empty list clears store" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
     };
-    const replace_result1 = try store.replace(&items);
+    const replace_result1 = try store.replace(std.testing.io, &items);
     replace_result1.release();
-    try testing.expectEqual(@as(u32, 1), store.len());
+    try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
 
     // Assert
-    const replace_result2 = try store.replace(&.{});
+    const replace_result2 = try store.replace(std.testing.io, &.{});
     replace_result2.release();
 
-    try testing.expectEqual(@as(u32, 0), store.len());
-    try testing.expect(store.hasSynced()); // still synced
+    try testing.expectEqual(@as(u32, 0), store.len(std.testing.io));
+    try testing.expect(store.hasSynced(std.testing.io)); // still synced
 }
 
 test "Store: put adds new item" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     const item = try makeEntry(testing.allocator, "default", "pod-1", 3);
 
     // Assert
-    const old = try store.put(item.key, item.object, item.arena);
+    const old = try store.put(std.testing.io, item.key, item.object, item.arena);
 
     try testing.expect(old == null);
-    try testing.expectEqual(@as(u32, 1), store.len());
+    try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
 
-    const entry = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
+    const entry = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
     defer entry.release();
     try testing.expectEqual(@as(i64, 3), entry.object.spec.?.replicas.?);
 }
@@ -738,23 +738,23 @@ test "Store: put adds new item" {
 test "Store: put replaces existing item and returns old" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     const item1 = try makeEntry(testing.allocator, "default", "pod-1", 1);
-    const old1 = try store.put(item1.key, item1.object, item1.arena);
+    const old1 = try store.put(std.testing.io, item1.key, item1.object, item1.arena);
     try testing.expect(old1 == null);
 
     // Assert
     const item2 = try makeEntry(testing.allocator, "default", "pod-1", 5);
 
-    const old2 = try store.put(item2.key, item2.object, item2.arena);
+    const old2 = try store.put(std.testing.io, item2.key, item2.object, item2.arena);
 
     try testing.expect(old2 != null);
     try testing.expectEqual(@as(i64, 1), old2.?.object.spec.?.replicas.?);
     old2.?.release();
 
-    const entry = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
+    const entry = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
     defer entry.release();
     try testing.expectEqual(@as(i64, 5), entry.object.spec.?.replicas.?);
 }
@@ -762,35 +762,35 @@ test "Store: put replaces existing item and returns old" {
 test "Store: remove returns entry" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     const item = try makeEntry(testing.allocator, "default", "pod-1", 1);
-    _ = try store.put(item.key, item.object, item.arena);
+    _ = try store.put(std.testing.io, item.key, item.object, item.arena);
 
     // Assert
-    const removed = store.remove(.{ .namespace = "default", .name = "pod-1" });
+    const removed = store.remove(std.testing.io, .{ .namespace = "default", .name = "pod-1" });
 
     try testing.expect(removed != null);
     try testing.expectEqual(@as(i64, 1), removed.?.object.spec.?.replicas.?);
     removed.?.release();
 
-    try testing.expectEqual(@as(u32, 0), store.len());
+    try testing.expectEqual(@as(u32, 0), store.len(std.testing.io));
 }
 
 test "Store: remove returns null for nonexistent key" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act / Assert
-    try testing.expect(store.remove(.{ .namespace = "ns", .name = "nope" }) == null);
+    try testing.expect(store.remove(std.testing.io, .{ .namespace = "ns", .name = "nope" }) == null);
 }
 
 test "Store: list iterates all objects" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items = [_]Store(TestResource).ReplaceItem{
@@ -798,10 +798,10 @@ test "Store: list iterates all objects" {
         try makeEntry(testing.allocator, "default", "pod-2", 2),
         try makeEntry(testing.allocator, "default", "pod-3", 3),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 
-    const result = try store.list(testing.allocator);
+    const result = try store.list(testing.allocator, std.testing.io);
     defer result.release();
 
     // Assert
@@ -811,16 +811,16 @@ test "Store: list iterates all objects" {
 test "Store: hasSynced starts false, becomes true after replace" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
-    try testing.expect(!store.hasSynced());
+    try testing.expect(!store.hasSynced(std.testing.io));
 
     // Assert
-    const replace_result = try store.replace(&.{});
+    const replace_result = try store.replace(std.testing.io, &.{});
     replace_result.release();
 
-    try testing.expect(store.hasSynced());
+    try testing.expect(store.hasSynced(std.testing.io));
 }
 
 // Multi-namespace test helper
@@ -831,7 +831,7 @@ fn populateMultiNs(store: *Store(TestResource)) !void {
         try makeEntry(testing.allocator, "default", "pod-2", 2),
         try makeEntry(testing.allocator, "kube-system", "coredns", 3),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 }
 
@@ -839,10 +839,10 @@ fn populateMultiNs(store: *Store(TestResource)) !void {
 test "Store: list empty store returns 0-length slice" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
-    const result = try store.list(testing.allocator);
+    const result = try store.list(testing.allocator, std.testing.io);
     defer result.release();
 
     // Assert
@@ -852,11 +852,11 @@ test "Store: list empty store returns 0-length slice" {
 test "Store: list returns all entries" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
     try populateMultiNs(&store);
 
     // Act
-    const result = try store.list(testing.allocator);
+    const result = try store.list(testing.allocator, std.testing.io);
     defer result.release();
 
     // Assert
@@ -879,11 +879,11 @@ test "Store: list returns all entries" {
 test "Store: list returns accessible objects" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
     try populateMultiNs(&store);
 
     // Act
-    const result = try store.list(testing.allocator);
+    const result = try store.list(testing.allocator, std.testing.io);
     defer result.release();
 
     // Assert
@@ -900,14 +900,14 @@ test "Store: list returns accessible objects" {
 test "Store: list entries remain valid after store mutation" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
     try populateMultiNs(&store);
 
     // Act
-    const result = try store.list(testing.allocator);
+    const result = try store.list(testing.allocator, std.testing.io);
 
     // Mutate the store; entries should remain valid due to refcounting.
-    const replace_result = try store.replace(&.{});
+    const replace_result = try store.replace(std.testing.io, &.{});
     replace_result.release();
 
     // Assert
@@ -923,7 +923,7 @@ test "Store: put OOM on entry allocation does not corrupt store" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
     var fail_store = Store(TestResource).init(fa.allocator());
-    defer fail_store.deinit();
+    defer fail_store.deinit(std.testing.io);
 
     // Act
     const item = try makeEntry(testing.allocator, "default", "pod-1", 1);
@@ -932,9 +932,9 @@ test "Store: put OOM on entry allocation does not corrupt store" {
     // Make next allocation fail (Entry.create inside put)
     fa.fail_index = fa.alloc_index;
 
-    try testing.expectError(error.OutOfMemory, fail_store.put(item.key, item.object, item.arena));
+    try testing.expectError(error.OutOfMemory, fail_store.put(std.testing.io, item.key, item.object, item.arena));
 
-    try testing.expectEqual(@as(u32, 0), fail_store.len());
+    try testing.expectEqual(@as(u32, 0), fail_store.len(std.testing.io));
 
     // Cleanup: free the arena that was never taken by the store
     item.arena.deinit();
@@ -945,32 +945,32 @@ test "Store: put OOM on entry allocation does not corrupt store" {
 test "Store: concurrent reads and writes do not crash" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 1),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 
     // Assert
     const Reader = struct {
-        fn run(view: Store(TestResource).View) void {
+        fn run(io: std.Io, view: Store(TestResource).View) void {
             for (0..50) |_| {
-                const entry = view.get(.{ .namespace = "default", .name = "pod-1" });
+                const entry = view.get(io, .{ .namespace = "default", .name = "pod-1" });
                 if (entry) |e| e.release();
-                _ = view.len();
-                _ = view.hasSynced();
+                _ = view.len(io);
+                _ = view.hasSynced(io);
             }
         }
     };
 
     const Writer = struct {
-        fn run(s: *Store(TestResource)) void {
+        fn run(io: std.Io, s: *Store(TestResource)) void {
             for (0..20) |i| {
                 const entry_item = makeEntry(testing.allocator, "default", "pod-w", @intCast(i)) catch continue;
-                const old = s.put(entry_item.key, entry_item.object, entry_item.arena) catch continue;
+                const old = s.put(io, entry_item.key, entry_item.object, entry_item.arena) catch continue;
                 if (old) |o| o.release();
             }
         }
@@ -978,33 +978,33 @@ test "Store: concurrent reads and writes do not crash" {
 
     const view: Store(TestResource).View = .{ .store = &store };
     var threads: [3]std.Thread = undefined;
-    threads[0] = try std.Thread.spawn(.{}, Reader.run, .{view});
-    threads[1] = try std.Thread.spawn(.{}, Reader.run, .{view});
-    threads[2] = try std.Thread.spawn(.{}, Writer.run, .{&store});
+    threads[0] = try std.Thread.spawn(.{}, Reader.run, .{ std.testing.io, view });
+    threads[1] = try std.Thread.spawn(.{}, Reader.run, .{ std.testing.io, view });
+    threads[2] = try std.Thread.spawn(.{}, Writer.run, .{ std.testing.io, &store });
 
     for (&threads) |t| t.join();
 
-    try testing.expect(store.len() >= 1);
+    try testing.expect(store.len(std.testing.io) >= 1);
 }
 
 // Duplicate key tests
 test "Store: replace with duplicate keys keeps first occurrence" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     const item1 = try makeEntry(testing.allocator, "default", "pod-dup", 1);
     const item2 = try makeEntry(testing.allocator, "default", "pod-dup", 99);
 
     var dup_items = [_]Store(TestResource).ReplaceItem{ item1, item2 };
-    const replace_result = try store.replace(&dup_items);
+    const replace_result = try store.replace(std.testing.io, &dup_items);
     replace_result.release();
 
     // Assert
-    try testing.expectEqual(@as(u32, 1), store.len());
+    try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
 
-    const entry = store.get(.{ .namespace = "default", .name = "pod-dup" }).?;
+    const entry = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-dup" }).?;
     defer entry.release();
     try testing.expectEqual(@as(i64, 1), entry.object.spec.?.replicas.?);
 }
@@ -1012,7 +1012,7 @@ test "Store: replace with duplicate keys keeps first occurrence" {
 test "Store: replace with duplicate keys among non-duplicates" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     const item1 = try makeEntry(testing.allocator, "default", "pod-a", 1);
@@ -1020,17 +1020,17 @@ test "Store: replace with duplicate keys among non-duplicates" {
     const item3 = try makeEntry(testing.allocator, "default", "pod-a", 3); // duplicate of item1
 
     var dup_items = [_]Store(TestResource).ReplaceItem{ item1, item2, item3 };
-    const replace_result = try store.replace(&dup_items);
+    const replace_result = try store.replace(std.testing.io, &dup_items);
     replace_result.release();
 
     // Assert
-    try testing.expectEqual(@as(u32, 2), store.len());
+    try testing.expectEqual(@as(u32, 2), store.len(std.testing.io));
 
-    const ea = store.get(.{ .namespace = "default", .name = "pod-a" }).?;
+    const ea = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-a" }).?;
     defer ea.release();
     try testing.expectEqual(@as(i64, 1), ea.object.spec.?.replicas.?); // first wins
 
-    const eb = store.get(.{ .namespace = "default", .name = "pod-b" }).?;
+    const eb = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-b" }).?;
     defer eb.release();
     try testing.expectEqual(@as(i64, 2), eb.object.spec.?.replicas.?);
 }
@@ -1039,24 +1039,24 @@ test "Store: replace with duplicate keys among non-duplicates" {
 test "Store: retained entry survives store replacement" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 42),
     };
-    const replace_result1 = try store.replace(&items);
+    const replace_result1 = try store.replace(std.testing.io, &items);
     replace_result1.release();
 
     // Act
     // Retain an entry, then replace the store (which would free it without refcount).
-    const entry = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
+    const entry = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
 
-    const replace_result2 = try store.replace(&.{});
+    const replace_result2 = try store.replace(std.testing.io, &.{});
     replace_result2.release();
 
     // Assert
     // Entry is still accessible despite store being empty.
-    try testing.expectEqual(@as(u32, 0), store.len());
+    try testing.expectEqual(@as(u32, 0), store.len(std.testing.io));
     try testing.expectEqual(@as(i64, 42), entry.object.spec.?.replicas.?);
     try testing.expectEqualStrings("pod-1", entry.key.name);
     entry.release();
@@ -1065,17 +1065,17 @@ test "Store: retained entry survives store replacement" {
 test "Store: multiple retains and releases work correctly" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     var items = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "pod-1", 7),
     };
-    const replace_result = try store.replace(&items);
+    const replace_result = try store.replace(std.testing.io, &items);
     replace_result.release();
 
     // Act
-    const e1 = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
-    const e2 = store.get(.{ .namespace = "default", .name = "pod-1" }).?;
+    const e1 = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
+    const e2 = store.get(std.testing.io, .{ .namespace = "default", .name = "pod-1" }).?;
 
     // Assert
     try testing.expectEqual(@as(i64, 7), e1.object.spec.?.replicas.?);
@@ -1089,13 +1089,13 @@ test "Store: multiple retains and releases work correctly" {
 test "Store: replace OOM on entry allocation cleans up partial map" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Act
     var initial = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "existing", 1),
     };
-    const replace_result_init = try store.replace(&initial);
+    const replace_result_init = try store.replace(std.testing.io, &initial);
     replace_result_init.release();
 
     // Assert
@@ -1104,19 +1104,19 @@ test "Store: replace OOM on entry allocation cleans up partial map" {
 
     var fa2 = std.testing.FailingAllocator.init(testing.allocator, .{});
     var fail_store2 = Store(TestResource).init(fa2.allocator());
-    defer fail_store2.deinit();
+    defer fail_store2.deinit(std.testing.io);
 
     var new_items = [_]Store(TestResource).ReplaceItem{ item1, item2 };
 
     // Fail on the first allocation (ensureTotalCapacity).
     fa2.fail_index = fa2.alloc_index;
 
-    const oom_result = fail_store2.replace(&new_items);
+    const oom_result = fail_store2.replace(std.testing.io, &new_items);
     try testing.expectError(error.OutOfMemory, oom_result);
 
     // Store is still empty and valid.
     // Arenas are freed by replace() on error (unconditional ownership).
-    try testing.expectEqual(@as(u32, 0), fail_store2.len());
+    try testing.expectEqual(@as(u32, 0), fail_store2.len(std.testing.io));
 }
 
 test "Store: replace OOM on second entry frees all arenas" {
@@ -1125,7 +1125,7 @@ test "Store: replace OOM on second entry frees all arenas" {
     // Entry create, but fails on the second Entry create.
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
     var fail_store = Store(TestResource).init(fa.allocator());
-    defer fail_store.deinit();
+    defer fail_store.deinit(std.testing.io);
 
     const item1 = try makeEntry(testing.allocator, "default", "a", 10);
     const item2 = try makeEntry(testing.allocator, "default", "b", 20);
@@ -1135,11 +1135,11 @@ test "Store: replace OOM on second entry frees all arenas" {
     // Allow ensureTotalCapacity + first Entry create, fail on the second.
     fa.fail_index = fa.alloc_index + 2;
 
-    const oom_result = fail_store.replace(&new_items);
+    const oom_result = fail_store.replace(std.testing.io, &new_items);
 
     // Assert
     try testing.expectError(error.OutOfMemory, oom_result);
-    try testing.expectEqual(@as(u32, 0), fail_store.len());
+    try testing.expectEqual(@as(u32, 0), fail_store.len(std.testing.io));
     // All arenas freed by replace() on error; no manual cleanup needed.
 }
 
@@ -1148,14 +1148,14 @@ test "Store: replace OOM on removed buffer pre-alloc does not swap" {
     // Populate with one item using the real allocator, then switch to a
     // FailingAllocator for the second replace that will fail on pre-alloc.
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     var initial = [_]Store(TestResource).ReplaceItem{
         try makeEntry(testing.allocator, "default", "existing", 1),
     };
-    const replace_result_init = try store.replace(&initial);
+    const replace_result_init = try store.replace(std.testing.io, &initial);
     replace_result_init.release();
-    try testing.expectEqual(@as(u32, 1), store.len());
+    try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
 
     // Act
     // Create new items using a FailingAllocator. Allow buildNewMap to
@@ -1169,7 +1169,7 @@ test "Store: replace OOM on removed buffer pre-alloc does not swap" {
     // Allow ensureTotalCapacity + Entry create, fail on removed_buf alloc.
     fa.fail_index = fa.alloc_index + 2;
 
-    const oom_result = store.replace(&new_items);
+    const oom_result = store.replace(std.testing.io, &new_items);
 
     // Assert
     // Restore real allocator for cleanup.
@@ -1177,8 +1177,8 @@ test "Store: replace OOM on removed buffer pre-alloc does not swap" {
     try testing.expectError(error.OutOfMemory, oom_result);
 
     // Swap must not have happened; old data should be intact.
-    try testing.expectEqual(@as(u32, 1), store.len());
-    const entry = store.get(.{ .namespace = "default", .name = "existing" }).?;
+    try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
+    const entry = store.get(std.testing.io, .{ .namespace = "default", .name = "existing" }).?;
     defer entry.release();
     try testing.expectEqual(@as(i64, 1), entry.object.spec.?.replicas.?);
 }
@@ -1186,11 +1186,11 @@ test "Store: replace OOM on removed buffer pre-alloc does not swap" {
 test "Store: list entries carry correct keys" {
     // Arrange
     var store = Store(TestResource).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
     try populateMultiNs(&store);
 
     // Act
-    const result = try store.list(testing.allocator);
+    const result = try store.list(testing.allocator, std.testing.io);
     defer result.release();
 
     // Assert

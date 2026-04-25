@@ -24,7 +24,7 @@ pub const FlowControlTracker = struct {
     state: FlowControl = .{},
     schema_buf: ?[]const u8 = null,
     priority_buf: ?[]const u8 = null,
-    mu: std.Thread.Mutex = .{},
+    mu: std.Io.Mutex = .init,
 
     /// Create a tracker with no flow-control state.
     pub fn init(allocator: std.mem.Allocator) FlowControlTracker {
@@ -32,23 +32,23 @@ pub const FlowControlTracker = struct {
     }
 
     /// Free owned header buffers.
-    pub fn deinit(self: *FlowControlTracker) void {
-        self.mu.lock();
-        defer self.mu.unlock();
+    pub fn deinit(self: *FlowControlTracker, io: std.Io) void {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
         self.clearLocked();
     }
 
     /// Read the current flow-control state (thread-safe).
-    pub fn get(self: *FlowControlTracker) FlowControl {
-        self.mu.lock();
-        defer self.mu.unlock();
+    pub fn get(self: *FlowControlTracker, io: std.Io) FlowControl {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
         return self.state;
     }
 
     /// Update flow-control state from a transport response.
-    pub fn update(self: *FlowControlTracker, fc: FlowControl) error{OutOfMemory}!void {
-        self.mu.lock();
-        defer self.mu.unlock();
+    pub fn update(self: *FlowControlTracker, io: std.Io, fc: FlowControl) error{OutOfMemory}!void {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
 
         // Pre-allocate both strings before clearing old state, so a
         // partial OOM leaves the tracker unchanged rather than half-updated.

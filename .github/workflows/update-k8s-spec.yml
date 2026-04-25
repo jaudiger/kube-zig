@@ -62,7 +62,7 @@ jobs:
         if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
         uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Update version in build.zig
         if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'

@@ -1,28 +1,28 @@
 const std = @import("std");
 const emitter = @import("emitter.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Parse CLI arguments: <spec_path> <output_dir>
-    const args = try std.process.argsAlloc(allocator);
+    var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_it.deinit();
+    _ = args_it.skip(); // program name
 
-    if (args.len < 3) {
+    const spec_path = args_it.next() orelse
         std.process.fatal("Usage: k8s-codegen <swagger.json> <output_dir>\n", .{});
-    }
-
-    const spec_path = args[1];
-    const output_dir = args[2];
+    const output_dir = args_it.next() orelse
+        std.process.fatal("Usage: k8s-codegen <swagger.json> <output_dir>\n", .{});
 
     std.debug.print("Reading OpenAPI spec: {s}\n", .{spec_path});
 
     // Read the swagger.json spec (up to 64 MB).
-    const spec_data = std.fs.cwd().readFileAlloc(allocator, spec_path, 64 * 1024 * 1024) catch |err| {
+    const spec_data = std.Io.Dir.cwd().readFileAlloc(io, spec_path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
         std.process.fatal("Failed to read {s}: {}\n", .{ spec_path, err });
     };
 
@@ -54,10 +54,10 @@ pub fn main() !void {
     // Ensure output directory exists. Ignore errors because the directory
     // may already exist; the subsequent file creation will surface a clear
     // error if the path is truly inaccessible.
-    std.fs.cwd().makePath(output_dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, output_dir) catch {};
 
     // Run the emitter to generate per-group files + root types.zig.
-    emitter.generate(allocator, output_dir, definitions, paths) catch |err| {
+    emitter.generate(allocator, io, output_dir, definitions, paths) catch |err| {
         std.process.fatal("Code generation failed: {}\n", .{err});
     };
 

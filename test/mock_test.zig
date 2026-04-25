@@ -48,12 +48,12 @@ test "Api(CoreV1Pod).list: parses pod list from mock response" {
     mock.respondWith(.ok, pod_list_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try (try pods.list(.{})).value();
+    const result = try (try pods.list(std.testing.io, .{})).value();
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.value.items.len);
@@ -69,12 +69,12 @@ test "Api(CoreV1Pod).get: parses single pod from mock response" {
     mock.respondWith(.ok, pod_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try (try pods.get("test-pod")).value();
+    const result = try (try pods.get(std.testing.io, "test-pod")).value();
     defer result.deinit();
 
     try testing.expectEqualStrings("test-pod", result.value.metadata.?.name.?);
@@ -90,15 +90,15 @@ test "Api(CoreV1Pod).create: sends POST with serialized body" {
     mock.respondWith(.created, pod_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
     const pod = k8s.CoreV1Pod{
         .metadata = .{ .name = "test-pod", .namespace = "default" },
     };
 
-    const result = try (try pods.create(pod, .{})).value();
+    const result = try (try pods.create(std.testing.io, pod, .{})).value();
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), mock.requestCount());
@@ -119,12 +119,12 @@ test "Api(CoreV1Pod).delete: sends DELETE to correct path" {
     mock.respondWith(.ok, "{}");
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try pods.delete("test-pod", .{});
+    const result = try pods.delete(std.testing.io, "test-pod", .{});
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), mock.requestCount());
@@ -142,15 +142,15 @@ test "Api(AppsV1Deployment).create: sends to correct named-group path" {
     mock.respondWith(.created, deployment_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const deploys = Api(k8s.AppsV1Deployment).init(&c, c.context(), "default");
     const deploy = k8s.AppsV1Deployment{
         .metadata = .{ .name = "test-deploy", .namespace = "default" },
     };
 
-    const result = try (try deploys.create(deploy, .{})).value();
+    const result = try (try deploys.create(std.testing.io, deploy, .{})).value();
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -168,12 +168,12 @@ test "Api(CoreV1Node).get: cluster-scoped path has no namespace" {
     );
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const nodes = Api(k8s.CoreV1Node).init(&c, c.context(), null);
 
-    const result = try (try nodes.get("node-1")).value();
+    const result = try (try nodes.get(std.testing.io, "node-1")).value();
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -195,12 +195,12 @@ test "Api(CoreV1Pod).get: 404 response returns api_error with HttpNotFound" {
     mock.respondWith(.not_found, not_found_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try pods.get("missing");
+    const result = try pods.get(std.testing.io, "missing");
 
     switch (result) {
         .ok => try testing.expect(false), // should not be ok
@@ -221,12 +221,12 @@ test "Api(CoreV1Pod).get: transport error propagates" {
     // Don't enqueue any response; the mock will return HttpRequestFailed.
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    try testing.expectError(error.HttpRequestFailed, pods.get("test-pod"));
+    try testing.expectError(error.HttpRequestFailed, pods.get(std.testing.io, "test-pod"));
 }
 
 // ============================================================================
@@ -249,29 +249,29 @@ test "WatchStream: parses ADDED/MODIFIED/DELETED events from mock stream" {
     // Assert
     mock.respondWithStream(.ok, stream_body);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(.{});
+    var stream = try pods.watch(std.testing.io, .{});
     defer stream.close();
 
-    const ev1 = (try stream.next()).?;
+    const ev1 = (try stream.next(std.testing.io)).?;
     defer ev1.deinit();
     try testing.expect(ev1.event == .added);
     try testing.expectEqualStrings("pod-1", ev1.event.added.metadata.?.name.?);
 
-    const ev2 = (try stream.next()).?;
+    const ev2 = (try stream.next(std.testing.io)).?;
     defer ev2.deinit();
     try testing.expect(ev2.event == .modified);
     try testing.expectEqualStrings("2", ev2.event.modified.metadata.?.resourceVersion.?);
 
-    const ev3 = (try stream.next()).?;
+    const ev3 = (try stream.next(std.testing.io)).?;
     defer ev3.deinit();
     try testing.expect(ev3.event == .deleted);
 
-    try testing.expect(try stream.next() == null);
+    try testing.expect(try stream.next(std.testing.io) == null);
 }
 
 test "WatchStream: resourceVersion is tracked" {
@@ -289,15 +289,15 @@ test "WatchStream: resourceVersion is tracked" {
     // Assert
     mock.respondWithStream(.ok, stream_body);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(.{});
+    var stream = try pods.watch(std.testing.io, .{});
     defer stream.close();
 
-    const ev = (try stream.next()).?;
+    const ev = (try stream.next(std.testing.io)).?;
     defer ev.deinit();
 
     try testing.expectEqualStrings("42", stream.resourceVersion().?);
@@ -316,12 +316,12 @@ test "Api(CoreV1Pod).list: label selector is included in request path" {
     mock.respondWith(.ok, pod_list_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try (try pods.list(.{ .label_selector = "app=nginx" })).value();
+    const result = try (try pods.list(std.testing.io, .{ .label_selector = "app=nginx" })).value();
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -337,15 +337,15 @@ test "Api(CoreV1Pod).update: sends PUT with body serializer" {
     mock.respondWith(.ok, pod_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
     const pod = k8s.CoreV1Pod{
         .metadata = .{ .name = "test-pod", .namespace = "default", .resourceVersion = "99" },
     };
 
-    const result = try (try pods.update("test-pod", pod, .{})).value();
+    const result = try (try pods.update(std.testing.io, "test-pod", pod, .{})).value();
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -365,18 +365,18 @@ test "Multiple requests are recorded in order" {
     mock.respondWith(.ok, "{}");
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const list_result = try (try pods.list(.{})).value();
+    const list_result = try (try pods.list(std.testing.io, .{})).value();
     defer list_result.deinit();
 
-    const get_result = try (try pods.get("test-pod")).value();
+    const get_result = try (try pods.get(std.testing.io, "test-pod")).value();
     defer get_result.deinit();
 
-    const del_result = try pods.delete("test-pod", .{});
+    const del_result = try pods.delete(std.testing.io, "test-pod", .{});
     defer del_result.deinit();
 
     try testing.expectEqual(@as(usize, 3), mock.requestCount());
@@ -396,17 +396,17 @@ test "WatchStream: next returns null on empty stream" {
 
     mock.respondWithStream(.ok, "");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var stream = try pods.watch(.{});
+    var stream = try pods.watch(std.testing.io, .{});
     defer stream.close();
 
     // Assert
-    try testing.expect(try stream.next() == null);
+    try testing.expect(try stream.next(std.testing.io) == null);
 }
 
 test "WatchStream: resourceVersion returns null before any events" {
@@ -420,18 +420,18 @@ test "WatchStream: resourceVersion returns null before any events" {
     ;
     mock.respondWithStream(.ok, stream_body);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(.{});
+    var stream = try pods.watch(std.testing.io, .{});
     defer stream.close();
 
     // Act / Assert
     try testing.expect(stream.resourceVersion() == null);
 
-    const ev = (try stream.next()).?;
+    const ev = (try stream.next(std.testing.io)).?;
     defer ev.deinit();
 
     try testing.expectEqualStrings("10", stream.resourceVersion().?);
@@ -444,12 +444,12 @@ test "WatchStream: close is idempotent" {
 
     mock.respondWithStream(.ok, "");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(.{});
+    var stream = try pods.watch(std.testing.io, .{});
 
     // Act
     stream.close();
@@ -470,16 +470,16 @@ test "WatchStream: readLine rejects lines exceeding max_line_size" {
 
     mock.respondWithStream(.ok, big_line);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(.{});
+    var stream = try pods.watch(std.testing.io, .{});
     defer stream.close();
 
     // Act / Assert
-    try testing.expectError(error.LineTooLong, stream.next());
+    try testing.expectError(error.LineTooLong, stream.next(std.testing.io));
 }
 
 // ============================================================================
@@ -495,13 +495,13 @@ test "collectAll: single page with no continue token returns all items" {
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"100"},"items":[{"metadata":{"name":"pod-1","namespace":"default"}},{"metadata":{"name":"pod-2","namespace":"default"}}]}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, .{}, .{ .page_size = 100 });
+    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 });
     defer result.deinit();
 
     // Assert
@@ -526,13 +526,13 @@ test "collectAll: multi-page with continue tokens accumulates items" {
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"200"},"items":[{"metadata":{"name":"pod-3","namespace":"default"}}]}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, .{}, .{ .page_size = 1 });
+    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 1 });
     defer result.deinit();
 
     // Assert
@@ -551,13 +551,13 @@ test "collectAll: empty continue token treated as end of pagination" {
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"300","continue":""},"items":[{"metadata":{"name":"pod-1","namespace":"default"}}]}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, .{}, .{ .page_size = 100 });
+    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 });
     defer result.deinit();
 
     // Assert
@@ -577,13 +577,13 @@ test "collectAll: resource_version matches first page" {
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"501"},"items":[{"metadata":{"name":"pod-2","namespace":"default"}}]}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, .{}, .{ .page_size = 1 });
+    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 1 });
     defer result.deinit();
 
     // Assert
@@ -606,14 +606,14 @@ test "DiscoveryClient.hasResource: returns true when resource exists" {
 
     mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const result = try discovery.hasResource("", "v1", "pods");
+    const result = try discovery.hasResource(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expect(result);
@@ -626,14 +626,14 @@ test "DiscoveryClient.hasResource: returns false when resource not in list" {
 
     mock.respondWith(.ok, comptime resourceListJson("services"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const result = try discovery.hasResource("", "v1", "pods");
+    const result = try discovery.hasResource(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expect(!result);
@@ -646,14 +646,14 @@ test "DiscoveryClient.hasResource: returns false on 404" {
 
     mock.respondWith(.not_found, not_found_json);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const result = try discovery.hasResource("nonexistent.io", "v1", "things");
+    const result = try discovery.hasResource(std.testing.io, "nonexistent.io", "v1", "things");
 
     // Assert
     try testing.expect(!result);
@@ -668,14 +668,14 @@ test "DiscoveryClient.hasResource: returns error on 500" {
         \\{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"internal error","reason":"InternalError","code":500}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act / Assert
-    try testing.expectError(error.HttpServerError, discovery.hasResource("", "v1", "pods"));
+    try testing.expectError(error.HttpServerError, discovery.hasResource(std.testing.io, "", "v1", "pods"));
 }
 
 /// Minimal APIGroupList JSON containing the given groups.
@@ -692,14 +692,14 @@ test "DiscoveryClient.hasGroup: empty string returns true without request" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const result = try discovery.hasGroup("");
+    const result = try discovery.hasGroup(std.testing.io, "");
 
     // Assert
     try testing.expect(result);
@@ -713,14 +713,14 @@ test "DiscoveryClient.hasGroup: returns true when group found" {
 
     mock.respondWith(.ok, api_group_list_with_apps);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const result = try discovery.hasGroup("apps");
+    const result = try discovery.hasGroup(std.testing.io, "apps");
 
     // Assert
     try testing.expect(result);
@@ -733,14 +733,14 @@ test "DiscoveryClient.hasGroup: returns false when group not found" {
 
     mock.respondWith(.ok, api_group_list_without_apps);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const result = try discovery.hasGroup("apps");
+    const result = try discovery.hasGroup(std.testing.io, "apps");
 
     // Assert
     try testing.expect(!result);
@@ -751,14 +751,14 @@ test "DiscoveryClient.findPreferredVersion: empty group returns v1" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const version = (try discovery.findPreferredVersion(testing.allocator, "")).?;
+    const version = (try discovery.findPreferredVersion(std.testing.io, testing.allocator, "")).?;
     defer testing.allocator.free(version);
 
     // Assert
@@ -772,14 +772,14 @@ test "DiscoveryClient.findPreferredVersion: returns preferredVersion when set" {
 
     mock.respondWith(.ok, api_group_list_with_apps);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const version = (try discovery.findPreferredVersion(testing.allocator, "apps")).?;
+    const version = (try discovery.findPreferredVersion(std.testing.io, testing.allocator, "apps")).?;
     defer testing.allocator.free(version);
 
     // Assert
@@ -795,14 +795,14 @@ test "DiscoveryClient.findPreferredVersion: falls back to first version when pre
         \\{"groups":[{"name":"custom.io","versions":[{"groupVersion":"custom.io/v1beta1","version":"v1beta1"}]}]}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const version = (try discovery.findPreferredVersion(testing.allocator, "custom.io")).?;
+    const version = (try discovery.findPreferredVersion(std.testing.io, testing.allocator, "custom.io")).?;
     defer testing.allocator.free(version);
 
     // Assert
@@ -820,8 +820,8 @@ test "Api(CoreV1Pod).apply: sends PATCH with apply content type and core apiVers
 
     mock.respondWith(.ok, pod_json);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
     const body = k8s.CoreV1Pod{
@@ -829,7 +829,7 @@ test "Api(CoreV1Pod).apply: sends PATCH with apply content type and core apiVers
     };
 
     // Act
-    const result = try (try pods.apply("test-pod", body, .{ .field_manager = "test" })).value();
+    const result = try (try pods.apply(std.testing.io, "test-pod", body, .{ .field_manager = "test" })).value();
     defer result.deinit();
 
     // Assert
@@ -848,8 +848,8 @@ test "Api(AppsV1Deployment).apply: named group has apiVersion apps/v1" {
 
     mock.respondWith(.ok, deployment_json);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const deploys = Api(k8s.AppsV1Deployment).init(&c, c.context(), "default");
     const body = k8s.AppsV1Deployment{
@@ -857,7 +857,7 @@ test "Api(AppsV1Deployment).apply: named group has apiVersion apps/v1" {
     };
 
     // Act
-    const result = try (try deploys.apply("test-deploy", body, .{ .field_manager = "test" })).value();
+    const result = try (try deploys.apply(std.testing.io, "test-deploy", body, .{ .field_manager = "test" })).value();
     defer result.deinit();
 
     // Assert
@@ -879,8 +879,8 @@ test "DynamicApi.apply: sets apiVersion and kind on object body" {
 
     mock.respondWith(.ok, "{}");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const api = try DynamicApi.init(&c, c.context(), .{
         .group = "apps",
@@ -900,7 +900,7 @@ test "DynamicApi.apply: sets apiVersion and kind on object body" {
     defer parsed.deinit();
 
     // Act
-    const result = try (try api.apply("test-deploy", parsed.value, .{ .field_manager = "test" })).value();
+    const result = try (try api.apply(std.testing.io, "test-deploy", parsed.value, .{ .field_manager = "test" })).value();
     defer result.deinit();
 
     // Assert
@@ -919,8 +919,8 @@ test "DynamicApi.apply: non-object body sent without apiVersion/kind injection" 
 
     mock.respondWith(.ok, "{}");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const api = try DynamicApi.init(&c, c.context(), .{
         .group = "",
@@ -931,7 +931,7 @@ test "DynamicApi.apply: non-object body sent without apiVersion/kind injection" 
     }, "default");
 
     // Act
-    const result = try (try api.apply("test-cm", .{ .string = "raw-content" }, .{ .field_manager = "test" })).value();
+    const result = try (try api.apply(std.testing.io, "test-cm", .{ .string = "raw-content" }, .{ .field_manager = "test" })).value();
     defer result.deinit();
 
     // Assert
@@ -953,15 +953,15 @@ test "DiscoveryClient cache: hasResource twice for same group/version uses one r
 
     mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const r1 = try discovery.hasResource("", "v1", "pods");
-    const r2 = try discovery.hasResource("", "v1", "pods");
+    const r1 = try discovery.hasResource(std.testing.io, "", "v1", "pods");
+    const r2 = try discovery.hasResource(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expect(r1);
@@ -976,15 +976,15 @@ test "DiscoveryClient cache: hasResource then isResourceNamespaced shares cache"
 
     mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const exists = try discovery.hasResource("", "v1", "pods");
-    const namespaced = try discovery.isResourceNamespaced("", "v1", "pods");
+    const exists = try discovery.hasResource(std.testing.io, "", "v1", "pods");
+    const namespaced = try discovery.isResourceNamespaced(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expect(exists);
@@ -1001,15 +1001,15 @@ test "DiscoveryClient cache: TTL=0 disables caching" {
     mock.respondWith(.ok, comptime resourceListJson("pods"));
     mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{ .cache_ttl_ns = 0 });
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    _ = try discovery.hasResource("", "v1", "pods");
-    _ = try discovery.hasResource("", "v1", "pods");
+    _ = try discovery.hasResource(std.testing.io, "", "v1", "pods");
+    _ = try discovery.hasResource(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expectEqual(@as(usize, 2), mock.requestCount());
@@ -1023,16 +1023,16 @@ test "DiscoveryClient cache: invalidateCache forces re-fetch" {
     mock.respondWith(.ok, comptime resourceListJson("pods"));
     mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    _ = try discovery.hasResource("", "v1", "pods");
-    discovery.invalidateCache();
-    _ = try discovery.hasResource("", "v1", "pods");
+    _ = try discovery.hasResource(std.testing.io, "", "v1", "pods");
+    discovery.invalidateCache(std.testing.io);
+    _ = try discovery.hasResource(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expectEqual(@as(usize, 2), mock.requestCount());
@@ -1048,17 +1048,17 @@ test "DiscoveryClient cache: error responses are not cached" {
     );
     mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const err_result = discovery.hasResource("", "v1", "pods");
+    const err_result = discovery.hasResource(std.testing.io, "", "v1", "pods");
     try testing.expectError(error.HttpServerError, err_result);
 
-    const ok_result = try discovery.hasResource("", "v1", "pods");
+    const ok_result = try discovery.hasResource(std.testing.io, "", "v1", "pods");
 
     // Assert
     try testing.expect(ok_result);
@@ -1072,15 +1072,15 @@ test "DiscoveryClient cache: hasGroup + findPreferredVersion share groups cache"
 
     mock.respondWith(.ok, api_group_list_with_apps);
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    const has = try discovery.hasGroup("apps");
-    const version = try discovery.findPreferredVersion(testing.allocator, "apps");
+    const has = try discovery.hasGroup(std.testing.io, "apps");
+    const version = try discovery.findPreferredVersion(std.testing.io, testing.allocator, "apps");
     defer if (version) |v| testing.allocator.free(v);
 
     // Assert
@@ -1099,19 +1099,19 @@ test "DiscoveryClient cache: max_resource_cache_entries evicts oldest entry" {
     mock.respondWith(.ok, comptime resourceListJson("things"));
     mock.respondWith(.ok, comptime resourceListJson("things"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{
         .max_resource_cache_entries = 2,
     });
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    _ = try discovery.hasResource("alpha.io", "v1", "things");
-    _ = try discovery.hasResource("beta.io", "v1", "things");
-    _ = try discovery.hasResource("gamma.io", "v1", "things");
-    _ = try discovery.hasResource("alpha.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "alpha.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "beta.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "gamma.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "alpha.io", "v1", "things");
 
     // Assert
     try testing.expectEqual(@as(usize, 4), mock.requestCount());
@@ -1125,19 +1125,19 @@ test "DiscoveryClient cache: entries within max limit are retained" {
     mock.respondWith(.ok, comptime resourceListJson("things"));
     mock.respondWith(.ok, comptime resourceListJson("things"));
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{
         .max_resource_cache_entries = 2,
     });
-    defer discovery.deinit();
+    defer discovery.deinit(std.testing.io);
 
     // Act
-    _ = try discovery.hasResource("alpha.io", "v1", "things");
-    _ = try discovery.hasResource("beta.io", "v1", "things");
-    _ = try discovery.hasResource("alpha.io", "v1", "things");
-    _ = try discovery.hasResource("beta.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "alpha.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "beta.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "alpha.io", "v1", "things");
+    _ = try discovery.hasResource(std.testing.io, "beta.io", "v1", "things");
 
     // Assert
     try testing.expectEqual(@as(usize, 2), mock.requestCount());
@@ -1152,11 +1152,11 @@ test "Client.poolStats: returns stats from mock transport" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     // Act
-    const stats = c.poolStats();
+    const stats = c.poolStats(std.testing.io);
 
     // Assert
     try testing.expect(stats != null);
@@ -1174,13 +1174,13 @@ test "retry loop: transport error after 429 with Retry-After hint" {
     mock.respondWithTransportError();
     mock.respondWith(.ok, "{}");
 
-    var c = mock.client();
+    var c = mock.client(std.testing.io);
     c.retry_policy = .{ .max_retries = 2, .initial_backoff_ns = 0, .max_backoff_ns = 0, .backoff_multiplier = 1, .jitter = false };
-    defer c.deinit();
+    defer c.deinit(std.testing.io);
     const ctx = c.context();
 
     // Act
-    const result = try c.getRaw("/api/v1/nodes", ctx);
+    const result = try c.getRaw(std.testing.io, "/api/v1/nodes", ctx);
     defer result.deinit();
 
     // Assert

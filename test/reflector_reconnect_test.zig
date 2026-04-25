@@ -92,31 +92,31 @@ test "watch 410 triggers re-list" {
     mock.respondWith(.ok, pod_list_one);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // Step 1: initial listing returns init_page.
-    const ev1 = (try reflector.step()).?;
+    const ev1 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev1 == .init_page);
     freeInitPage(testing.allocator, ev1.init_page);
     try testing.expect(reflector.state == .watching);
 
     // Step 2: watching opens stream, reads ERROR 410, returns .gone.
-    const ev2 = (try reflector.step()).?;
+    const ev2 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev2 == .gone);
     try testing.expect(reflector.state == .gone);
 
     // Step 3: gone resets rv to "" (quorum read), returns null.
-    const ev3 = try reflector.step();
+    const ev3 = try reflector.step(std.testing.io);
     try testing.expect(ev3 == null);
     try testing.expect(reflector.state == .initial);
     try testing.expectEqualStrings("", reflector.resource_version.?);
 
     // Step 4: initial listing again, re-list succeeds.
-    const ev4 = (try reflector.step()).?;
+    const ev4 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev4 == .init_page);
     freeInitPage(testing.allocator, ev4.init_page);
     try testing.expect(reflector.state == .watching);
@@ -140,40 +140,40 @@ test "network disconnect reconnects with resourceVersion" {
     mock.respondWithStream(.ok, watch_added_then_end);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // Step 1: list.
-    const ev1 = (try reflector.step()).?;
+    const ev1 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev1 == .init_page);
     freeInitPage(testing.allocator, ev1.init_page);
 
     // Step 2: watch ADDED event (rv updated to 101).
-    const ev2 = (try reflector.step()).?;
+    const ev2 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev2 == .watch_event);
     ev2.watch_event.deinit();
     try testing.expectEqualStrings("101", reflector.resource_version.?);
 
     // Step 3: stream ends cleanly, returns watch_ended.
-    const ev3 = (try reflector.step()).?;
+    const ev3 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev3 == .watch_ended);
 
     // Step 4: watch_ended transitions back to watching (null step).
-    const ev4 = try reflector.step();
+    const ev4 = try reflector.step(std.testing.io);
     try testing.expect(ev4 == null);
     try testing.expect(reflector.state == .watching);
 
     // Step 5: new watch opens, reconnected with rv=101.
-    const ev5 = (try reflector.step()).?;
+    const ev5 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev5 == .watch_event);
     ev5.watch_event.deinit();
 
     // Verify: the reconnected watch request (3rd request, index 2) uses rv=101.
     const req = mock.getRequest(2).?;
-    try testing.expect(std.mem.indexOf(u8, req.path, "resourceVersion=101") != null);
+    try testing.expect(std.mem.find(u8, req.path, "resourceVersion=101") != null);
 }
 
 // ============================================================================
@@ -190,19 +190,19 @@ test "bookmark updates resourceVersion" {
     mock.respondWithStream(.ok, watch_bookmark);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // Step 1: list (rv 100).
-    const ev1 = (try reflector.step()).?;
+    const ev1 = (try reflector.step(std.testing.io)).?;
     freeInitPage(testing.allocator, ev1.init_page);
     try testing.expectEqualStrings("100", reflector.resource_version.?);
 
     // Step 2: watch reads BOOKMARK rv=150. Returns null (internal-only step).
-    const ev2 = try reflector.step();
+    const ev2 = try reflector.step(std.testing.io);
     try testing.expect(ev2 == null);
     try testing.expectEqualStrings("150", reflector.resource_version.?);
 }
@@ -220,15 +220,15 @@ test "repeated failures use backoff" {
     // Don't enqueue any responses; every list attempt fails with HttpRequestFailed.
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // Each step should return .transient_error with incrementing backoff.
     for (0..5) |i| {
-        const ev = (try reflector.step()).?;
+        const ev = (try reflector.step(std.testing.io)).?;
         try testing.expect(ev == .transient_error);
         try testing.expectEqual(@as(u32, @intCast(i + 1)), reflector.consecutive_errors);
         try testing.expectEqual(@as(u32, @intCast(i + 1)), reflector.backoff_attempt);
@@ -238,7 +238,7 @@ test "repeated failures use backoff" {
     try testing.expectEqual(@as(u32, 5), reflector.consecutive_errors);
 
     // Backoff should return non-zero sleep durations.
-    const backoff_ns = reflector.retry_policy.sleepNs(reflector.backoff_attempt, null);
+    const backoff_ns = reflector.retry_policy.sleepNs(std.testing.io, reflector.backoff_attempt, null);
     try testing.expect(backoff_ns > 0);
 }
 
@@ -253,17 +253,17 @@ test "context cancellation stops reflector" {
 
     // Act
     var cs = CancelSource.init();
-    cs.cancel();
+    cs.cancel(std.testing.io);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, cs.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // step() should return error.Canceled immediately.
-    try testing.expectError(error.Canceled, reflector.step());
+    try testing.expectError(error.Canceled, reflector.step(std.testing.io));
 }
 
 // ============================================================================
@@ -284,39 +284,39 @@ test "empty re-list after 410 clears cache" {
     mock.respondWith(.ok, pod_list_empty);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     var store = Store(Pod).init(testing.allocator);
-    defer store.deinit();
+    defer store.deinit(std.testing.io);
 
     // Step 1: list returns 2 items. Populate the store.
-    const ev1 = (try reflector.step()).?;
+    const ev1 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev1 == .init_page);
-    const replace_result1 = try store.replace(ev1.init_page.items);
+    const replace_result1 = try store.replace(std.testing.io, ev1.init_page.items);
     replace_result1.release();
     testing.allocator.free(ev1.init_page.items);
     if (ev1.init_page.rv_buf) |buf| testing.allocator.free(buf);
-    try testing.expectEqual(@as(u32, 2), store.len());
+    try testing.expectEqual(@as(u32, 2), store.len(std.testing.io));
 
     // Step 2: watch returns 410 ERROR.
-    const ev2 = (try reflector.step()).?;
+    const ev2 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev2 == .gone);
 
     // Step 3: gone resets rv.
-    _ = try reflector.step();
+    _ = try reflector.step(std.testing.io);
 
     // Step 4: re-list returns empty init_page.
-    const ev4 = (try reflector.step()).?;
+    const ev4 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev4 == .init_page);
     try testing.expect(ev4.init_page.is_last);
     try testing.expectEqual(@as(usize, 0), ev4.init_page.items.len);
 
     // Use replace to get the items that were deleted.
-    const replace_result2 = try store.replace(ev4.init_page.items);
+    const replace_result2 = try store.replace(std.testing.io, ev4.init_page.items);
     testing.allocator.free(ev4.init_page.items);
     if (ev4.init_page.rv_buf) |buf| testing.allocator.free(buf);
 
@@ -327,7 +327,7 @@ test "empty re-list after 410 clears cache" {
     replace_result2.release();
 
     // Store should now be empty.
-    try testing.expectEqual(@as(u32, 0), store.len());
+    try testing.expectEqual(@as(u32, 0), store.len(std.testing.io));
 }
 
 // ============================================================================
@@ -344,18 +344,18 @@ test "partial JSON line treated as disconnect" {
     mock.respondWithStream(.ok, watch_partial_json);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // Step 1: list succeeds.
-    const ev1 = (try reflector.step()).?;
+    const ev1 = (try reflector.step(std.testing.io)).?;
     freeInitPage(testing.allocator, ev1.init_page);
 
     // Step 2: watch opens, reads partial JSON, results in transient error.
-    const ev2 = (try reflector.step()).?;
+    const ev2 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev2 == .transient_error);
     try testing.expectEqual(@as(u32, 1), reflector.consecutive_errors);
     // Watch stream should be closed (reflector will retry).
@@ -378,24 +378,24 @@ test "410 on initial list retries without resourceVersion" {
     mock.respondWith(.ok, pod_list_one);
 
     // Assert
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit();
+    defer reflector.deinit(std.testing.io);
 
     // Step 1: initial list returns 410 Gone.
-    const ev1 = (try reflector.step()).?;
+    const ev1 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev1 == .gone);
     try testing.expect(reflector.state == .gone);
 
     // Step 2: gone resets rv to "" (quorum read).
-    const ev2 = try reflector.step();
+    const ev2 = try reflector.step(std.testing.io);
     try testing.expect(ev2 == null);
     try testing.expectEqualStrings("", reflector.resource_version.?);
 
     // Step 3: re-list succeeds.
-    const ev3 = (try reflector.step()).?;
+    const ev3 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev3 == .init_page);
     try testing.expect(ev3.init_page.is_last);
     freeInitPage(testing.allocator, ev3.init_page);
@@ -406,7 +406,7 @@ test "410 on initial list retries without resourceVersion" {
     const req = mock.getRequest(1).?;
     // The path should contain resourceVersion= (empty value) indicating a
     // quorum read, not resourceVersion=0.
-    try testing.expect(std.mem.indexOf(u8, req.path, "resourceVersion=0") == null);
+    try testing.expect(std.mem.find(u8, req.path, "resourceVersion=0") == null);
 }
 
 // ============================================================================

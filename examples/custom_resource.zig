@@ -118,19 +118,21 @@ const CronTabApi = kube_zig.Api(CronTab);
 
 const crontab_name = "example-crontab";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
 
-    const config = kube_zig.ProxyConfig.init();
-    var text_logger = kube_zig.TextStdoutLogger.init(.info);
+    const config = kube_zig.ProxyConfig.init(init.environ_map);
+    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
 
-    var client = try kube_zig.Client.init(allocator, config.base_url, .{ .logger = text_logger.logger() });
-    defer client.deinit();
+    var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = text_logger.logger() });
+    defer client.deinit(io);
 
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     defer w.flush() catch {};
 
@@ -144,7 +146,7 @@ pub fn main() !void {
     // 1. Create a CronTab (using SSA apply, idempotent)
     try w.print("-- Creating CronTab --\n", .{});
 
-    const create_result = crontabs.apply(crontab_name, .{
+    const create_result = crontabs.apply(io, crontab_name, .{
         .metadata = .{
             .name = crontab_name,
             .namespace = namespace,
@@ -177,14 +179,14 @@ pub fn main() !void {
     // 2. List CronTabs
     try w.print("-- Listing CronTabs --\n", .{});
 
-    const list_result = crontabs.list(.{}) catch |err| {
+    const list_result = crontabs.list(io, .{}) catch |err| {
         try w.print("  Failed to list CronTabs: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     const list_parsed = list_result.value() catch |err| {
         try w.print("  API error listing CronTabs: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     defer list_parsed.deinit();
@@ -200,14 +202,14 @@ pub fn main() !void {
     // 3. Get by name
     try w.print("-- Getting CronTab by name --\n", .{});
 
-    const get_result = crontabs.get(crontab_name) catch |err| {
+    const get_result = crontabs.get(io, crontab_name) catch |err| {
         try w.print("  Failed to get CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     const fetched = get_result.value() catch |err| {
         try w.print("  API error getting CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     defer fetched.deinit();
@@ -220,7 +222,7 @@ pub fn main() !void {
     // 4. Update (change replicas via SSA apply)
     try w.print("-- Updating CronTab --\n", .{});
 
-    const update_result = crontabs.apply(crontab_name, .{
+    const update_result = crontabs.apply(io, crontab_name, .{
         .metadata = .{
             .name = crontab_name,
             .namespace = namespace,
@@ -232,12 +234,12 @@ pub fn main() !void {
         },
     }, .{ .field_manager = "custom-resource-example", .force = true }) catch |err| {
         try w.print("  Failed to update CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     const updated = update_result.value() catch |err| {
         try w.print("  API error updating CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     defer updated.deinit();
@@ -250,14 +252,14 @@ pub fn main() !void {
     }
 
     // 5. Delete
-    cleanup(crontabs, w);
+    cleanup(crontabs, io, w);
 
     try w.print("\nDone.\n", .{});
 }
 
-fn cleanup(crontabs: CronTabApi, w: *std.Io.Writer) void {
+fn cleanup(crontabs: CronTabApi, io: std.Io, w: *std.Io.Writer) void {
     w.print("-- Deleting CronTab {s} --\n", .{crontab_name}) catch return;
-    const result = crontabs.delete(crontab_name, .{}) catch |err| {
+    const result = crontabs.delete(io, crontab_name, .{}) catch |err| {
         w.print("  Failed to delete: {}\n", .{err}) catch {};
         return;
     };

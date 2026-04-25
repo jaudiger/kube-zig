@@ -133,14 +133,14 @@ pub const Reconciler = struct {
     }
 
     /// Spawn `max_concurrent_reconciles` worker threads.
-    pub fn start(self: *Reconciler) !void {
+    pub fn start(self: *Reconciler, io: std.Io) !void {
         std.debug.assert(!self.started);
         self.started = true;
 
         for (0..self.max_concurrent_reconciles) |_| {
-            const thread = try std.Thread.spawn(.{}, workerLoop, .{self});
+            const thread = try std.Thread.spawn(.{}, workerLoop, .{ self, io });
             self.workers.append(self.allocator, thread) catch {
-                self.queue.shutdown();
+                self.queue.shutdown(io);
                 thread.join();
                 for (self.workers.items) |prev| {
                     prev.join();
@@ -153,8 +153,8 @@ pub const Reconciler = struct {
     }
 
     /// Signal the reconciler to stop (non-blocking).
-    pub fn cancel(self: *Reconciler) void {
-        self.queue.shutdown();
+    pub fn cancel(self: *Reconciler, io: std.Io) void {
+        self.queue.shutdown(io);
     }
 
     /// Wait for all worker threads to exit (blocking).
@@ -167,19 +167,19 @@ pub const Reconciler = struct {
     }
 
     /// Convenience: cancel + join.
-    pub fn stop(self: *Reconciler) void {
-        self.cancel();
+    pub fn stop(self: *Reconciler, io: std.Io) void {
+        self.cancel(io);
         self.join();
     }
 
     /// Single-threaded reconcile loop. Blocks until the queue is shut down.
-    pub fn run(self: *Reconciler) void {
-        workerLoop(self);
+    pub fn run(self: *Reconciler, io: std.Io) void {
+        workerLoop(self, io);
     }
 
-    fn workerLoop(self: *Reconciler) void {
+    fn workerLoop(self: *Reconciler, io: std.Io) void {
         while (true) {
-            const key = self.queue.get() catch |err| {
+            const key = self.queue.get(io) catch |err| {
                 self.logger.warn("work queue get failed", &.{
                     LogField.string("error", @errorName(err)),
                 });
@@ -189,13 +189,13 @@ pub const Reconciler = struct {
             // Default to .backoff so that panics/early-returns still
             // trigger rate-limited requeue rather than losing the key.
             var done_action: WorkQueue.DoneAction = .backoff;
-            defer self.queue.done(key, done_action);
+            defer self.queue.done(io, key, done_action);
 
             self.metrics.active_workers.inc();
             defer self.metrics.active_workers.dec();
 
             self.metrics.reconcile_total.inc();
-            const reconcile_start = std.time.Instant.now() catch null;
+            const reconcile_start: std.Io.Clock.Timestamp = .now(io, .awake);
 
             self.logger.debug("reconcile dequeued", &.{
                 LogField.string("namespace", key.namespace),
@@ -204,20 +204,19 @@ pub const Reconciler = struct {
 
             // Create per-reconcile context with optional timeout.
             const reconcile_ctx = if (self.reconcile_timeout_ns) |timeout_ns|
-                self.base_context.withTimeout(timeout_ns)
+                self.base_context.withTimeout(io, timeout_ns)
             else
                 self.base_context;
 
             const reconcile_ok = self.reconcile_fn.invoke(key, reconcile_ctx);
 
             // Record duration for both success and error.
-            if (reconcile_start) |s| {
-                if (std.time.Instant.now() catch null) |end| {
-                    const dur_ns: f64 = @floatFromInt(end.since(s));
-                    const dur_s = dur_ns / @as(f64, std.time.ns_per_s);
-                    self.metrics.reconcile_duration.observe(dur_s);
-                    self.queue_metrics.work_duration.observe(dur_s);
-                }
+            const dur_ns_i: i96 = reconcile_start.untilNow(io).raw.nanoseconds;
+            if (dur_ns_i >= 0) {
+                const dur_ns: f64 = @floatFromInt(dur_ns_i);
+                const dur_s = dur_ns / @as(f64, std.time.ns_per_s);
+                self.metrics.reconcile_duration.observe(dur_s);
+                self.queue_metrics.work_duration.observe(dur_s);
             }
 
             if (reconcile_ok) |result| {
@@ -256,8 +255,8 @@ pub const Reconciler = struct {
 
 test "Reconciler: single reconcile success" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
-    defer q.deinit();
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
 
@@ -276,17 +275,17 @@ test "Reconciler: single reconcile success" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert
@@ -295,7 +294,7 @@ test "Reconciler: single reconcile success" {
 
 test "Reconciler: error triggers rate-limited requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1, // tiny backoff for testing
@@ -304,7 +303,7 @@ test "Reconciler: error triggers rate-limited requeue" {
             .jitter = false,
         },
     });
-    defer q.deinit();
+    defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
 
@@ -324,17 +323,17 @@ test "Reconciler: error triggers rate-limited requeue" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(200 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert
@@ -343,7 +342,7 @@ test "Reconciler: error triggers rate-limited requeue" {
 
 test "Reconciler: requeue triggers rate-limited requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -352,7 +351,7 @@ test "Reconciler: requeue triggers rate-limited requeue" {
             .jitter = false,
         },
     });
-    defer q.deinit();
+    defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
 
@@ -372,17 +371,17 @@ test "Reconciler: requeue triggers rate-limited requeue" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(200 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert
@@ -391,8 +390,8 @@ test "Reconciler: requeue triggers rate-limited requeue" {
 
 test "Reconciler: requeue_after_ns triggers delayed requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
-    defer q.deinit();
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
 
@@ -412,17 +411,17 @@ test "Reconciler: requeue_after_ns triggers delayed requeue" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(200 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert
@@ -431,8 +430,8 @@ test "Reconciler: requeue_after_ns triggers delayed requeue" {
 
 test "Reconciler: multiple workers process concurrently" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
-    defer q.deinit();
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    defer q.deinit(std.testing.io);
 
     var processed_count = std.atomic.Value(u32).init(0);
 
@@ -452,15 +451,15 @@ test "Reconciler: multiple workers process concurrently" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "a" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "b" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "c" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "d" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "c" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "d" }, .{});
 
     // Act
-    try r.start();
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    r.stop();
+    try r.start(std.testing.io);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    r.stop(std.testing.io);
 
     // Assert
     try testing.expectEqual(@as(u32, 4), processed_count.load(.seq_cst));
@@ -468,8 +467,8 @@ test "Reconciler: multiple workers process concurrently" {
 
 test "Reconciler: stop unblocks idle workers" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
-    defer q.deinit();
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    defer q.deinit(std.testing.io);
 
     const Ctx = struct {
         fn reconcile(_: ObjectKey, _: Context) anyerror!Result {
@@ -485,18 +484,18 @@ test "Reconciler: stop unblocks idle workers" {
 
     // Act
     // Start with an empty queue so workers immediately block on get().
-    try r.start();
+    try r.start(std.testing.io);
 
     // Assert
     // Stopping should shut down the queue and unblock all workers.
-    std.Thread.sleep(10 * std.time.ns_per_ms);
-    r.stop();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    r.stop(std.testing.io);
 }
 
 test "Reconciler: run works single-threaded" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
-    defer q.deinit();
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
 
@@ -515,17 +514,17 @@ test "Reconciler: run works single-threaded" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert
@@ -534,8 +533,8 @@ test "Reconciler: run works single-threaded" {
 
 test "Reconciler: ReconcileFn.fromFn works" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
-    defer q.deinit();
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    defer q.deinit(std.testing.io);
 
     var invoked = std.atomic.Value(u32).init(0);
 
@@ -555,17 +554,17 @@ test "Reconciler: ReconcileFn.fromFn works" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert
@@ -575,10 +574,10 @@ test "Reconciler: ReconcileFn.fromFn works" {
 test "Reconciler: start joins all threads on partial failure" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     const Ctx = struct {
@@ -609,7 +608,7 @@ test "Reconciler: start joins all threads on partial failure" {
 
 test "Reconciler: persistent error keeps requeuing until shutdown" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -618,7 +617,7 @@ test "Reconciler: persistent error keeps requeuing until shutdown" {
             .jitter = false,
         },
     });
-    defer q.deinit();
+    defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
 
@@ -637,17 +636,17 @@ test "Reconciler: persistent error keeps requeuing until shutdown" {
     });
     defer r.deinit();
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(100 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     }.run, .{&q});
 
     // Act
-    r.run();
+    r.run(std.testing.io);
     thread.join();
 
     // Assert

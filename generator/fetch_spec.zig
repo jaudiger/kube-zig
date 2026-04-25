@@ -1,26 +1,26 @@
 const std = @import("std");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Parse CLI arguments: <k8s-version> <output-path>
-    const args = try std.process.argsAlloc(allocator);
+    var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_it.deinit();
+    _ = args_it.skip(); // program name
 
-    if (args.len < 3) {
+    const raw_version = args_it.next() orelse
         std.process.fatal("Usage: fetch-spec <k8s-version> <output-path>\n", .{});
-    }
-
-    const raw_version = args[1];
-    const output_path = args[2];
+    const output_path = args_it.next() orelse
+        std.process.fatal("Usage: fetch-spec <k8s-version> <output-path>\n", .{});
 
     // Resolve "latest" to an actual tag via the GitHub API.
     const version = if (std.mem.eql(u8, raw_version, "latest"))
-        resolveLatestVersion(allocator) catch |err| {
+        resolveLatestVersion(allocator, io) catch |err| {
             std.process.fatal("Failed to resolve latest version: {}\n", .{err});
         }
     else
@@ -38,7 +38,7 @@ pub fn main() !void {
     };
 
     // Download the spec.
-    const body = fetch(allocator, url) catch |err| {
+    const body = fetch(allocator, io, url) catch |err| {
         std.process.fatal("Failed to download spec from {s}: {}\n", .{ url, err });
     };
 
@@ -46,11 +46,11 @@ pub fn main() !void {
     // directory may already exist; the subsequent writeFile will surface
     // a clear error if the path is truly inaccessible.
     if (std.fs.path.dirname(output_path)) |dir| {
-        std.fs.cwd().makePath(dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, dir) catch {};
     }
 
     // Write the response body to the output file.
-    std.fs.cwd().writeFile(.{
+    std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = output_path,
         .data = body,
     }) catch |err| {
@@ -61,10 +61,10 @@ pub fn main() !void {
 }
 
 /// Queries the GitHub API to resolve the latest Kubernetes release tag.
-fn resolveLatestVersion(allocator: std.mem.Allocator) ![]const u8 {
+fn resolveLatestVersion(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     std.debug.print("Resolving latest Kubernetes version...\n", .{});
 
-    const body = try fetch(allocator, "https://api.github.com/repos/kubernetes/kubernetes/releases/latest");
+    const body = try fetch(allocator, io, "https://api.github.com/repos/kubernetes/kubernetes/releases/latest");
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
@@ -88,8 +88,8 @@ fn resolveLatestVersion(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Performs an HTTP GET request and returns the (decompressed) response body.
-fn fetch(allocator: std.mem.Allocator, url: []const u8) ![]const u8 {
-    var client: std.http.Client = .{ .allocator = allocator };
+fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8) ![]const u8 {
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);

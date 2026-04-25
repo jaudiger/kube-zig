@@ -19,19 +19,21 @@ const kube_zig = @import("kube-zig");
 
 const crontab_name = "dynamic-crontab";
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(debug_allocator.deinit() == .ok);
     const allocator = debug_allocator.allocator();
 
-    const config = kube_zig.ProxyConfig.init();
-    var text_logger = kube_zig.TextStdoutLogger.init(.info);
+    const config = kube_zig.ProxyConfig.init(init.environ_map);
+    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
 
-    var client = try kube_zig.Client.init(allocator, config.base_url, .{ .logger = text_logger.logger() });
-    defer client.deinit();
+    var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = text_logger.logger() });
+    defer client.deinit(io);
 
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    var stdout = std.Io.File.stdout().writer(io, &buf);
     const w = &stdout.interface;
     defer w.flush() catch {};
 
@@ -57,7 +59,7 @@ pub fn main() !void {
         \\{{"apiVersion":"stable.example.com/v1","kind":"CronTab","metadata":{{"name":"{s}","namespace":"{s}"}},"spec":{{"cronSpec":"*/10 * * * *","image":"dynamic-image:v1","replicas":2}}}}
     , .{ crontab_name, "default" });
 
-    const create_result = crontabs.create(create_body, .{}) catch |err| {
+    const create_result = crontabs.create(io, create_body, .{}) catch |err| {
         try w.print("  Failed to create CronTab: {}\n", .{err});
         return;
     };
@@ -83,14 +85,14 @@ pub fn main() !void {
     // 2. List CronTabs
     try w.print("-- Listing CronTabs --\n", .{});
 
-    const list_result = crontabs.list(.{}) catch |err| {
+    const list_result = crontabs.list(io, .{}) catch |err| {
         try w.print("  Failed to list CronTabs: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     const list_parsed = list_result.value() catch |err| {
         try w.print("  API error listing CronTabs: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     defer list_parsed.deinit();
@@ -116,14 +118,14 @@ pub fn main() !void {
     // 3. Get by name
     try w.print("-- Getting CronTab by name --\n", .{});
 
-    const get_result = crontabs.get(crontab_name) catch |err| {
+    const get_result = crontabs.get(io, crontab_name) catch |err| {
         try w.print("  Failed to get CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     const fetched = get_result.value() catch |err| {
         try w.print("  API error getting CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     defer fetched.deinit();
@@ -145,16 +147,16 @@ pub fn main() !void {
         \\{"spec":{"image":"dynamic-image:v2","replicas":4}}
     ;
 
-    const patch_result = crontabs.patch(crontab_name, patch_body, .{
+    const patch_result = crontabs.patch(io, crontab_name, patch_body, .{
         .patch_type = .merge_patch,
     }) catch |err| {
         try w.print("  Failed to patch CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     const patched = patch_result.value() catch |err| {
         try w.print("  API error patching CronTab: {}\n", .{err});
-        cleanup(crontabs, w);
+        cleanup(crontabs, io, w);
         return;
     };
     defer patched.deinit();
@@ -165,14 +167,14 @@ pub fn main() !void {
     }
 
     // 5. Delete
-    cleanup(crontabs, w);
+    cleanup(crontabs, io, w);
 
     try w.print("\nDone.\n", .{});
 }
 
-fn cleanup(crontabs: kube_zig.DynamicApi, w: *std.Io.Writer) void {
+fn cleanup(crontabs: kube_zig.DynamicApi, io: std.Io, w: *std.Io.Writer) void {
     w.print("-- Deleting CronTab {s} --\n", .{crontab_name}) catch return;
-    const result = crontabs.delete(crontab_name, .{}) catch |err| {
+    const result = crontabs.delete(io, crontab_name, .{}) catch |err| {
         w.print("  Failed to delete: {}\n", .{err}) catch {};
         return;
     };

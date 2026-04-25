@@ -41,8 +41,10 @@ const testing = std.testing;
 /// when informer arenas are recycled.
 pub const WorkQueue = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    /// Wakeup epoch for condition-variable-style signalling with timeouts.
+    /// Producers bump this and futexWake; consumers futexWait or futexWaitTimeout on it.
+    cond_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     shut_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// FIFO of keys waiting to be processed (array-backed ring buffer for O(1) push/pop
@@ -56,7 +58,7 @@ pub const WorkQueue = struct {
     /// rate limiter, and deferred item tracking.
     scheduler: BackoffScheduler,
 
-    epoch: std.time.Instant,
+    epoch: std.Io.Clock.Timestamp,
     metrics: QueueMetrics,
     logger: Logger = Logger.noop,
     /// Enqueue timestamps for queue latency measurement.
@@ -64,7 +66,7 @@ pub const WorkQueue = struct {
 
     const EnqueueTimeMap = std.HashMapUnmanaged(
         ObjectKey,
-        std.time.Instant,
+        std.Io.Clock.Timestamp,
         ObjectKeyContext,
         std.hash_map.default_max_load_percentage,
     );
@@ -147,12 +149,12 @@ pub const WorkQueue = struct {
     };
 
     /// Create a new work queue with the given options.
-    pub fn init(allocator: std.mem.Allocator, opts: Options) WorkQueue {
-        const epoch = std.time.Instant.now() catch @panic("monotonic clock required");
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, opts: Options) WorkQueue {
+        const epoch: std.Io.Clock.Timestamp = .now(io, .awake);
         return .{
             .allocator = allocator,
             .queue = .{ .max_capacity = opts.max_queue_size },
-            .scheduler = BackoffScheduler.init(allocator, epoch, .{
+            .scheduler = BackoffScheduler.init(allocator, io, epoch, .{
                 .max_size = opts.max_waiting_size,
                 .retry_policy = opts.retry_policy,
                 .overall_rate_limit = opts.overall_rate_limit,
@@ -169,9 +171,9 @@ pub const WorkQueue = struct {
     /// **Contract:** the caller MUST call `shutdown()` and join all consumer
     /// threads before calling `deinit()`. Failure to do so causes a panic
     /// in all build modes: consumers would access freed memory otherwise.
-    pub fn deinit(self: *WorkQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn deinit(self: *WorkQueue, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         // Callers must call shutdown() and join consumer threads before
         // deinit(). Blocked consumers would access freed memory otherwise.
@@ -226,12 +228,12 @@ pub const WorkQueue = struct {
     /// active queue when it is already in the waiting heap; the dirty
     /// flag is set so it will be processed when the delay expires. Use
     /// this to prevent echo events from bypassing intended delays.
-    pub fn add(self: *WorkQueue, key: ObjectKey, opts: AddOptions) Error!void {
+    pub fn add(self: *WorkQueue, io: std.Io, key: ObjectKey, opts: AddOptions) Error!void {
         var ma: MetricsAction = .{};
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            try self.addLocked(key, opts.defer_to_waiting, &ma);
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            try self.addLocked(io, key, opts.defer_to_waiting, &ma);
         }
         ma.apply(self.metrics);
     }
@@ -239,18 +241,18 @@ pub const WorkQueue = struct {
     /// Blocking dequeue. Returns the next key to process, or null if the
     /// queue has been shut down. Moves expired waiting items into the active
     /// queue when the main queue is empty.
-    pub fn get(self: *WorkQueue) Error!?ObjectKey {
+    pub fn get(self: *WorkQueue, io: std.Io) Error!?ObjectKey {
         var ma: MetricsAction = .{};
         const key = blk: {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            break :blk try self.getLocked(&ma);
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            break :blk try self.getLocked(io, &ma);
         };
         ma.apply(self.metrics);
         return key;
     }
 
-    fn getLocked(self: *WorkQueue, ma: *MetricsAction) Error!?ObjectKey {
+    fn getLocked(self: *WorkQueue, io: std.Io, ma: *MetricsAction) Error!?ObjectKey {
         while (true) {
             if (self.shut_down.raw) return null;
 
@@ -271,8 +273,9 @@ pub const WorkQueue = struct {
                 self.processing.putAssumeCapacity(key, {});
                 // Measure queue latency (time from add to get).
                 if (self.enqueue_times.fetchRemove(key)) |kv| {
-                    if (std.time.Instant.now() catch null) |now| {
-                        const wait_ns: f64 = @floatFromInt(now.since(kv.value));
+                    const wait_ns_i: i96 = kv.value.untilNow(io).raw.nanoseconds;
+                    if (wait_ns_i >= 0) {
+                        const wait_ns: f64 = @floatFromInt(wait_ns_i);
                         ma.observe_latency = wait_ns / @as(f64, std.time.ns_per_s);
                     }
                 }
@@ -281,27 +284,57 @@ pub const WorkQueue = struct {
             }
 
             // Queue is empty, so promote any expired waiting items.
-            self.promoteExpiredWaiting();
+            self.promoteExpiredWaiting(io);
             if (self.queue.count > 0) continue;
 
             if (self.shut_down.raw) return null;
 
             // If there are waiting items, sleep until the earliest one expires.
             if (self.scheduler.heap.peek()) |earliest| {
-                const now = time_util.monotonicNowNs(self.epoch) catch {
+                const now = time_util.monotonicNowNs(io, self.epoch) catch {
                     // Clock unavailable: use a short polling interval instead.
-                    self.cond.timedWait(&self.mutex, 10 * std.time.ns_per_ms) catch {};
+                    self.condTimedWait(io, 10 * std.time.ns_per_ms);
                     continue;
                 };
                 if (earliest.not_before > now) {
-                    self.cond.timedWait(&self.mutex, earliest.not_before - now) catch {};
+                    self.condTimedWait(io, earliest.not_before - now);
                 }
                 continue;
             }
 
             // Nothing to do; wait for add() or shutdown().
-            self.cond.wait(&self.mutex);
+            self.condWait(io);
         }
+    }
+
+    /// Release the mutex, wait for a signal on `cond_epoch` (or shutdown),
+    /// then re-acquire the mutex. Mirrors the classic condvar wait pattern.
+    fn condWait(self: *WorkQueue, io: std.Io) void {
+        const observed = self.cond_epoch.load(.acquire);
+        self.mutex.unlock(io);
+        defer self.mutex.lockUncancelable(io);
+        io.futexWaitUncancelable(u32, &self.cond_epoch.raw, observed);
+    }
+
+    /// Same as `condWait` but bounded by `wait_ns`.
+    fn condTimedWait(self: *WorkQueue, io: std.Io, wait_ns: u64) void {
+        const observed = self.cond_epoch.load(.acquire);
+        self.mutex.unlock(io);
+        defer self.mutex.lockUncancelable(io);
+        const timeout: std.Io.Timeout = .{ .duration = .{ .clock = .awake, .raw = .{ .nanoseconds = @intCast(wait_ns) } } };
+        io.futexWaitTimeout(u32, &self.cond_epoch.raw, observed, timeout) catch {};
+    }
+
+    /// Wake one waiter. Must be called while holding the mutex (or after).
+    fn condSignal(self: *WorkQueue, io: std.Io) void {
+        _ = self.cond_epoch.fetchAdd(1, .release);
+        io.futexWake(u32, &self.cond_epoch.raw, 1);
+    }
+
+    /// Wake all waiters. Must be called while holding the mutex (or after).
+    fn condBroadcast(self: *WorkQueue, io: std.Io) void {
+        _ = self.cond_epoch.fetchAdd(1, .release);
+        io.futexWake(u32, &self.cond_epoch.raw, std.math.maxInt(u32));
     }
 
     /// Mark a key as done processing. The `action` parameter controls what
@@ -313,17 +346,17 @@ pub const WorkQueue = struct {
     /// - `.backoff`: absorb dirty flag, exponential backoff re-enqueue.
     ///
     /// The key is always consumed: callers must not use it after this call.
-    pub fn done(self: *WorkQueue, key: ObjectKey, action: DoneAction) void {
+    pub fn done(self: *WorkQueue, io: std.Io, key: ObjectKey, action: DoneAction) void {
         var ma: MetricsAction = .{};
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            self.doneLocked(key, action, &ma);
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            self.doneLocked(io, key, action, &ma);
         }
         ma.apply(self.metrics);
     }
 
-    fn doneLocked(self: *WorkQueue, key: ObjectKey, action: DoneAction, ma: *MetricsAction) void {
+    fn doneLocked(self: *WorkQueue, io: std.Io, key: ObjectKey, action: DoneAction, ma: *MetricsAction) void {
         // done() must only be called once per get(). A second call reads
         // freed memory during hash lookup. The runtime guard below fires
         // in all build modes, logging the bug and returning safely.
@@ -334,15 +367,15 @@ pub const WorkQueue = struct {
         }
 
         switch (action) {
-            .success => self.doneSuccess(key, ma),
-            .requeue_after => |delay_ns| self.doneRequeueAfter(key, delay_ns, ma),
-            .backoff => self.doneBackoff(key, ma),
+            .success => self.doneSuccess(io, key, ma),
+            .requeue_after => |delay_ns| self.doneRequeueAfter(io, key, delay_ns, ma),
+            .backoff => self.doneBackoff(io, key, ma),
         }
     }
 
     /// `.success`: if dirty, re-enqueue immediately (external change during
     /// processing); otherwise clean up failures and free key.
-    fn doneSuccess(self: *WorkQueue, key: ObjectKey, ma: *MetricsAction) void {
+    fn doneSuccess(self: *WorkQueue, io: std.Io, key: ObjectKey, ma: *MetricsAction) void {
         if (self.dirty.contains(key)) {
             // Key was re-added while processing; move it back to queue.
             self.queuePush(key) catch {
@@ -361,7 +394,7 @@ pub const WorkQueue = struct {
                 return;
             };
             ma.set_depth = @floatFromInt(self.queue.count);
-            self.cond.signal();
+            self.condSignal(io);
         } else {
             self.scheduler.cleanupOrphan(key);
             self.freeKey(key);
@@ -371,7 +404,7 @@ pub const WorkQueue = struct {
 
     /// `.requeue_after`: absorb dirty flag, clear failures, delay re-enqueue.
     /// If delay_ns == 0, push to active queue immediately.
-    fn doneRequeueAfter(self: *WorkQueue, key: ObjectKey, delay_ns: u64, ma: *MetricsAction) void {
+    fn doneRequeueAfter(self: *WorkQueue, io: std.Io, key: ObjectKey, delay_ns: u64, ma: *MetricsAction) void {
         // Clear dirty flag; the explicit requeue absorbs any pending changes.
         self.clearDirtyClone(key);
 
@@ -392,16 +425,16 @@ pub const WorkQueue = struct {
             };
             ma.set_depth = @floatFromInt(self.queue.count);
             ma.inc_retries = true;
-            self.cond.signal();
+            self.condSignal(io);
             return;
         }
 
         // Non-zero delay: delegate to scheduler.
-        switch (self.scheduler.scheduleRequeueAfter(key, delay_ns)) {
+        switch (self.scheduler.scheduleRequeueAfter(io, key, delay_ns)) {
             .scheduled => {
                 ma.set_depth = @floatFromInt(self.queue.count);
                 ma.inc_retries = true;
-                self.cond.signal();
+                self.condSignal(io);
             },
             .already_waiting => {
                 self.freeKey(key);
@@ -420,7 +453,7 @@ pub const WorkQueue = struct {
                 };
                 ma.set_depth = @floatFromInt(self.queue.count);
                 ma.inc_retries = true;
-                self.cond.signal();
+                self.condSignal(io);
             },
         }
     }
@@ -428,16 +461,16 @@ pub const WorkQueue = struct {
     /// `.backoff`: absorb dirty flag, calculate exponential backoff,
     /// add to waiting heap. Increments failure counter only after all
     /// fallible operations succeed.
-    fn doneBackoff(self: *WorkQueue, key: ObjectKey, ma: *MetricsAction) void {
+    fn doneBackoff(self: *WorkQueue, io: std.Io, key: ObjectKey, ma: *MetricsAction) void {
         // Clear dirty flag; the backoff requeue absorbs any pending changes.
         self.clearDirtyClone(key);
 
-        switch (self.scheduler.scheduleBackoff(key)) {
+        switch (self.scheduler.scheduleBackoff(io, key)) {
             .scheduled => {
                 ma.inc_retries = true;
                 ma.set_depth = @floatFromInt(self.queue.count);
                 self.freeKey(key);
-                self.cond.signal();
+                self.condSignal(io);
             },
             .already_waiting => {
                 self.freeKey(key);
@@ -475,23 +508,23 @@ pub const WorkQueue = struct {
     // Rate-limited operations
     /// Re-enqueue a key with exponential backoff. Increments the failure
     /// counter and delays the re-enqueue based on the retry policy.
-    pub fn addRateLimited(self: *WorkQueue, key: ObjectKey) Error!void {
+    pub fn addRateLimited(self: *WorkQueue, io: std.Io, key: ObjectKey) Error!void {
         var ma: MetricsAction = .{};
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
             if (self.shut_down.raw) return;
-            self.scheduler.scheduleRateLimited(key) catch |err| switch (err) {
+            self.scheduler.scheduleRateLimited(io, key) catch |err| switch (err) {
                 error.ClockUnavailable => {
                     self.logger.warn("addRateLimited: clock unavailable, falling back to immediate add", &.{});
-                    try self.addLocked(key, false, &ma);
+                    try self.addLocked(io, key, false, &ma);
                     return;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Overflow => return error.Overflow,
             };
             ma.inc_retries = true;
-            self.cond.signal();
+            self.condSignal(io);
         }
         ma.apply(self.metrics);
     }
@@ -499,63 +532,63 @@ pub const WorkQueue = struct {
     /// Enqueue a key after a fixed delay without touching the failure counter.
     /// Use for "requeue after X" semantics (fixed delay, no backoff accumulation).
     /// If delay_ns is 0, adds immediately (equivalent to add()).
-    pub fn addAfter(self: *WorkQueue, key: ObjectKey, delay_ns: u64) Error!void {
+    pub fn addAfter(self: *WorkQueue, io: std.Io, key: ObjectKey, delay_ns: u64) Error!void {
         var ma: MetricsAction = .{};
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
             if (self.shut_down.raw) return;
             if (delay_ns == 0) {
-                try self.addLocked(key, false, &ma);
+                try self.addLocked(io, key, false, &ma);
                 return;
             }
-            self.scheduler.scheduleAfter(key, delay_ns) catch |err| switch (err) {
+            self.scheduler.scheduleAfter(io, key, delay_ns) catch |err| switch (err) {
                 error.ClockUnavailable => {
                     self.logger.warn("addAfter: clock unavailable, falling back to immediate add", &.{});
-                    try self.addLocked(key, false, &ma);
+                    try self.addLocked(io, key, false, &ma);
                     return;
                 },
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Overflow => return error.Overflow,
             };
-            self.cond.signal();
+            self.condSignal(io);
         }
         ma.apply(self.metrics);
     }
 
     /// Reset the failure counter for a key. Call this after a successful
     /// reconciliation to clear the backoff state.
-    pub fn forget(self: *WorkQueue, key: ObjectKey) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn forget(self: *WorkQueue, io: std.Io, key: ObjectKey) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.scheduler.forget(key);
     }
 
     /// Get the number of times a key has been re-queued via `addRateLimited`.
-    pub fn numRequeues(self: *WorkQueue, key: ObjectKey) u32 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn numRequeues(self: *WorkQueue, io: std.Io, key: ObjectKey) u32 {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         return self.scheduler.numRequeues(key);
     }
 
     // Inspection & control
     /// Number of items waiting in the queue (excludes items being processed
     /// and rate-limited items waiting for their backoff).
-    pub fn len(self: *WorkQueue) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn len(self: *WorkQueue, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         return self.queue.count;
     }
 
     /// Signal shutdown. Unblocks all `get()` callers (they return null).
     /// Items added after shutdown are silently dropped.
-    pub fn shutdown(self: *WorkQueue) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    pub fn shutdown(self: *WorkQueue, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
 
         self.shut_down.store(true, .release);
-        self.cond.broadcast();
+        self.condBroadcast(io);
     }
 
     /// Returns true if `shutdown()` has been called.
@@ -583,9 +616,9 @@ pub const WorkQueue = struct {
         const gen_pred = comptime predicates_mod.generationChanged(T);
         return EventHandler(T).fromTypedCtx(WorkQueue, self, .{
             .on_add = struct {
-                fn f(q: *WorkQueue, obj: *const T, _: bool) void {
+                fn f(q: *WorkQueue, io: std.Io, obj: *const T, _: bool) void {
                     const key = ObjectKey.fromResource(T, obj.*) orelse return;
-                    q.add(key, .{ .defer_to_waiting = true }) catch |err| {
+                    q.add(io, key, .{ .defer_to_waiting = true }) catch |err| {
                         q.logger.warn("eventHandler on_add: failed to enqueue", &.{
                             LogField.string("error", @errorName(err)),
                         });
@@ -593,10 +626,10 @@ pub const WorkQueue = struct {
                 }
             }.f,
             .on_update = struct {
-                fn f(q: *WorkQueue, old: *const T, new: *const T) void {
+                fn f(q: *WorkQueue, io: std.Io, old: *const T, new: *const T) void {
                     if (!gen_pred(old, new)) return;
                     const key = ObjectKey.fromResource(T, new.*) orelse return;
-                    q.add(key, .{ .defer_to_waiting = true }) catch |err| {
+                    q.add(io, key, .{ .defer_to_waiting = true }) catch |err| {
                         q.logger.warn("eventHandler on_update: failed to enqueue", &.{
                             LogField.string("error", @errorName(err)),
                         });
@@ -604,9 +637,9 @@ pub const WorkQueue = struct {
                 }
             }.f,
             .on_delete = struct {
-                fn f(q: *WorkQueue, obj: *const T) void {
+                fn f(q: *WorkQueue, io: std.Io, obj: *const T) void {
                     const key = ObjectKey.fromResource(T, obj.*) orelse return;
-                    q.add(key, .{ .defer_to_waiting = true }) catch |err| {
+                    q.add(io, key, .{ .defer_to_waiting = true }) catch |err| {
                         q.logger.warn("eventHandler on_delete: failed to enqueue", &.{
                             LogField.string("error", @errorName(err)),
                         });
@@ -623,9 +656,9 @@ pub const WorkQueue = struct {
     pub fn rawEventHandler(self: *WorkQueue, comptime T: type) EventHandler(T) {
         return EventHandler(T).fromTypedCtx(WorkQueue, self, .{
             .on_add = struct {
-                fn f(q: *WorkQueue, obj: *const T, _: bool) void {
+                fn f(q: *WorkQueue, io: std.Io, obj: *const T, _: bool) void {
                     const key = ObjectKey.fromResource(T, obj.*) orelse return;
-                    q.add(key, .{}) catch |err| {
+                    q.add(io, key, .{}) catch |err| {
                         q.logger.warn("rawEventHandler on_add: failed to enqueue", &.{
                             LogField.string("error", @errorName(err)),
                         });
@@ -633,9 +666,9 @@ pub const WorkQueue = struct {
                 }
             }.f,
             .on_update = struct {
-                fn f(q: *WorkQueue, _: *const T, new: *const T) void {
+                fn f(q: *WorkQueue, io: std.Io, _: *const T, new: *const T) void {
                     const key = ObjectKey.fromResource(T, new.*) orelse return;
-                    q.add(key, .{}) catch |err| {
+                    q.add(io, key, .{}) catch |err| {
                         q.logger.warn("rawEventHandler on_update: failed to enqueue", &.{
                             LogField.string("error", @errorName(err)),
                         });
@@ -643,9 +676,9 @@ pub const WorkQueue = struct {
                 }
             }.f,
             .on_delete = struct {
-                fn f(q: *WorkQueue, obj: *const T) void {
+                fn f(q: *WorkQueue, io: std.Io, obj: *const T) void {
                     const key = ObjectKey.fromResource(T, obj.*) orelse return;
-                    q.add(key, .{}) catch |err| {
+                    q.add(io, key, .{}) catch |err| {
                         q.logger.warn("rawEventHandler on_delete: failed to enqueue", &.{
                             LogField.string("error", @errorName(err)),
                         });
@@ -655,7 +688,7 @@ pub const WorkQueue = struct {
         });
     }
 
-    fn addLocked(self: *WorkQueue, key: ObjectKey, defer_to_waiting: bool, ma: *MetricsAction) Error!void {
+    fn addLocked(self: *WorkQueue, io: std.Io, key: ObjectKey, defer_to_waiting: bool, ma: *MetricsAction) Error!void {
         if (self.shut_down.raw) return;
 
         // Already dirty: either queued or being processed. If processing,
@@ -693,21 +726,20 @@ pub const WorkQueue = struct {
         ma.inc_adds = true;
         ma.set_depth = @floatFromInt(self.queue.count);
         // Record enqueue time for latency tracking.
-        if (std.time.Instant.now() catch null) |now| {
-            self.enqueue_times.put(self.allocator, owned_key, now) catch {
-                self.logger.warn("addLocked: OOM recording enqueue time, latency metric may be inaccurate", &.{});
-            };
-        }
-        self.cond.signal();
+        const now: std.Io.Clock.Timestamp = .now(io, .awake);
+        self.enqueue_times.put(self.allocator, owned_key, now) catch {
+            self.logger.warn("addLocked: OOM recording enqueue time, latency metric may be inaccurate", &.{});
+        };
+        self.condSignal(io);
     }
 
     /// Move waiting items whose deadline has passed into the active queue.
     /// Processes at most `batch_limit` items per call to bound lock hold time;
     /// the caller re-invokes if the queue is still empty. A larger batch
     /// reduces lock churn at the cost of slightly longer lock hold times.
-    fn promoteExpiredWaiting(self: *WorkQueue) void {
+    fn promoteExpiredWaiting(self: *WorkQueue, io: std.Io) void {
         const batch_limit: usize = 256;
-        const now = time_util.monotonicNowNs(self.epoch) catch {
+        const now = time_util.monotonicNowNs(io, self.epoch) catch {
             self.logger.warn("promoteExpiredWaiting: clock unavailable, skipping promotion cycle", &.{});
             return;
         };
@@ -716,23 +748,23 @@ pub const WorkQueue = struct {
         for (expired) |item| {
             if (item.owned) {
                 // Key is independently owned (from addAfter); reuse directly.
-                self.addLockedFromWaiting(item.key);
+                self.addLockedFromWaiting(io, item.key);
             } else {
                 // Key is owned by the failures map; clone for addLockedFromWaiting.
                 const owned_key = BackoffScheduler.cloneKey(self.allocator, item.key) catch {
                     // OOM: re-insert into waiting with a short retry delay.
                     const retry_delay = 10 * std.time.ns_per_ms;
-                    self.scheduler.reinsertWithDelay(item, retry_delay);
+                    self.scheduler.reinsertWithDelay(io, item, retry_delay);
                     continue;
                 };
-                self.addLockedFromWaiting(owned_key);
+                self.addLockedFromWaiting(io, owned_key);
             }
         }
     }
 
     /// Add a key from the waiting list. The key is already owned; if
     /// deduplication means we don't need it, free it.
-    fn addLockedFromWaiting(self: *WorkQueue, owned_key: ObjectKey) void {
+    fn addLockedFromWaiting(self: *WorkQueue, io: std.Io, owned_key: ObjectKey) void {
         if (self.shut_down.raw) {
             self.freeKey(owned_key);
             return;
@@ -763,7 +795,7 @@ pub const WorkQueue = struct {
             self.freeKey(owned_key);
             return;
         };
-        self.cond.signal();
+        self.condSignal(io);
     }
 
     fn queuePush(self: *WorkQueue, key: ObjectKey) error{ OutOfMemory, Overflow }!void {
@@ -792,246 +824,246 @@ pub const WorkQueue = struct {
 
 test "WorkQueue: add and get single item" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "default", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "default", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Assert
     try testing.expectEqualStrings("default", key.namespace);
     try testing.expectEqualStrings("pod-1", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: FIFO ordering" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "a" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "b" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "c" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "c" }, .{});
 
     // Assert
-    const k1 = (try q.get()).?;
+    const k1 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("a", k1.name);
-    q.done(k1, .success);
+    q.done(std.testing.io, k1, .success);
 
-    const k2 = (try q.get()).?;
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("b", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 
-    const k3 = (try q.get()).?;
+    const k3 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("c", k3.name);
-    q.done(k3, .success);
+    q.done(std.testing.io, k3, .success);
 }
 
 test "WorkQueue: deduplication" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{}); // duplicate
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{}); // duplicate
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{}); // duplicate
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{}); // duplicate
 
     // Assert
-    try testing.expectEqual(@as(usize, 1), q.len());
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
 
-    const key = (try q.get()).?;
+    const key = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: done allows re-add" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const k1 = (try q.get()).?;
-    q.done(k1, .success);
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const k1 = (try q.get(std.testing.io)).?;
+    q.done(std.testing.io, k1, .success);
 
     // Assert
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
-    try testing.expectEqual(@as(usize, 1), q.len());
-    const k2 = (try q.get()).?;
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 test "WorkQueue: add during processing re-queues on done" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Assert
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 
-    try testing.expectEqual(@as(usize, 1), q.len());
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
 
-    const k2 = (try q.get()).?;
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 test "WorkQueue: shutdown causes get to return null" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    q.shutdown();
+    q.shutdown(std.testing.io);
 
     // Assert
-    try testing.expect((try q.get()) == null);
+    try testing.expect((try q.get(std.testing.io)) == null);
 }
 
 test "WorkQueue: add after shutdown is no-op" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    q.shutdown();
+    q.shutdown(std.testing.io);
 
     // Assert
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 }
 
 test "WorkQueue: isShutdown" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act / Assert
-    try testing.expect(!q.isShutdown());
-    q.shutdown();
-    try testing.expect(q.isShutdown());
+    try testing.expect(!q.isShutdown(std.testing.io));
+    q.shutdown(std.testing.io);
+    try testing.expect(q.isShutdown(std.testing.io));
 }
 
 test "WorkQueue: len returns queued count" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Assert
-    try q.add(.{ .namespace = "ns", .name = "a" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "b" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
 
-    try testing.expectEqual(@as(usize, 2), q.len());
+    try testing.expectEqual(@as(usize, 2), q.len(std.testing.io));
 }
 
 test "WorkQueue: len excludes processing items" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "a" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "b" }, .{});
-    try testing.expectEqual(@as(usize, 2), q.len());
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
+    try testing.expectEqual(@as(usize, 2), q.len(std.testing.io));
 
     // Assert
-    const key = (try q.get()).?;
+    const key = (try q.get(std.testing.io)).?;
 
-    try testing.expectEqual(@as(usize, 1), q.len());
-    q.done(key, .success);
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: get blocks until add (multi-threaded)" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
     const producer = struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-            wq.add(.{ .namespace = "ns", .name = "async-pod" }, .{}) catch return;
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.add(std.testing.io, .{ .namespace = "ns", .name = "async-pod" }, .{}) catch return;
         }
     };
 
     // Assert
     const thread = try std.Thread.spawn(.{}, producer.run, .{&q});
-    const key = (try q.get()).?;
+    const key = (try q.get(std.testing.io)).?;
 
     try testing.expectEqualStrings("async-pod", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
     thread.join();
 }
 
 test "WorkQueue: shutdown unblocks waiting get" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
     const shutdowner = struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     };
 
     // Assert
     const thread = try std.Thread.spawn(.{}, shutdowner.run, .{&q});
-    const result = try q.get();
+    const result = try q.get(std.testing.io);
 
     try testing.expect(result == null);
     thread.join();
@@ -1039,7 +1071,7 @@ test "WorkQueue: shutdown unblocks waiting get" {
 
 test "WorkQueue: addRateLimited delays re-enqueue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{ .retry_policy = .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{ .retry_policy = .{
         .max_retries = std.math.maxInt(u32),
         .initial_backoff_ns = 50 * std.time.ns_per_ms,
         .max_backoff_ns = 1 * std.time.ns_per_s,
@@ -1047,139 +1079,139 @@ test "WorkQueue: addRateLimited delays re-enqueue" {
         .jitter = false,
     } });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.addRateLimited(.{ .namespace = "ns", .name = "slow-pod" });
+    try q.addRateLimited(std.testing.io, .{ .namespace = "ns", .name = "slow-pod" });
 
     // Assert
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     const getter = struct {
         fn run(wq: *WorkQueue) void {
-            if (wq.get() catch null) |k| wq.done(k, .success);
+            if (wq.get(std.testing.io) catch null) |k| wq.done(std.testing.io, k, .success);
         }
     };
     const thread = try std.Thread.spawn(.{}, getter.run, .{&q});
 
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    q.shutdown();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    q.shutdown(std.testing.io);
     thread.join();
 }
 
 test "WorkQueue: multiple items interleaved processing" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "a" }, .{});
-    try q.add(.{ .namespace = "ns", .name = "b" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
 
     // Assert
-    const k1 = (try q.get()).?;
+    const k1 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("a", k1.name);
 
     // Add a new item while 'a' is processing.
-    try q.add(.{ .namespace = "ns", .name = "c" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "c" }, .{});
 
-    const k2 = (try q.get()).?;
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("b", k2.name);
 
-    q.done(k1, .success);
-    q.done(k2, .success);
+    q.done(std.testing.io, k1, .success);
+    q.done(std.testing.io, k2, .success);
 
-    const k3 = (try q.get()).?;
+    const k3 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("c", k3.name);
-    q.done(k3, .success);
+    q.done(std.testing.io, k3, .success);
 }
 
 test "WorkQueue: cluster-scoped key (empty namespace)" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "", .name = "my-node" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "", .name = "my-node" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Assert
     try testing.expectEqualStrings("", key.namespace);
     try testing.expectEqualStrings("my-node", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: addAfter with delay" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.addAfter(.{ .namespace = "ns", .name = "delayed-pod" }, 50 * std.time.ns_per_ms);
+    try q.addAfter(std.testing.io, .{ .namespace = "ns", .name = "delayed-pod" }, 50 * std.time.ns_per_ms);
 
     // Assert
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     const getter = struct {
         fn run(wq: *WorkQueue) void {
-            if (wq.get() catch null) |k| wq.done(k, .success);
+            if (wq.get(std.testing.io) catch null) |k| wq.done(std.testing.io, k, .success);
         }
     };
     const thread = try std.Thread.spawn(.{}, getter.run, .{&q});
 
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    q.shutdown();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    q.shutdown(std.testing.io);
     thread.join();
 }
 
 test "WorkQueue: addAfter with zero delay is immediate" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.addAfter(.{ .namespace = "ns", .name = "immediate-pod" }, 0);
+    try q.addAfter(std.testing.io, .{ .namespace = "ns", .name = "immediate-pod" }, 0);
 
     // Assert
-    try testing.expectEqual(@as(usize, 1), q.len());
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
 
-    const key = (try q.get()).?;
+    const key = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("ns", key.namespace);
     try testing.expectEqualStrings("immediate-pod", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: deinit frees dirty keys re-added during processing" {
     // Arrange
     // separate allocation in dirty. If deinit() runs before done(), that
     // allocation must still be freed.
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Assert
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     // teardown during active processing. testing.allocator will detect any leak.
     _ = key;
-    q.shutdown();
-    q.deinit();
+    q.shutdown(std.testing.io);
+    q.deinit(std.testing.io);
 }
 
 // OOM resilience tests
@@ -1191,24 +1223,24 @@ test "WorkQueue: deinit frees dirty keys re-added during processing" {
 test "WorkQueue: done() OOM on re-queue does not leak" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), .{});
+    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
     // processing (creates a second clone in dirty only).
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     // Assert
     // The first add above grew the ring buffer to capacity 8 (now empty
     // after get). Adding 8 unique items fills it completely.
     const fill = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
     for (fill) |name| {
-        try q.add(.{ .namespace = "ns", .name = name }, .{});
+        try q.add(std.testing.io, .{ .namespace = "ns", .name = name }, .{});
     }
 
     // so queuePush must resize, which will fail.
@@ -1219,32 +1251,32 @@ test "WorkQueue: done() OOM on re-queue does not leak" {
     // queuePush, which hits OOM on ring buffer resize. Both the
     // processing key and the dirty clone must be freed (no leak).
     // done() is infallible: it logs and drops the item on OOM.
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 
     fa.fail_index = std.math.maxInt(usize);
     fa.resize_fail_index = std.math.maxInt(usize);
     for (fill) |_| {
-        const k = (try q.get()).?;
-        q.done(k, .success);
+        const k = (try q.get(std.testing.io)).?;
+        q.done(std.testing.io, k, .success);
     }
 
     // Verify the key is not stuck in dirty.
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    try testing.expectEqual(@as(usize, 1), q.len());
-    const k = (try q.get()).?;
-    q.done(k, .success);
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
+    const k = (try q.get(std.testing.io)).?;
+    q.done(std.testing.io, k, .success);
 }
 
 test "WorkQueue: get() OOM on processing.ensureCapacity preserves key" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), .{});
+    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
     // Act
     fa.fail_index = fa.alloc_index;
@@ -1252,31 +1284,31 @@ test "WorkQueue: get() OOM on processing.ensureCapacity preserves key" {
 
     // Assert
     // OOM is returned immediately; the key must still be in the queue.
-    try testing.expectError(error.OutOfMemory, q.get());
+    try testing.expectError(error.OutOfMemory, q.get(std.testing.io));
 
     fa.fail_index = std.math.maxInt(usize);
     fa.resize_fail_index = std.math.maxInt(usize);
 
     // Key survives: the next get() must return it.
-    const key = (try q.get()).?;
+    const key = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: add() OOM on queue push resize does not leak" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), .{});
+    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
     // This also grows dirty's hash map so it has spare capacity.
     const fill = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h" };
     for (fill) |name| {
-        try q.add(.{ .namespace = "ns", .name = name }, .{});
+        try q.add(std.testing.io, .{ .namespace = "ns", .name = name }, .{});
     }
 
     // Assert
@@ -1287,26 +1319,26 @@ test "WorkQueue: add() OOM on queue push resize does not leak" {
     fa.resize_fail_index = fa.resize_index;
 
     // add() should return an error and clean up: remove from dirty and free the clone.
-    try testing.expectError(error.OutOfMemory, q.add(.{ .namespace = "ns", .name = "pod-1" }, .{}));
+    try testing.expectError(error.OutOfMemory, q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{}));
 
     fa.fail_index = std.math.maxInt(usize);
     fa.resize_fail_index = std.math.maxInt(usize);
     for (fill) |_| {
-        const k = (try q.get()).?;
-        q.done(k, .success);
+        const k = (try q.get(std.testing.io)).?;
+        q.done(std.testing.io, k, .success);
     }
 
     // Verify the key is not stuck in dirty.
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    try testing.expectEqual(@as(usize, 1), q.len());
-    const k = (try q.get()).?;
-    q.done(k, .success);
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
+    const k = (try q.get(std.testing.io)).?;
+    q.done(std.testing.io, k, .success);
 }
 
 test "WorkQueue: addLockedFromWaiting() OOM on dirty.put does not leak" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), .{
+    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1316,16 +1348,16 @@ test "WorkQueue: addLockedFromWaiting() OOM on dirty.put does not leak" {
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
     // into waiting/waiting_keys/failures but never touches dirty.
-    try q.addRateLimited(.{ .namespace = "ns", .name = "pod-1" });
+    try q.addRateLimited(std.testing.io, .{ .namespace = "ns", .name = "pod-1" });
 
     // Assert
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // so dirty.put must allocate, which will fail.
     fa.fail_index = fa.alloc_index;
@@ -1337,13 +1369,13 @@ test "WorkQueue: addLockedFromWaiting() OOM on dirty.put does not leak" {
     // get() then blocks until shutdown.
     const shutdowner = struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     };
     const thread = try std.Thread.spawn(.{}, shutdowner.run, .{&q});
 
-    const result = q.get() catch null;
+    const result = q.get(std.testing.io) catch null;
 
     try testing.expect(result == null);
 
@@ -1352,7 +1384,7 @@ test "WorkQueue: addLockedFromWaiting() OOM on dirty.put does not leak" {
 
 test "WorkQueue: done clears failure entries after successful processing" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1362,8 +1394,8 @@ test "WorkQueue: done clears failure entries after successful processing" {
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
@@ -1371,24 +1403,24 @@ test "WorkQueue: done clears failure entries after successful processing" {
 
     // Assert
     try q.addRateLimited(key);
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
-    const k1 = (try q.get()).?;
+    const k1 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k1.name);
 
     // Failure entry still exists while processing.
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
-    q.done(k1, .success);
+    q.done(std.testing.io, k1, .success);
 
-    try testing.expectEqual(@as(u32, 0), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 0), q.numRequeues(std.testing.io, key));
 }
 
 test "WorkQueue: done preserves failure entries when key is awaiting rate-limited requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 50 * std.time.ns_per_ms,
@@ -1398,8 +1430,8 @@ test "WorkQueue: done preserves failure entries when key is awaiting rate-limite
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
@@ -1407,22 +1439,22 @@ test "WorkQueue: done preserves failure entries when key is awaiting rate-limite
 
     // Assert
     try q.add(key, .{});
-    const k1 = (try q.get()).?;
+    const k1 = (try q.get(std.testing.io)).?;
 
     try q.addRateLimited(k1);
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
     // in waiting_keys (awaiting rate-limited requeue)
-    q.done(k1, .success);
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(key));
+    q.done(std.testing.io, k1, .success);
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const k2 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
 
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 
-    try testing.expectEqual(@as(u32, 0), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 0), q.numRequeues(std.testing.io, key));
 }
 
 test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
@@ -1430,7 +1462,7 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
     // promoteExpiredWaiting clones it for addLockedFromWaiting, but
     // dirty.put fails, the failures entry must be cleaned up.
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), .{
+    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1440,18 +1472,18 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
     try q.addRateLimited(key);
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
     // Assert
     // Wait for the tiny backoff to expire.
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // Allow cloneKey (2 allocs: ns dupe + name dupe) to succeed but
     // fail the third allocation (dirty.put hash map growth).
@@ -1460,12 +1492,12 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
 
     const shutdowner = struct {
         fn run(wq: *WorkQueue) void {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
-            wq.shutdown();
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 20 * std.time.ns_per_ms } }, std.testing.io) catch {};
+            wq.shutdown(std.testing.io);
         }
     };
     const thread = try std.Thread.spawn(.{}, shutdowner.run, .{&q});
-    const result = q.get() catch null;
+    const result = q.get(std.testing.io) catch null;
     try testing.expect(result == null);
     thread.join();
 
@@ -1473,63 +1505,63 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
     fa.fail_index = std.math.maxInt(usize);
     fa.resize_fail_index = std.math.maxInt(usize);
 
-    try testing.expectEqual(@as(u32, 0), q.numRequeues(key));
+    try testing.expectEqual(@as(u32, 0), q.numRequeues(std.testing.io, key));
 }
 
 // DoneAction tests
 test "WorkQueue: done(.requeue_after) absorbs dirty flag and delays re-enqueue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Simulate a watch event arriving during processing.
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
-    q.done(key, .{ .requeue_after = 50 * std.time.ns_per_ms });
+    q.done(std.testing.io, key, .{ .requeue_after = 50 * std.time.ns_per_ms });
 
     // Assert
     // Key should NOT be in the active queue (dirty absorbed by delay).
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Wait for the delay to expire, then verify the key appears.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const k2 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 test "WorkQueue: done(.requeue_after) with zero delay enqueues immediately" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
-    q.done(key, .{ .requeue_after = 0 });
+    q.done(std.testing.io, key, .{ .requeue_after = 0 });
 
     // Assert
-    try testing.expectEqual(@as(usize, 1), q.len());
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
 
-    const k2 = (try q.get()).?;
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 test "WorkQueue: done(.requeue_after) clears failure counter" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1539,8 +1571,8 @@ test "WorkQueue: done(.requeue_after) clears failure counter" {
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
@@ -1549,42 +1581,42 @@ test "WorkQueue: done(.requeue_after) clears failure counter" {
     // Build up some failure state via addRateLimited.
     try q.addRateLimited(key_template);
     try q.addRateLimited(key_template);
-    try testing.expectEqual(@as(u32, 2), q.numRequeues(key_template));
+    try testing.expectEqual(@as(u32, 2), q.numRequeues(std.testing.io, key_template));
 
     // Drain the waiting item.
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    const k1 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k1 = (try q.get(std.testing.io)).?;
 
     // done(.requeue_after) should clear failures.
-    q.done(k1, .{ .requeue_after = 1 });
+    q.done(std.testing.io, k1, .{ .requeue_after = 1 });
 
     // Assert
-    try testing.expectEqual(@as(u32, 0), q.numRequeues(key_template));
+    try testing.expectEqual(@as(u32, 0), q.numRequeues(std.testing.io, key_template));
 
     // Clean up the waiting item.
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    q.shutdown();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    q.shutdown(std.testing.io);
     while (true) {
-        if (q.get() catch null) |k| q.done(k, .success) else break;
+        if (q.get(std.testing.io) catch null) |k| q.done(std.testing.io, k, .success) else break;
     }
 }
 
 test "WorkQueue: done(.requeue_after) deduplicates against existing waiting entry" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Add to waiting heap while processing.
-    try q.addAfter(.{ .namespace = "ns", .name = "pod-1" }, 50 * std.time.ns_per_ms);
+    try q.addAfter(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, 50 * std.time.ns_per_ms);
 
-    q.done(key, .{ .requeue_after = 50 * std.time.ns_per_ms });
+    q.done(std.testing.io, key, .{ .requeue_after = 50 * std.time.ns_per_ms });
 
     // Assert
     q.mutex.lock();
@@ -1593,16 +1625,16 @@ test "WorkQueue: done(.requeue_after) deduplicates against existing waiting entr
     try testing.expectEqual(@as(usize, 1), waiting_count);
 
     // Drain.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    q.shutdown();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    q.shutdown(std.testing.io);
     while (true) {
-        if (q.get() catch null) |k| q.done(k, .success) else break;
+        if (q.get(std.testing.io) catch null) |k| q.done(std.testing.io, k, .success) else break;
     }
 }
 
 test "WorkQueue: done(.backoff) absorbs dirty flag and uses exponential backoff" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 50 * std.time.ns_per_ms,
@@ -1612,37 +1644,37 @@ test "WorkQueue: done(.backoff) absorbs dirty flag and uses exponential backoff"
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Simulate a watch event arriving during processing.
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
-    q.done(key, .backoff);
+    q.done(std.testing.io, key, .backoff);
 
     // Assert
     // Key should NOT be in the active queue (dirty absorbed by backoff).
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Failure counter should be incremented.
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(.{ .namespace = "ns", .name = "pod-1" }));
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }));
 
     // Drain.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    q.shutdown();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    q.shutdown(std.testing.io);
     while (true) {
-        if (q.get() catch null) |k| q.done(k, .success) else break;
+        if (q.get(std.testing.io) catch null) |k| q.done(std.testing.io, k, .success) else break;
     }
 }
 
 test "WorkQueue: done(.backoff) increments failure counter across calls" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1652,8 +1684,8 @@ test "WorkQueue: done(.backoff) increments failure counter across calls" {
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
@@ -1661,52 +1693,52 @@ test "WorkQueue: done(.backoff) increments failure counter across calls" {
 
     // First cycle: add, get, done(.backoff)
     try q.add(key_template, .{});
-    const k1 = (try q.get()).?;
-    q.done(k1, .backoff);
-    try testing.expectEqual(@as(u32, 1), q.numRequeues(key_template));
+    const k1 = (try q.get(std.testing.io)).?;
+    q.done(std.testing.io, k1, .backoff);
+    try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key_template));
 
     // Wait for backoff to expire, get the re-enqueued item.
-    std.Thread.sleep(50 * std.time.ns_per_ms);
-    const k2 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k2 = (try q.get(std.testing.io)).?;
 
     // Second cycle: done(.backoff) again.
-    q.done(k2, .backoff);
+    q.done(std.testing.io, k2, .backoff);
 
     // Assert
-    try testing.expectEqual(@as(u32, 2), q.numRequeues(key_template));
+    try testing.expectEqual(@as(u32, 2), q.numRequeues(std.testing.io, key_template));
 
     // Drain.
-    std.Thread.sleep(100 * std.time.ns_per_ms);
-    q.shutdown();
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    q.shutdown(std.testing.io);
     while (true) {
-        if (q.get() catch null) |k| q.done(k, .success) else break;
+        if (q.get(std.testing.io) catch null) |k| q.done(std.testing.io, k, .success) else break;
     }
 }
 
 test "WorkQueue: done(.success) re-enqueues immediately when dirty" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
     // Simulate external change during processing.
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 
     // Assert
-    try testing.expectEqual(@as(usize, 1), q.len());
+    try testing.expectEqual(@as(usize, 1), q.len(std.testing.io));
 
-    const k2 = (try q.get()).?;
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 // defer_to_waiting tests
@@ -1715,58 +1747,58 @@ test "WorkQueue: add(defer_to_waiting) defers to waiting heap after done(.requeu
     // When defer_to_waiting is true, add() must not bypass a pending
     // requeue_after delay. The dirty flag is set so the key is processed
     // once the waiting entry expires.
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
 
-    q.done(key, .{ .requeue_after = 50 * std.time.ns_per_ms });
+    q.done(std.testing.io, key, .{ .requeue_after = 50 * std.time.ns_per_ms });
 
     // Simulate watch event arriving after done() has released the lock.
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
 
     // Assert
     // Key must NOT be in the active queue. add() should defer to the
     // existing waiting entry.
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Wait for the delay to expire; key should then be promoted.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const k2 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addAfter" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.addAfter(.{ .namespace = "ns", .name = "pod-1" }, 50 * std.time.ns_per_ms);
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
+    try q.addAfter(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, 50 * std.time.ns_per_ms);
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
 
     // Assert
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Wait for the delay to expire.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const key = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const key = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addRateLimited" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 50 * std.time.ns_per_ms,
@@ -1776,60 +1808,60 @@ test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addRateLimite
         },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.addRateLimited(.{ .namespace = "ns", .name = "pod-1" });
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
+    try q.addRateLimited(std.testing.io, .{ .namespace = "ns", .name = "pod-1" });
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
 
     // Assert
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Wait for the backoff to expire.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const key = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const key = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", key.name);
-    q.done(key, .success);
+    q.done(std.testing.io, key, .success);
 }
 
 test "WorkQueue: multiple add(defer_to_waiting) calls while key is waiting coalesce" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{});
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{});
-    const key = (try q.get()).?;
-    q.done(key, .{ .requeue_after = 50 * std.time.ns_per_ms });
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
+    const key = (try q.get(std.testing.io)).?;
+    q.done(std.testing.io, key, .{ .requeue_after = 50 * std.time.ns_per_ms });
 
     // Simulate many watch events arriving after done().
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
-    try q.add(.{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{ .defer_to_waiting = true });
 
     // Assert
     // All add() calls should be deduplicated, leaving no items in the active queue.
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // Only one processing after delay expires.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const k2 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 
     // No more items.
-    q.shutdown();
-    try testing.expect((try q.get()) == null);
+    q.shutdown(std.testing.io);
+    try testing.expect((try q.get(std.testing.io)) == null);
 }
 
 test "WorkQueue: overall limiter adds delay to rate-limited requeues" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1, // near-zero per-key backoff
@@ -1840,8 +1872,8 @@ test "WorkQueue: overall limiter adds delay to rate-limited requeues" {
         .overall_rate_limit = .{ .qps = 10.0, .burst = 1 },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
@@ -1858,24 +1890,24 @@ test "WorkQueue: overall limiter adds delay to rate-limited requeues" {
 
     // Assert
     // The first key should become available almost immediately.
-    std.Thread.sleep(20 * std.time.ns_per_ms);
-    const k1 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 20 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k1 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("a", k1.name);
-    q.done(k1, .success);
+    q.done(std.testing.io, k1, .success);
 
     // The second key should still be waiting (bucket delay ~100ms).
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // After enough time, the second key becomes available.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const k2 = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k2 = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("b", k2.name);
-    q.done(k2, .success);
+    q.done(std.testing.io, k2, .success);
 }
 
 test "WorkQueue: overall limiter disabled when qps is 0" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1886,8 +1918,8 @@ test "WorkQueue: overall limiter disabled when qps is 0" {
         .overall_rate_limit = RateLimiter.Config.disabled,
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act / Assert
@@ -1897,10 +1929,10 @@ test "WorkQueue: overall limiter disabled when qps is 0" {
     try q.addRateLimited(key);
 
     // With disabled limiter and tiny backoff, key should be available quickly.
-    std.Thread.sleep(50 * std.time.ns_per_ms);
-    const k = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const k = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("pod-1", k.name);
-    q.done(k, .success);
+    q.done(std.testing.io, k, .success);
 }
 
 test "WorkQueue: overall limiter defaults are 10 QPS / 100 burst" {
@@ -1914,7 +1946,7 @@ test "WorkQueue: overall limiter defaults are 10 QPS / 100 burst" {
 
 test "WorkQueue: done(.backoff) uses overall limiter" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, .{
+    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1925,36 +1957,36 @@ test "WorkQueue: done(.backoff) uses overall limiter" {
         .overall_rate_limit = .{ .qps = 10.0, .burst = 1 },
     });
     defer {
-        q.shutdown();
-        q.deinit();
+        q.shutdown(std.testing.io);
+        q.deinit(std.testing.io);
     }
 
     // Act
-    try q.add(.{ .namespace = "ns", .name = "a" }, .{});
-    const k1 = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
+    const k1 = (try q.get(std.testing.io)).?;
 
     // First done(.backoff) consumes the one burst token.
-    q.done(k1, .backoff);
+    q.done(std.testing.io, k1, .backoff);
 
-    try q.add(.{ .namespace = "ns", .name = "b" }, .{});
-    const k2 = (try q.get()).?;
+    try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
+    const k2 = (try q.get(std.testing.io)).?;
 
     // Second done(.backoff) goes into bucket debt (~100ms).
-    q.done(k2, .backoff);
+    q.done(std.testing.io, k2, .backoff);
 
     // Assert
     // Wait for key "a" to be promoted (near-zero per-key backoff, burst token).
-    std.Thread.sleep(20 * std.time.ns_per_ms);
-    const ka = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 20 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const ka = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("a", ka.name);
-    q.done(ka, .success);
+    q.done(std.testing.io, ka, .success);
 
     // Key "b" should still be waiting (bucket delay ~100ms).
-    try testing.expectEqual(@as(usize, 0), q.len());
+    try testing.expectEqual(@as(usize, 0), q.len(std.testing.io));
 
     // After enough time, key "b" becomes available.
-    std.Thread.sleep(200 * std.time.ns_per_ms);
-    const kb = (try q.get()).?;
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms } }, std.testing.io) catch {};
+    const kb = (try q.get(std.testing.io)).?;
     try testing.expectEqualStrings("b", kb.name);
-    q.done(kb, .success);
+    q.done(std.testing.io, kb, .success);
 }

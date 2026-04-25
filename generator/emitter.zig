@@ -39,10 +39,10 @@ const StringKeySortCtx = struct {
 };
 
 /// Main entry point: generate per-group-version files and a root re-export file.
-pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definitions: std.json.ObjectMap, paths: ?std.json.ObjectMap) !void {
+pub fn generate(allocator: std.mem.Allocator, io: std.Io, output_dir: []const u8, definitions: std.json.ObjectMap, paths: ?std.json.ObjectMap) !void {
     // Extract resource metadata from paths (if available).
-    var resource_metas = std.StringArrayHashMap(GeneratorResourceMeta).init(allocator);
-    defer resource_metas.deinit();
+    var resource_metas: std.StringArrayHashMapUnmanaged(GeneratorResourceMeta) = .empty;
+    defer resource_metas.deinit(allocator);
 
     if (paths) |p| {
         try extractResourceMetas(allocator, p, &resource_metas);
@@ -50,7 +50,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
     }
 
     // Group all definitions by group-version key.
-    var groups = std.StringArrayHashMap(std.ArrayList(DefEntry)).init(allocator);
+    var groups: std.StringArrayHashMapUnmanaged(std.ArrayList(DefEntry)) = .empty;
     defer {
         for (groups.values()) |*list| {
             list.deinit(allocator);
@@ -58,7 +58,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
         for (groups.keys()) |key| {
             allocator.free(key);
         }
-        groups.deinit();
+        groups.deinit(allocator);
     }
 
     var def_it = definitions.iterator();
@@ -67,12 +67,12 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
         const schema = entry.value_ptr.*;
         const key = try openapi.groupVersionKey(allocator, fqn);
 
-        const gop = try groups.getOrPut(key);
+        const gop = try groups.getOrPut(allocator, key);
         if (gop.found_existing) {
             // Key was duplicate; free the new allocation.
             allocator.free(key);
         } else {
-            gop.value_ptr.* = .{};
+            gop.value_ptr.* = .empty;
         }
         try gop.value_ptr.append(allocator, .{ .fqn = fqn, .schema = schema });
     }
@@ -88,20 +88,20 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
     }
 
     // Open the output directory.
-    var dir = try std.fs.cwd().openDir(output_dir, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(io, output_dir, .{});
+    defer dir.close(io);
 
     // Generate each per-group file.
     const group_keys = groups.keys();
     const group_values = groups.values();
     for (group_keys, group_values) |group_key, entries| {
         // Collect cross-group dependencies.
-        var deps = std.StringArrayHashMap(void).init(allocator);
+        var deps: std.StringArrayHashMapUnmanaged(void) = .empty;
         defer {
             for (deps.keys()) |dep_key| {
                 allocator.free(dep_key);
             }
-            deps.deinit();
+            deps.deinit(allocator);
         }
 
         for (entries.items) |def_entry| {
@@ -115,11 +115,11 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
         const filename = try std.fmt.allocPrint(allocator, "{s}.zig", .{group_key});
         defer allocator.free(filename);
 
-        const file = try dir.createFile(filename, .{});
-        defer file.close();
+        const file = try dir.createFile(io, filename, .{});
+        defer file.close(io);
 
         var write_buf: [8192]u8 = undefined;
-        var file_writer = file.writer(&write_buf);
+        var file_writer = file.writer(io, &write_buf);
         const writer = &file_writer.interface;
 
         // Write header.
@@ -153,11 +153,11 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
 
     // Generate root types.zig re-export file.
     {
-        const file = try dir.createFile("types.zig", .{});
-        defer file.close();
+        const file = try dir.createFile(io, "types.zig", .{});
+        defer file.close(io);
 
         var write_buf: [8192]u8 = undefined;
-        var file_writer = file.writer(&write_buf);
+        var file_writer = file.writer(io, &write_buf);
         const writer = &file_writer.interface;
 
         try writer.writeAll(
@@ -210,7 +210,7 @@ pub fn generate(allocator: std.mem.Allocator, output_dir: []const u8, definition
 fn extractResourceMetas(
     allocator: std.mem.Allocator,
     paths: std.json.ObjectMap,
-    resource_metas: *std.StringArrayHashMap(GeneratorResourceMeta),
+    resource_metas: *std.StringArrayHashMapUnmanaged(GeneratorResourceMeta),
 ) !void {
     // Intermediate structures: keyed by "group/version/kind" tuple string.
     const PathInfo = struct {
@@ -223,12 +223,12 @@ fn extractResourceMetas(
         kind: []const u8 = "",
     };
 
-    var info_map = std.StringArrayHashMap(PathInfo).init(allocator);
+    var info_map: std.StringArrayHashMapUnmanaged(PathInfo) = .empty;
     defer {
         for (info_map.keys()) |key| {
             allocator.free(key);
         }
-        info_map.deinit();
+        info_map.deinit(allocator);
     }
 
     var path_it = paths.iterator();
@@ -269,7 +269,7 @@ fn extractResourceMetas(
         // Build tuple key: "group/version/kind"
         const tuple_key = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ group, ver, knd });
 
-        const gop = try info_map.getOrPut(tuple_key);
+        const gop = try info_map.getOrPut(allocator, tuple_key);
         if (gop.found_existing) {
             allocator.free(tuple_key);
         } else {
@@ -320,7 +320,7 @@ fn extractResourceMetas(
         const list_fqn = info.list_fqn orelse continue;
         const resource_name = info.resource_name orelse continue;
 
-        try resource_metas.put(resource_fqn, .{
+        try resource_metas.put(allocator, resource_fqn, .{
             .group = info.group,
             .version = info.version,
             .kind = info.kind,
@@ -372,7 +372,7 @@ fn collectDeps(
     schema: std.json.Value,
     definitions: std.json.ObjectMap,
     current_group_key: []const u8,
-    deps: *std.StringArrayHashMap(void),
+    deps: *std.StringArrayHashMapUnmanaged(void),
 ) !void {
     const obj = asObject(schema) orelse return;
 
@@ -390,7 +390,7 @@ fn collectDepsFromType(
     schema: std.json.Value,
     definitions: std.json.ObjectMap,
     current_group_key: []const u8,
-    deps: *std.StringArrayHashMap(void),
+    deps: *std.StringArrayHashMapUnmanaged(void),
 ) !void {
     const obj = asObject(schema) orelse return;
 
@@ -401,7 +401,7 @@ fn collectDepsFromType(
             if (std.mem.eql(u8, key, current_group_key)) {
                 allocator.free(key);
             } else {
-                const gop = try deps.getOrPut(key);
+                const gop = try deps.getOrPut(allocator, key);
                 if (gop.found_existing) {
                     allocator.free(key);
                 }
@@ -945,7 +945,7 @@ test "writeType: string" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("[]const u8", writer.buffered());
@@ -961,7 +961,7 @@ test "writeType: boolean" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("bool", writer.buffered());
@@ -977,7 +977,7 @@ test "writeType: number" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("f64", writer.buffered());
@@ -993,7 +993,7 @@ test "writeType: integer defaults to i64" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("i64", writer.buffered());
@@ -1009,7 +1009,7 @@ test "writeType: integer int32" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("i32", writer.buffered());
@@ -1025,7 +1025,7 @@ test "writeType: array of strings" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("[]const []const u8", writer.buffered());
@@ -1041,7 +1041,7 @@ test "writeType: array without items" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("[]const json.Value", writer.buffered());
@@ -1057,7 +1057,7 @@ test "writeType: object with additionalProperties string" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("json.ArrayHashMap([]const u8)", writer.buffered());
@@ -1073,7 +1073,7 @@ test "writeType: bare object" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("json.Value", writer.buffered());
@@ -1087,7 +1087,7 @@ test "writeType: empty schema" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("json.Value", writer.buffered());
@@ -1103,9 +1103,9 @@ test "writeType: ref to existing definition in same group" {
         \\{"type":"object"}
     );
     defer def_schema.deinit();
-    var definitions = std.json.ObjectMap.init(testing.allocator);
-    defer definitions.deinit();
-    try definitions.put("io.k8s.api.core.v1.PodSpec", def_schema.value);
+    var definitions: std.json.ObjectMap = .empty;
+    defer definitions.deinit(testing.allocator);
+    try definitions.put(testing.allocator, "io.k8s.api.core.v1.PodSpec", def_schema.value);
     var buf: [256]u8 = undefined;
     var writer = Writer.fixed(&buf);
 
@@ -1126,7 +1126,7 @@ test "writeType: ref to missing definition falls back to json.Value" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("json.Value", writer.buffered());
@@ -1142,9 +1142,9 @@ test "writeType: ref to existing definition in different group qualifies with mo
         \\{"type":"object"}
     );
     defer def_schema.deinit();
-    var definitions = std.json.ObjectMap.init(testing.allocator);
-    defer definitions.deinit();
-    try definitions.put("io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta", def_schema.value);
+    var definitions: std.json.ObjectMap = .empty;
+    defer definitions.deinit(testing.allocator);
+    try definitions.put(testing.allocator, "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta", def_schema.value);
     var buf: [256]u8 = undefined;
     var writer = Writer.fixed(&buf);
 
@@ -1165,7 +1165,7 @@ test "writeType: integer with non-int32 format defaults to i64" {
     var writer = Writer.fixed(&buf);
 
     // Act
-    try writeType(&writer, parsed.value, std.json.ObjectMap.init(testing.allocator), "core_v1");
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
 
     // Assert
     try testing.expectEqualStrings("i64", writer.buffered());
@@ -1181,9 +1181,9 @@ test "writeType: object with additionalProperties containing ref" {
         \\{"type":"object"}
     );
     defer def_schema.deinit();
-    var definitions = std.json.ObjectMap.init(testing.allocator);
-    defer definitions.deinit();
-    try definitions.put("io.k8s.api.core.v1.Container", def_schema.value);
+    var definitions: std.json.ObjectMap = .empty;
+    defer definitions.deinit(testing.allocator);
+    try definitions.put(testing.allocator, "io.k8s.api.core.v1.Container", def_schema.value);
     var buf: [256]u8 = undefined;
     var writer = Writer.fixed(&buf);
 
@@ -1204,9 +1204,9 @@ test "writeType: array of refs" {
         \\{"type":"object"}
     );
     defer def_schema.deinit();
-    var definitions = std.json.ObjectMap.init(testing.allocator);
-    defer definitions.deinit();
-    try definitions.put("io.k8s.api.core.v1.Container", def_schema.value);
+    var definitions: std.json.ObjectMap = .empty;
+    defer definitions.deinit(testing.allocator);
+    try definitions.put(testing.allocator, "io.k8s.api.core.v1.Container", def_schema.value);
     var buf: [256]u8 = undefined;
     var writer = Writer.fixed(&buf);
 

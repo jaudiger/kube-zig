@@ -149,7 +149,7 @@ pub fn Reflector(comptime T: type) type {
         backoff_attempt: u32,
         consecutive_errors: u32,
         /// Mutex protecting `active_stream_state` for cross-thread interrupt.
-        watch_mu: std.Thread.Mutex = .{},
+        watch_mu: std.Io.Mutex = .init,
         /// Points to the current watch stream's `StreamState` while active.
         /// Guarded by `watch_mu`.
         active_stream_state: ?*StreamState = null,
@@ -187,31 +187,31 @@ pub fn Reflector(comptime T: type) type {
         }
 
         /// Release all resources owned by the reflector.
-        pub fn deinit(self: *Self) void {
-            self.closeWatch();
+        pub fn deinit(self: *Self, io: std.Io) void {
+            self.closeWatch(io);
             if (self.resource_version) |rv| self.allocator.free(rv);
             if (self.continue_token) |ct| self.allocator.free(ct);
         }
 
         /// Shut down the active watch socket, causing any blocked `read()`
         /// to return immediately.  Safe to call from another thread.
-        pub fn interruptWatch(self: *Self) void {
-            self.watch_mu.lock();
-            defer self.watch_mu.unlock();
+        pub fn interruptWatch(self: *Self, io: std.Io) void {
+            self.watch_mu.lockUncancelable(io);
+            defer self.watch_mu.unlock(io);
             if (self.active_stream_state) |state| {
-                state.interrupt();
+                state.interrupt(io);
             }
         }
 
         /// Run one step of the reflector state machine.
         /// Returns an event for the informer, or null for internal-only steps.
-        pub fn step(self: *Self) !?ReflectorEvent(T) {
-            self.ctx.check() catch return error.Canceled;
+        pub fn step(self: *Self, io: std.Io) !?ReflectorEvent(T) {
+            self.ctx.check(io) catch return error.Canceled;
 
             return switch (self.state) {
-                .initial => self.stepInitial(),
-                .listing => self.stepListing(),
-                .watching => self.stepWatching(),
+                .initial => self.stepInitial(io),
+                .listing => self.stepListing(io),
+                .watching => self.stepWatching(io),
                 .watch_ended => self.stepWatchEnded(),
                 .gone => self.stepGone(),
                 .failed => return error.ReflectorFailed,
@@ -224,7 +224,7 @@ pub fn Reflector(comptime T: type) type {
         }
 
         // State handlers
-        fn stepInitial(self: *Self) !?ReflectorEvent(T) {
+        fn stepInitial(self: *Self, io: std.Io) !?ReflectorEvent(T) {
             if (self.continue_token) |ct| {
                 self.allocator.free(ct);
                 self.continue_token = null;
@@ -238,11 +238,11 @@ pub fn Reflector(comptime T: type) type {
                 LogField.string("resource", meta.resource),
             });
             self.transitionTo(.listing);
-            return self.stepListing();
+            return self.stepListing(io);
         }
 
-        fn stepListing(self: *Self) !?ReflectorEvent(T) {
-            const list_start = std.time.Instant.now() catch null;
+        fn stepListing(self: *Self, io: std.Io) !?ReflectorEvent(T) {
+            const list_start: std.Io.Clock.Timestamp = .now(io, .awake);
             const api = ApiT.init(self.client, self.ctx, self.namespace);
 
             const rv = self.resource_version;
@@ -260,16 +260,15 @@ pub fn Reflector(comptime T: type) type {
                 .continue_token = self.continue_token,
             };
 
-            const result = api.list(list_opts) catch |err| {
+            const result = api.list(io, list_opts) catch |err| {
                 return self.recordError(err);
             };
 
             // Record list duration.
-            if (list_start) |s| {
-                if (std.time.Instant.now() catch null) |end| {
-                    const dur_ns: f64 = @floatFromInt(end.since(s));
-                    self.metrics.list_duration.observe(dur_ns / @as(f64, std.time.ns_per_s));
-                }
+            const dur_ns_i: i96 = list_start.untilNow(io).raw.nanoseconds;
+            if (dur_ns_i >= 0) {
+                const dur_ns: f64 = @floatFromInt(dur_ns_i);
+                self.metrics.list_duration.observe(dur_ns / @as(f64, std.time.ns_per_s));
             }
 
             switch (result) {
@@ -354,16 +353,16 @@ pub fn Reflector(comptime T: type) type {
             }
         }
 
-        fn stepWatching(self: *Self) !?ReflectorEvent(T) {
+        fn stepWatching(self: *Self, io: std.Io) !?ReflectorEvent(T) {
             // Open watch stream if needed.
             if (self.watch_stream == null) {
                 self.logger.info("watch reconnecting", &.{
                     LogField.string("resource", meta.resource),
                     LogField.string("resource_version", self.resource_version orelse ""),
                 });
-                const timeout = self.randomizedWatchTimeout();
+                const timeout = self.randomizedWatchTimeout(io);
                 const api = ApiT.init(self.client, self.ctx, self.namespace);
-                self.watch_stream = api.watch(.{
+                self.watch_stream = api.watch(io, .{
                     .label_selector = self.options.label_selector,
                     .field_selector = self.options.field_selector,
                     .resource_version = self.resource_version,
@@ -385,15 +384,15 @@ pub fn Reflector(comptime T: type) type {
                     return self.recordError(err);
                 };
                 // Register the active stream state for cross-thread interrupt.
-                self.watch_mu.lock();
+                self.watch_mu.lockUncancelable(io);
                 self.active_stream_state = self.watch_stream.?.state;
-                self.watch_mu.unlock();
+                self.watch_mu.unlock(io);
                 self.resetErrors();
             }
 
             // Read next event from the watch stream.
-            const parsed_event = self.watch_stream.?.next() catch |err| {
-                self.closeWatch();
+            const parsed_event = self.watch_stream.?.next(io) catch |err| {
+                self.closeWatch(io);
                 if (err == error.HttpGone) {
                     self.transitionTo(.gone);
                     return .gone;
@@ -415,7 +414,7 @@ pub fn Reflector(comptime T: type) type {
                     .api_error => |api_err| {
                         if (api_err.code) |c| if (c == 410) {
                             event.deinit();
-                            self.closeWatch();
+                            self.closeWatch(io);
                             self.transitionTo(.gone);
                             return .gone;
                         };
@@ -432,7 +431,7 @@ pub fn Reflector(comptime T: type) type {
                             else => error.HttpRequestFailed,
                         } else error.HttpRequestFailed;
                         event.deinit();
-                        self.closeWatch();
+                        self.closeWatch(io);
                         return self.recordError(watch_err);
                     },
                     .added, .modified, .deleted => {
@@ -453,7 +452,7 @@ pub fn Reflector(comptime T: type) type {
                 self.logger.warn("watch stream ended (server timeout), will reconnect", &.{
                     LogField.string("resource", meta.resource),
                 });
-                self.closeWatch();
+                self.closeWatch(io);
                 self.transitionTo(.watch_ended);
                 return .watch_ended;
             }
@@ -480,11 +479,11 @@ pub fn Reflector(comptime T: type) type {
         /// Force a re-list by resetting to initial state with a quorum read.
         /// Called by the informer when a watch event cannot be applied
         /// (e.g. OOM on store.put), to ensure the cache is eventually consistent.
-        pub fn forceRelist(self: *Self) std.mem.Allocator.Error!void {
+        pub fn forceRelist(self: *Self, io: std.Io) std.mem.Allocator.Error!void {
             self.logger.warn("forcing re-list", &.{
                 LogField.string("resource", meta.resource),
             });
-            self.closeWatch();
+            self.closeWatch(io);
             const new_rv = try self.allocator.dupe(u8, "");
             if (self.resource_version) |rv| self.allocator.free(rv);
             self.resource_version = new_rv;
@@ -493,12 +492,12 @@ pub fn Reflector(comptime T: type) type {
         }
 
         // Helpers
-        fn closeWatch(self: *Self) void {
+        fn closeWatch(self: *Self, io: std.Io) void {
             // Clear the active stream state under lock *before* closing,
             // so interruptWatch() cannot operate on a deinit'd stream.
-            self.watch_mu.lock();
+            self.watch_mu.lockUncancelable(io);
             self.active_stream_state = null;
-            self.watch_mu.unlock();
+            self.watch_mu.unlock(io);
             if (self.watch_stream) |*ws| {
                 ws.close(); // infallible (returns void)
                 self.watch_stream = null;
@@ -514,13 +513,16 @@ pub fn Reflector(comptime T: type) type {
             self.allocator.free(items);
         }
 
-        fn randomizedWatchTimeout(self: *Self) i64 {
+        fn randomizedWatchTimeout(self: *Self, io: std.Io) i64 {
             const base = self.options.watch_timeout_seconds;
             if (base <= 0) return 300;
             // Clamp so that base + jitter (up to 2*base) cannot overflow i64.
             const clamped: u64 = std.math.cast(u64, @min(base, std.math.maxInt(i64) / 2)) orelse return 300;
             // Randomize between base and 2*base to avoid thundering herd.
-            const jitter = std.crypto.random.uintAtMost(u64, clamped);
+            var raw: [8]u8 = undefined;
+            io.random(&raw);
+            const r: u64 = std.mem.readInt(u64, &raw, .little);
+            const jitter = r % (clamped +| 1);
             return std.math.cast(i64, clamped + jitter) orelse 300;
         }
 
@@ -646,14 +648,14 @@ pub fn Reflector(comptime T: type) type {
         /// Sleep for the current backoff duration. Returns `error.Canceled`
         /// if the context is already canceled (without logging) or if
         /// cancellation is detected during sleep.
-        pub fn backoffSleep(self: *Self, ctx: Context) error{Canceled}!void {
-            try ctx.check();
-            const ns = self.retry_policy.sleepNs(self.backoff_attempt, null);
+        pub fn backoffSleep(self: *Self, io: std.Io, ctx: Context) error{Canceled}!void {
+            try ctx.check(io);
+            const ns = self.retry_policy.sleepNs(io, self.backoff_attempt, null);
             self.logger.debug("backoff sleep", &.{
                 LogField.string("resource", meta.resource),
                 LogField.uint("duration_ms", ns / std.time.ns_per_ms),
             });
-            try context_mod.interruptibleSleep(ctx, ns);
+            try context_mod.interruptibleSleep(io, ctx, ns);
         }
     };
 }

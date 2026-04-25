@@ -74,7 +74,7 @@ pub fn extractCrdMeta(crd: std.json.Value, buf: []CrdMeta) ?[]const CrdMeta {
 const GenContext = struct {
     allocator: std.mem.Allocator,
     nested: std.ArrayList(NestedStruct),
-    seen_names: std.StringArrayHashMap(void),
+    seen_names: std.StringArrayHashMapUnmanaged(void),
 
     const NestedStruct = struct {
         name: []const u8,
@@ -85,8 +85,8 @@ const GenContext = struct {
     fn init(allocator: std.mem.Allocator) GenContext {
         return .{
             .allocator = allocator,
-            .nested = .{},
-            .seen_names = std.StringArrayHashMap(void).init(allocator),
+            .nested = .empty,
+            .seen_names = .empty,
         };
     }
 
@@ -97,12 +97,12 @@ const GenContext = struct {
         for (self.seen_names.keys()) |key| {
             self.allocator.free(key);
         }
-        self.seen_names.deinit();
+        self.seen_names.deinit(self.allocator);
     }
 
     fn addNested(self: *GenContext, name: []const u8, schema: std.json.Value, description: ?[]const u8) !void {
         const duped = try self.allocator.dupe(u8, name);
-        const gop = try self.seen_names.getOrPut(duped);
+        const gop = try self.seen_names.getOrPut(self.allocator, duped);
         if (gop.found_existing) {
             self.allocator.free(duped);
             return; // Already queued

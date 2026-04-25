@@ -29,26 +29,26 @@ pub fn EventHandler(comptime T: type) type {
         const Self = @This();
 
         ctx: ?*anyopaque,
-        on_add_fn: ?*const fn (ctx: ?*anyopaque, obj: *const T, is_initial_list: bool) void,
-        on_update_fn: ?*const fn (ctx: ?*anyopaque, old: *const T, new: *const T) void,
-        on_delete_fn: ?*const fn (ctx: ?*anyopaque, obj: *const T) void,
+        on_add_fn: ?*const fn (ctx: ?*anyopaque, io: std.Io, obj: *const T, is_initial_list: bool) void,
+        on_update_fn: ?*const fn (ctx: ?*anyopaque, io: std.Io, old: *const T, new: *const T) void,
+        on_delete_fn: ?*const fn (ctx: ?*anyopaque, io: std.Io, obj: *const T) void,
 
         /// Create a handler from a typed context pointer.
         /// Each callback receives the context as its first argument.
         pub fn fromTypedCtx(comptime Ctx: type, ctx: *Ctx, comptime fns: struct {
-            on_add: ?*const fn (c: *Ctx, obj: *const T, is_initial_list: bool) void = null,
-            on_update: ?*const fn (c: *Ctx, old: *const T, new: *const T) void = null,
-            on_delete: ?*const fn (c: *Ctx, obj: *const T) void = null,
+            on_add: ?*const fn (c: *Ctx, io: std.Io, obj: *const T, is_initial_list: bool) void = null,
+            on_update: ?*const fn (c: *Ctx, io: std.Io, old: *const T, new: *const T) void = null,
+            on_delete: ?*const fn (c: *Ctx, io: std.Io, obj: *const T) void = null,
         }) Self {
             const Wrapper = struct {
-                fn onAdd(raw: ?*anyopaque, obj: *const T, is_init: bool) void {
-                    if (fns.on_add) |f| f(@ptrCast(@alignCast(raw.?)), obj, is_init);
+                fn onAdd(raw: ?*anyopaque, io: std.Io, obj: *const T, is_init: bool) void {
+                    if (fns.on_add) |f| f(@ptrCast(@alignCast(raw.?)), io, obj, is_init);
                 }
-                fn onUpdate(raw: ?*anyopaque, old: *const T, new: *const T) void {
-                    if (fns.on_update) |f| f(@ptrCast(@alignCast(raw.?)), old, new);
+                fn onUpdate(raw: ?*anyopaque, io: std.Io, old: *const T, new: *const T) void {
+                    if (fns.on_update) |f| f(@ptrCast(@alignCast(raw.?)), io, old, new);
                 }
-                fn onDelete(raw: ?*anyopaque, obj: *const T) void {
-                    if (fns.on_delete) |f| f(@ptrCast(@alignCast(raw.?)), obj);
+                fn onDelete(raw: ?*anyopaque, io: std.Io, obj: *const T) void {
+                    if (fns.on_delete) |f| f(@ptrCast(@alignCast(raw.?)), io, obj);
                 }
             };
             return .{
@@ -61,20 +61,20 @@ pub fn EventHandler(comptime T: type) type {
 
         /// Create a handler from plain function pointers (no context).
         pub fn fromFns(comptime fns: struct {
-            on_add: ?*const fn (obj: *const T, is_initial_list: bool) void = null,
-            on_update: ?*const fn (old: *const T, new: *const T) void = null,
-            on_delete: ?*const fn (obj: *const T) void = null,
+            on_add: ?*const fn (io: std.Io, obj: *const T, is_initial_list: bool) void = null,
+            on_update: ?*const fn (io: std.Io, old: *const T, new: *const T) void = null,
+            on_delete: ?*const fn (io: std.Io, obj: *const T) void = null,
         }) Self {
             // Wrap plain functions to match the ctx-based signature.
             const Wrapper = struct {
-                fn onAdd(_: ?*anyopaque, obj: *const T, is_init: bool) void {
-                    if (fns.on_add) |f| f(obj, is_init);
+                fn onAdd(_: ?*anyopaque, io: std.Io, obj: *const T, is_init: bool) void {
+                    if (fns.on_add) |f| f(io, obj, is_init);
                 }
-                fn onUpdate(_: ?*anyopaque, old: *const T, new: *const T) void {
-                    if (fns.on_update) |f| f(old, new);
+                fn onUpdate(_: ?*anyopaque, io: std.Io, old: *const T, new: *const T) void {
+                    if (fns.on_update) |f| f(io, old, new);
                 }
-                fn onDelete(_: ?*anyopaque, obj: *const T) void {
-                    if (fns.on_delete) |f| f(obj);
+                fn onDelete(_: ?*anyopaque, io: std.Io, obj: *const T) void {
+                    if (fns.on_delete) |f| f(io, obj);
                 }
             };
             return .{
@@ -86,18 +86,18 @@ pub fn EventHandler(comptime T: type) type {
         }
 
         /// Invoke the on-add callback if registered.
-        pub fn onAdd(self: Self, obj: *const T, is_initial_list: bool) void {
-            if (self.on_add_fn) |f| f(self.ctx, obj, is_initial_list);
+        pub fn onAdd(self: Self, io: std.Io, obj: *const T, is_initial_list: bool) void {
+            if (self.on_add_fn) |f| f(self.ctx, io, obj, is_initial_list);
         }
 
         /// Invoke the on-update callback if registered.
-        pub fn onUpdate(self: Self, old: *const T, new: *const T) void {
-            if (self.on_update_fn) |f| f(self.ctx, old, new);
+        pub fn onUpdate(self: Self, io: std.Io, old: *const T, new: *const T) void {
+            if (self.on_update_fn) |f| f(self.ctx, io, old, new);
         }
 
         /// Invoke the on-delete callback if registered.
-        pub fn onDelete(self: Self, obj: *const T) void {
-            if (self.on_delete_fn) |f| f(self.ctx, obj);
+        pub fn onDelete(self: Self, io: std.Io, obj: *const T) void {
+            if (self.on_delete_fn) |f| f(self.ctx, io, obj);
         }
     };
 }
@@ -182,7 +182,7 @@ pub fn Informer(comptime T: type) type {
         }
 
         /// Release all resources including the store, reflector, and staging buffer.
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self, io: std.Io) void {
             // Free any remaining staging items.
             for (self.staging.items) |item| {
                 item.arena.deinit();
@@ -190,8 +190,8 @@ pub fn Informer(comptime T: type) type {
             }
             self.staging.deinit(self.allocator);
             self.handlers.deinit(self.allocator);
-            self.reflector.deinit();
-            self.store.deinit();
+            self.reflector.deinit(io);
+            self.store.deinit(io);
         }
 
         /// Register an event handler.
@@ -205,30 +205,30 @@ pub fn Informer(comptime T: type) type {
 
         /// Run the informer loop. Blocks until `stop()` is called or
         /// the client shuts down.
-        pub fn run(self: *Self) !void {
+        pub fn run(self: *Self, io: std.Io) !void {
             self.running.store(true, .release);
             self.logger.info("informer starting", &.{
                 LogField.string("resource", meta.resource),
             });
             const ctx = self.parent_ctx.withCancel(&self.cancel);
             self.reflector.ctx = ctx;
-            while (!ctx.isCanceled()) {
+            while (!ctx.isCanceled(io)) {
                 if (self.reflector.state == .failed) return error.ReflectorFailed;
 
-                const maybe_event = self.reflector.step() catch {
-                    self.reflector.backoffSleep(ctx) catch return;
+                const maybe_event = self.reflector.step(io) catch {
+                    self.reflector.backoffSleep(io, ctx) catch return;
                     continue;
                 };
 
                 if (maybe_event) |event| {
-                    self.processEvent(event);
+                    self.processEvent(io, event);
 
                     // Apply backoff after processing transient errors.
                     // The reflector returns transient errors as events (not Zig
                     // errors), so the catch branch above doesn't trigger.
                     switch (event) {
                         .transient_error, .persistent_error => {
-                            self.reflector.backoffSleep(ctx) catch return;
+                            self.reflector.backoffSleep(io, ctx) catch return;
                         },
                         else => {},
                     }
@@ -237,17 +237,17 @@ pub fn Informer(comptime T: type) type {
         }
 
         /// Signal the informer to stop.
-        pub fn stop(self: *Self) void {
+        pub fn stop(self: *Self, io: std.Io) void {
             self.logger.info("informer stopping", &.{
                 LogField.string("resource", meta.resource),
             });
-            self.cancel.cancel();
-            self.reflector.interruptWatch();
+            self.cancel.cancel(io);
+            self.reflector.interruptWatch(io);
         }
 
         /// Has the initial list been fully synced to the store?
-        pub fn hasSynced(self: *Self) bool {
-            return self.store.hasSynced();
+        pub fn hasSynced(self: *Self, io: std.Io) bool {
+            return self.store.hasSynced(io);
         }
 
         /// Returns true if the initial sync failed permanently (e.g. OOM
@@ -263,10 +263,10 @@ pub fn Informer(comptime T: type) type {
         }
 
         // Internal
-        fn processEvent(self: *Self, event: ReflectorEvent(T)) void {
+        fn processEvent(self: *Self, io: std.Io, event: ReflectorEvent(T)) void {
             switch (event) {
-                .init_page => |page| self.processInitPage(page),
-                .watch_event => |parsed| self.processWatchEvent(parsed),
+                .init_page => |page| self.processInitPage(io, page),
+                .watch_event => |parsed| self.processWatchEvent(io, parsed),
                 .watch_ended => {
                     self.metrics.watch_restarts_total.inc();
                 },
@@ -281,7 +281,7 @@ pub fn Informer(comptime T: type) type {
             }
         }
 
-        fn processInitPage(self: *Self, page: ReflectorEvent(T).InitPage) void {
+        fn processInitPage(self: *Self, io: std.Io, page: ReflectorEvent(T).InitPage) void {
             defer if (page.rv_buf) |buf| self.allocator.free(buf);
 
             // If a previous page failed, discard all subsequent pages
@@ -297,7 +297,7 @@ pub fn Informer(comptime T: type) type {
                 // entire sync to prevent a partial store.replace().
                 self.logger.err("staging append failed: OOM, aborting sync", &.{});
                 self.freeReplaceItems(page.items);
-                return self.abortSyncAndRelist();
+                return self.abortSyncAndRelist(io);
             };
             // Free the items array (items themselves are now in staging).
             self.allocator.free(page.items);
@@ -307,14 +307,14 @@ pub fn Informer(comptime T: type) type {
                 const staged = self.staging.toOwnedSlice(self.allocator) catch {
                     // On OOM, leave staging as-is; will be cleaned up on deinit.
                     self.logger.err("sync failed: OOM converting staging to owned slice", &.{});
-                    return self.abortSyncAndRelist();
+                    return self.abortSyncAndRelist(io);
                 };
-                const replace_result = self.store.replace(staged) catch {
+                const replace_result = self.store.replace(io, staged) catch {
                     self.logger.err("sync failed: could not replace store contents", &.{});
                     // replace() takes unconditional ownership of arenas;
                     // only free the slice itself.
                     self.allocator.free(staged);
-                    return self.abortSyncAndRelist();
+                    return self.abortSyncAndRelist(io);
                 };
                 self.logger.info("store replace succeeded", &.{
                     LogField.uint("item_count", @intCast(staged.len)),
@@ -323,25 +323,25 @@ pub fn Informer(comptime T: type) type {
 
                 // Dispatch delete events for items removed during re-list.
                 for (replace_result.entries) |entry| {
-                    for (self.handlers.items) |h| h.onDelete(&entry.object);
+                    for (self.handlers.items) |h| h.onDelete(io, &entry.object);
                 }
                 replace_result.release();
 
-                self.metrics.store_object_count.set(@floatFromInt(self.store.len()));
+                self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
 
                 // Dispatch add events for all items in the store.
                 self.logger.debug("dispatching initial add events", &.{
                     LogField.uint("handler_count", @intCast(self.handlers.items.len)),
                 });
-                self.dispatchInitialAdds();
+                self.dispatchInitialAdds(io);
 
-                if (!self.sync_failed.load(.acquire) and self.store.hasSynced()) {
+                if (!self.sync_failed.load(.acquire) and self.store.hasSynced(io)) {
                     self.metrics.initial_list_synced.set(1.0);
                 }
             }
         }
 
-        fn processWatchEvent(self: *Self, parsed: watch_mod.ParsedEvent(T)) void {
+        fn processWatchEvent(self: *Self, io: std.Io, parsed: watch_mod.ParsedEvent(T)) void {
             switch (parsed.event) {
                 .added => |obj| {
                     const key = ObjectKey.fromResource(T, obj) orelse {
@@ -352,23 +352,23 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const old = self.store.put(key, obj, parsed.arena) catch {
+                    const old = self.store.put(io, key, obj, parsed.arena) catch {
                         parsed.deinit();
                         self.logger.err("watch add failed (OOM), forcing re-list", &.{});
-                        self.reflector.forceRelist() catch {
+                        self.reflector.forceRelist(io) catch {
                             self.logger.err("forceRelist failed: OOM setting resource version", &.{});
                         };
                         return;
                     };
                     if (old) |old_entry| {
                         // This was actually an update (object existed).
-                        for (self.handlers.items) |h| h.onUpdate(&old_entry.object, &obj);
+                        for (self.handlers.items) |h| h.onUpdate(io, &old_entry.object, &obj);
                         old_entry.release();
                     } else {
-                        for (self.handlers.items) |h| h.onAdd(&obj, false);
+                        for (self.handlers.items) |h| h.onAdd(io, &obj, false);
                     }
                     self.metrics.watch_events_total.inc();
-                    self.metrics.store_object_count.set(@floatFromInt(self.store.len()));
+                    self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
                 },
                 .modified => |obj| {
                     const key = ObjectKey.fromResource(T, obj) orelse {
@@ -379,23 +379,23 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const old = self.store.put(key, obj, parsed.arena) catch {
+                    const old = self.store.put(io, key, obj, parsed.arena) catch {
                         parsed.deinit();
                         self.logger.err("watch modify failed (OOM), forcing re-list", &.{});
-                        self.reflector.forceRelist() catch {
+                        self.reflector.forceRelist(io) catch {
                             self.logger.err("forceRelist failed: OOM setting resource version", &.{});
                         };
                         return;
                     };
                     if (old) |old_entry| {
-                        for (self.handlers.items) |h| h.onUpdate(&old_entry.object, &obj);
+                        for (self.handlers.items) |h| h.onUpdate(io, &old_entry.object, &obj);
                         old_entry.release();
                     } else {
                         // Object didn't exist yet; treat as add.
-                        for (self.handlers.items) |h| h.onAdd(&obj, false);
+                        for (self.handlers.items) |h| h.onAdd(io, &obj, false);
                     }
                     self.metrics.watch_events_total.inc();
-                    self.metrics.store_object_count.set(@floatFromInt(self.store.len()));
+                    self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
                 },
                 .deleted => |obj| {
                     const key = ObjectKey.fromResource(T, obj) orelse {
@@ -406,15 +406,15 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const removed = self.store.remove(key);
+                    const removed = self.store.remove(io, key);
                     if (removed) |old_entry| {
-                        for (self.handlers.items) |h| h.onDelete(&old_entry.object);
+                        for (self.handlers.items) |h| h.onDelete(io, &old_entry.object);
                         old_entry.release();
                     }
                     // Free the watch event's arena (the deleted object data).
                     parsed.deinit();
                     self.metrics.watch_events_total.inc();
-                    self.metrics.store_object_count.set(@floatFromInt(self.store.len()));
+                    self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
                 },
                 .bookmark, .api_error => {
                     // Should not reach here; reflector handles these.
@@ -423,15 +423,15 @@ pub fn Informer(comptime T: type) type {
             }
         }
 
-        fn dispatchInitialAdds(self: *Self) void {
-            const result = self.store.list(self.allocator) catch {
+        fn dispatchInitialAdds(self: *Self, io: std.Io) void {
+            const result = self.store.list(self.allocator, io) catch {
                 self.logger.err("dispatchInitialAdds failed: OOM listing store", &.{});
-                return self.abortSyncAndRelist();
+                return self.abortSyncAndRelist(io);
             };
             defer result.release();
 
             for (result.entries) |entry| {
-                for (self.handlers.items) |h| h.onAdd(&entry.object, true);
+                for (self.handlers.items) |h| h.onAdd(io, &entry.object, true);
             }
         }
 
@@ -456,9 +456,9 @@ pub fn Informer(comptime T: type) type {
         /// Clears staging so the next list cycle starts fresh.
         /// If forceRelist itself fails (deep OOM), sets sync_failed so
         /// remaining pages from the old list are discarded.
-        fn abortSyncAndRelist(self: *Self) void {
+        fn abortSyncAndRelist(self: *Self, io: std.Io) void {
             self.clearStaging();
-            self.reflector.forceRelist() catch {
+            self.reflector.forceRelist(io) catch {
                 self.logger.err("forceRelist failed: OOM setting resource version", &.{});
                 self.sync_failed.store(true, .release);
                 return;

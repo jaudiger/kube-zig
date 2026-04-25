@@ -9,8 +9,8 @@ const testing = std.testing;
 // Default field values
 test "Client.init leaves all auth fields null" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act / Assert
     try testing.expect(client.auth.token_path == null);
@@ -60,12 +60,12 @@ test "401 response leaves unauthorized flag set" {
 
     mock.respondWith(.unauthorized, "{\"message\":\"Unauthorized\"}");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
     const ctx = c.context();
 
     // Act
-    const result = try c.get(struct {}, "/api/v1/pods", ctx);
+    const result = try c.get(std.testing.io, struct {}, "/api/v1/pods", ctx);
     defer result.deinit();
 
     // Assert
@@ -79,14 +79,14 @@ test "successful response clears unauthorized flag" {
 
     mock.respondWith(.ok, "{}");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
     const ctx = c.context();
 
     c.auth.markUnauthorized();
 
     // Act
-    const result = try c.get(struct {}, "/api/v1/pods", ctx);
+    const result = try c.get(std.testing.io, struct {}, "/api/v1/pods", ctx);
     defer result.deinit();
 
     // Assert
@@ -100,14 +100,14 @@ test "non-401 error response preserves unauthorized flag" {
 
     mock.respondWith(.internal_server_error, "{\"message\":\"Internal Server Error\"}");
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
     const ctx = c.context();
 
     c.auth.markUnauthorized();
 
     // Act
-    const result = try c.get(struct {}, "/api/v1/pods", ctx);
+    const result = try c.get(std.testing.io, struct {}, "/api/v1/pods", ctx);
     defer result.deinit();
 
     // Assert

@@ -28,7 +28,7 @@ pub const BackoffScheduler = struct {
     max_size: usize,
     retry_policy: RetryPolicy,
     overall_limiter: ?RateLimiter,
-    epoch: std.time.Instant,
+    epoch: std.Io.Clock.Timestamp,
     logger: Logger = Logger.noop,
 
     pub const FailureMap = std.HashMapUnmanaged(
@@ -47,7 +47,7 @@ pub const BackoffScheduler = struct {
 
     pub const WaitingItem = struct {
         key: ObjectKey,
-        not_before: u64, // monotonic nanos since queue epoch (from std.time.Instant)
+        not_before: u64, // monotonic nanos since queue epoch
         owned: bool, // true = independently owned (addAfter); false = owned by failures map
     };
 
@@ -89,13 +89,13 @@ pub const BackoffScheduler = struct {
     ///
     /// `epoch` is the monotonic time origin used to compute `not_before`
     /// timestamps in the waiting heap.
-    pub fn init(allocator: std.mem.Allocator, epoch: std.time.Instant, opts: Options) BackoffScheduler {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, epoch: std.Io.Clock.Timestamp, opts: Options) BackoffScheduler {
         return .{
             .allocator = allocator,
-            .heap = WaitingQueue.init(allocator, {}),
+            .heap = .empty,
             .max_size = opts.max_size,
             .retry_policy = opts.retry_policy,
-            .overall_limiter = RateLimiter.init(opts.overall_rate_limit) catch null,
+            .overall_limiter = RateLimiter.init(io, opts.overall_rate_limit) catch null,
             .epoch = epoch,
             .logger = opts.logger,
         };
@@ -105,13 +105,12 @@ pub const BackoffScheduler = struct {
     pub fn deinit(self: *BackoffScheduler) void {
         // Free independently-owned waiting keys (from addAfter/scheduleAfter).
         // Keys from scheduleRateLimited are owned by the failures map and freed below.
-        while (self.heap.count() > 0) {
-            const item = self.heap.remove();
+        while (self.heap.pop()) |item| {
             if (item.owned) {
                 freeKey(self.allocator, item.key);
             }
         }
-        self.heap.deinit();
+        self.heap.deinit(self.allocator);
         self.waiting_keys.deinit(self.allocator);
 
         // Free keys in failures map.
@@ -128,7 +127,7 @@ pub const BackoffScheduler = struct {
     /// retry_policy + overall_limiter, adds to heap + waiting_keys.
     /// Increments counter only after all fallible ops succeed. Rolls back
     /// on OOM.
-    pub fn scheduleRateLimited(self: *BackoffScheduler, key: ObjectKey) error{ OutOfMemory, Overflow, ClockUnavailable }!void {
+    pub fn scheduleRateLimited(self: *BackoffScheduler, io: std.Io, key: ObjectKey) error{ OutOfMemory, Overflow, ClockUnavailable }!void {
         // Look up (or create) the failure counter entry, but don't
         // increment yet; we only bump the counter after all fallible
         // operations below succeed, so OOM can't leave it inflated.
@@ -159,10 +158,10 @@ pub const BackoffScheduler = struct {
         }
 
         const attempt = gop.value_ptr.*;
-        const backoff_ns = self.retry_policy.backoffWithJitterNs(attempt);
-        const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve() else 0;
+        const backoff_ns = self.retry_policy.backoffWithJitterNs(io, attempt);
+        const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve(io) else 0;
         const delay_ns = @max(backoff_ns, bucket_delay_ns);
-        const now = time_util.monotonicNowNs(self.epoch) catch {
+        const now = time_util.monotonicNowNs(io, self.epoch) catch {
             if (is_new_entry) {
                 freeKey(self.allocator, gop.key_ptr.*);
                 self.failures.removeByPtr(gop.key_ptr);
@@ -185,7 +184,7 @@ pub const BackoffScheduler = struct {
         };
 
         // Insert into waiting heap (min-heap by not_before).
-        self.heap.add(.{
+        self.heap.push(self.allocator, .{
             .key = failures_key,
             .not_before = not_before,
             .owned = false,
@@ -205,7 +204,7 @@ pub const BackoffScheduler = struct {
     /// Schedule a key after a fixed delay without touching the failure
     /// counter. Clones key (owned=true), checks dedup, checks capacity,
     /// adds to heap + waiting_keys atomically.
-    pub fn scheduleAfter(self: *BackoffScheduler, key: ObjectKey, delay_ns: u64) error{ OutOfMemory, Overflow, ClockUnavailable }!void {
+    pub fn scheduleAfter(self: *BackoffScheduler, io: std.Io, key: ObjectKey, delay_ns: u64) error{ OutOfMemory, Overflow, ClockUnavailable }!void {
         // Skip if already waiting to avoid duplicate heap entries.
         if (self.waiting_keys.contains(key)) return;
 
@@ -213,7 +212,7 @@ pub const BackoffScheduler = struct {
         if (self.heap.count() >= self.max_size) return error.Overflow;
 
         const owned_key = cloneKey(self.allocator, key) catch return error.OutOfMemory;
-        const now = time_util.monotonicNowNs(self.epoch) catch {
+        const now = time_util.monotonicNowNs(io, self.epoch) catch {
             freeKey(self.allocator, owned_key);
             return error.ClockUnavailable;
         };
@@ -224,7 +223,7 @@ pub const BackoffScheduler = struct {
             return error.OutOfMemory;
         };
 
-        self.heap.add(.{ .key = owned_key, .not_before = not_before, .owned = true }) catch {
+        self.heap.push(self.allocator, .{ .key = owned_key, .not_before = not_before, .owned = true }) catch {
             _ = self.waiting_keys.remove(owned_key);
             freeKey(self.allocator, owned_key);
             return error.OutOfMemory;
@@ -234,7 +233,7 @@ pub const BackoffScheduler = struct {
     /// Scheduling logic for done(.backoff). Gets/creates failure entry,
     /// checks dedup, calculates backoff, adds to heap. Returns a result
     /// so WorkQueue can handle the key ownership.
-    pub fn scheduleBackoff(self: *BackoffScheduler, key: ObjectKey) ScheduleResult {
+    pub fn scheduleBackoff(self: *BackoffScheduler, io: std.Io, key: ObjectKey) ScheduleResult {
         // Get or create the failure counter entry.
         const gop = self.failures.getOrPut(self.allocator, key) catch return .oom;
         const is_new_entry = !gop.found_existing;
@@ -262,10 +261,10 @@ pub const BackoffScheduler = struct {
         }
 
         const attempt = gop.value_ptr.*;
-        const backoff_ns = self.retry_policy.backoffWithJitterNs(attempt);
-        const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve() else 0;
+        const backoff_ns = self.retry_policy.backoffWithJitterNs(io, attempt);
+        const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve(io) else 0;
         const delay_ns = @max(backoff_ns, bucket_delay_ns);
-        const now = time_util.monotonicNowNs(self.epoch) catch {
+        const now = time_util.monotonicNowNs(io, self.epoch) catch {
             if (is_new_entry) {
                 freeKey(self.allocator, gop.key_ptr.*);
                 self.failures.removeByPtr(gop.key_ptr);
@@ -284,7 +283,7 @@ pub const BackoffScheduler = struct {
             return .oom;
         };
 
-        self.heap.add(.{
+        self.heap.push(self.allocator, .{
             .key = failures_key,
             .not_before = not_before,
             .owned = false,
@@ -304,17 +303,17 @@ pub const BackoffScheduler = struct {
 
     /// Scheduling logic for done(.requeue_after) with delay > 0. Adds key
     /// to heap with owned=true. Returns result for WorkQueue to handle.
-    pub fn scheduleRequeueAfter(self: *BackoffScheduler, key: ObjectKey, delay_ns: u64) ScheduleResult {
+    pub fn scheduleRequeueAfter(self: *BackoffScheduler, io: std.Io, key: ObjectKey, delay_ns: u64) ScheduleResult {
         if (self.waiting_keys.contains(key)) return .already_waiting;
 
         if (self.heap.count() >= self.max_size) return .full;
 
-        const now = time_util.monotonicNowNs(self.epoch) catch return .clock_unavailable;
+        const now = time_util.monotonicNowNs(io, self.epoch) catch return .clock_unavailable;
         const not_before = now +| delay_ns;
 
         self.waiting_keys.put(self.allocator, key, {}) catch return .oom;
 
-        self.heap.add(.{ .key = key, .not_before = not_before, .owned = true }) catch {
+        self.heap.push(self.allocator, .{ .key = key, .not_before = not_before, .owned = true }) catch {
             _ = self.waiting_keys.remove(key);
             return .oom;
         };
@@ -376,7 +375,7 @@ pub const BackoffScheduler = struct {
         while (drained < buf.len) {
             const earliest = self.heap.peek() orelse break;
             if (earliest.not_before > now) break;
-            const item = self.heap.remove();
+            const item = self.heap.pop().?;
             _ = self.waiting_keys.remove(item.key);
             buf[drained] = item;
             drained += 1;
@@ -386,8 +385,8 @@ pub const BackoffScheduler = struct {
 
     /// Re-insert an item into the waiting heap with a short retry delay.
     /// Used by WorkQueue.promoteExpiredWaiting on clone OOM.
-    pub fn reinsertWithDelay(self: *BackoffScheduler, item: WaitingItem, delay_ns: u64) void {
-        const now = time_util.monotonicNowNs(self.epoch) catch {
+    pub fn reinsertWithDelay(self: *BackoffScheduler, io: std.Io, item: WaitingItem, delay_ns: u64) void {
+        const now = time_util.monotonicNowNs(io, self.epoch) catch {
             self.logger.warn("reinsertWithDelay: clock unavailable, item dropped", &.{});
             if (self.failures.fetchRemove(item.key)) |fkv| {
                 freeKey(self.allocator, fkv.key);
@@ -401,7 +400,7 @@ pub const BackoffScheduler = struct {
             }
             return;
         };
-        self.heap.add(.{
+        self.heap.push(self.allocator, .{
             .key = item.key,
             .not_before = now +| delay_ns,
             .owned = false,
@@ -468,8 +467,8 @@ fn makeScheduler(allocator: std.mem.Allocator, opts: struct {
     },
     overall_rate_limit: RateLimiter.Config = RateLimiter.Config.disabled,
 }) BackoffScheduler {
-    const epoch = std.time.Instant.now() catch @panic("monotonic clock required");
-    return BackoffScheduler.init(allocator, epoch, .{
+    const epoch: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+    return BackoffScheduler.init(allocator, std.testing.io, epoch, .{
         .max_size = opts.max_size,
         .retry_policy = opts.retry_policy,
         .overall_rate_limit = opts.overall_rate_limit,
@@ -486,9 +485,9 @@ test "BackoffScheduler: scheduleRateLimited increments failure count" {
 
     // Assert
     try testing.expectEqual(@as(u32, 0), s.numRequeues(key));
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 1), s.numRequeues(key));
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 2), s.numRequeues(key));
 }
 
@@ -499,8 +498,8 @@ test "BackoffScheduler: forget resets failure count" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleRateLimited(key);
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
+    try s.scheduleRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 2), s.numRequeues(key));
 
     // Assert
@@ -515,9 +514,9 @@ test "BackoffScheduler: scheduleRateLimited deduplicates waiting entries" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleRateLimited(key);
-    try s.scheduleRateLimited(key);
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
+    try s.scheduleRateLimited(std.testing.io, key);
+    try s.scheduleRateLimited(std.testing.io, key);
 
     // Assert
     try testing.expectEqual(@as(u32, 3), s.numRequeues(key));
@@ -531,9 +530,9 @@ test "BackoffScheduler: scheduleAfter deduplicates waiting entries" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleAfter(key, 50 * std.time.ns_per_ms);
-    try s.scheduleAfter(key, 50 * std.time.ns_per_ms);
-    try s.scheduleAfter(key, 50 * std.time.ns_per_ms);
+    try s.scheduleAfter(std.testing.io, key, 50 * std.time.ns_per_ms);
+    try s.scheduleAfter(std.testing.io, key, 50 * std.time.ns_per_ms);
+    try s.scheduleAfter(std.testing.io, key, 50 * std.time.ns_per_ms);
 
     // Assert
     try testing.expectEqual(@as(usize, 1), s.count());
@@ -545,11 +544,11 @@ test "BackoffScheduler: scheduleRateLimited respects max_size" {
     defer s.deinit();
 
     // Act
-    try s.scheduleRateLimited(.{ .namespace = "ns", .name = "a" });
-    try s.scheduleRateLimited(.{ .namespace = "ns", .name = "b" });
+    try s.scheduleRateLimited(std.testing.io, .{ .namespace = "ns", .name = "a" });
+    try s.scheduleRateLimited(std.testing.io, .{ .namespace = "ns", .name = "b" });
 
     // Assert
-    try testing.expectError(error.Overflow, s.scheduleRateLimited(.{ .namespace = "ns", .name = "c" }));
+    try testing.expectError(error.Overflow, s.scheduleRateLimited(std.testing.io, .{ .namespace = "ns", .name = "c" }));
 
     try testing.expectEqual(@as(u32, 1), s.numRequeues(.{ .namespace = "ns", .name = "a" }));
     try testing.expectEqual(@as(u32, 1), s.numRequeues(.{ .namespace = "ns", .name = "b" }));
@@ -563,10 +562,10 @@ test "BackoffScheduler: scheduleAfter respects max_size" {
     defer s.deinit();
 
     // Act
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "a" }, 50 * std.time.ns_per_ms);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "a" }, 50 * std.time.ns_per_ms);
 
     // Assert
-    try testing.expectError(error.Overflow, s.scheduleAfter(.{ .namespace = "ns", .name = "b" }, 50 * std.time.ns_per_ms));
+    try testing.expectError(error.Overflow, s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "b" }, 50 * std.time.ns_per_ms));
 }
 
 test "BackoffScheduler: scheduleAfter does not touch failure counter" {
@@ -576,11 +575,11 @@ test "BackoffScheduler: scheduleAfter does not touch failure counter" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 1), s.numRequeues(key));
 
     // Assert
-    try s.scheduleAfter(key, 1);
+    try s.scheduleAfter(std.testing.io, key, 1);
     try testing.expectEqual(@as(u32, 1), s.numRequeues(key));
 }
 
@@ -600,14 +599,14 @@ test "BackoffScheduler: overall limiter max semantics with backoff" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
 
     // Assert
     // Bucket delay is ~0 (burst available), but per-key backoff is 500ms.
     // The item should be in the heap but not yet expired.
     try testing.expectEqual(@as(usize, 1), s.count());
     var buf: [1]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(s.epoch);
+    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 0), expired.len);
 }
@@ -619,16 +618,16 @@ test "BackoffScheduler: drainExpired returns expired items in order" {
 
     // Act
     // Schedule items with increasing delays.
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "a" }, 1);
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "b" }, 2);
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "c" }, 3);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "a" }, 1);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "b" }, 2);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "c" }, 3);
 
     // Wait long enough for all to expire.
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // Assert
     var buf: [10]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(s.epoch);
+    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 3), expired.len);
     try testing.expectEqualStrings("a", expired[0].key.name);
@@ -647,15 +646,15 @@ test "BackoffScheduler: drainExpired respects batch limit" {
     defer s.deinit();
 
     // Act
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "a" }, 1);
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "b" }, 2);
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "c" }, 3);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "a" }, 1);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "b" }, 2);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "c" }, 3);
 
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
 
     // Assert
     var buf: [2]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(s.epoch);
+    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 2), expired.len);
 
@@ -676,7 +675,7 @@ test "BackoffScheduler: OOM rollback in scheduleRateLimited" {
 
     // Act
     // First call succeeds (allocates failures entry + waiting_keys + heap).
-    try s.scheduleRateLimited(.{ .namespace = "ns", .name = "a" });
+    try s.scheduleRateLimited(std.testing.io, .{ .namespace = "ns", .name = "a" });
     try testing.expectEqual(@as(u32, 1), s.numRequeues(.{ .namespace = "ns", .name = "a" }));
 
     // Assert
@@ -684,7 +683,7 @@ test "BackoffScheduler: OOM rollback in scheduleRateLimited" {
     fa.fail_index = fa.alloc_index;
     fa.resize_fail_index = fa.resize_index;
 
-    try testing.expectError(error.OutOfMemory, s.scheduleRateLimited(.{ .namespace = "ns", .name = "new-key" }));
+    try testing.expectError(error.OutOfMemory, s.scheduleRateLimited(std.testing.io, .{ .namespace = "ns", .name = "new-key" }));
 
     // Restore allocator.
     fa.fail_index = std.math.maxInt(usize);
@@ -701,14 +700,14 @@ test "BackoffScheduler: OOM rollback in scheduleAfter" {
     defer s.deinit();
 
     // Act
-    try s.scheduleAfter(.{ .namespace = "ns", .name = "a" }, 100 * std.time.ns_per_ms);
+    try s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "a" }, 100 * std.time.ns_per_ms);
     try testing.expectEqual(@as(usize, 1), s.count());
 
     // Assert
     fa.fail_index = fa.alloc_index;
     fa.resize_fail_index = fa.resize_index;
 
-    try testing.expectError(error.OutOfMemory, s.scheduleAfter(.{ .namespace = "ns", .name = "new-key" }, 100 * std.time.ns_per_ms));
+    try testing.expectError(error.OutOfMemory, s.scheduleAfter(std.testing.io, .{ .namespace = "ns", .name = "new-key" }, 100 * std.time.ns_per_ms));
 
     fa.fail_index = std.math.maxInt(usize);
     fa.resize_fail_index = std.math.maxInt(usize);
@@ -723,13 +722,13 @@ test "BackoffScheduler: cleanupOrphan removes entry when not in waiting" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 1), s.numRequeues(key));
 
     // Drain the item from waiting so it's no longer in waiting_keys.
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
     var buf: [1]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(s.epoch);
+    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 1), expired.len);
 
@@ -753,7 +752,7 @@ test "BackoffScheduler: cleanupOrphan preserves entry when in waiting" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try s.scheduleRateLimited(key);
+    try s.scheduleRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 1), s.numRequeues(key));
 
     // Assert

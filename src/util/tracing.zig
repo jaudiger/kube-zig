@@ -17,9 +17,9 @@ pub const TraceId = struct {
     pub const zero: TraceId = .{ .bytes = .{0} ** 16 };
 
     /// Generate a random trace ID using the system CSPRNG.
-    pub fn generate() TraceId {
+    pub fn generate(io: std.Io) TraceId {
         var id: TraceId = undefined;
-        std.crypto.random.bytes(&id.bytes);
+        io.random(&id.bytes);
         return id;
     }
 
@@ -52,9 +52,9 @@ pub const SpanId = struct {
     pub const zero: SpanId = .{ .bytes = .{0} ** 8 };
 
     /// Generate a random span ID using the system CSPRNG.
-    pub fn generate() SpanId {
+    pub fn generate(io: std.Io) SpanId {
         var id: SpanId = undefined;
-        std.crypto.random.bytes(&id.bytes);
+        io.random(&id.bytes);
         return id;
     }
 
@@ -273,19 +273,19 @@ fn hexVal(c: u8) ?u4 {
 
 test "TraceId: generate produces non-zero ID" {
     // Act / Assert
-    const id = TraceId.generate();
+    const id = TraceId.generate(std.testing.io);
     try testing.expect(!id.isZero());
 }
 
 test "SpanId: generate produces non-zero ID" {
     // Act / Assert
-    const id = SpanId.generate();
+    const id = SpanId.generate(std.testing.io);
     try testing.expect(!id.isZero());
 }
 
 test "TraceId: format/parse roundtrip" {
     // Act / Assert
-    const id = TraceId.generate();
+    const id = TraceId.generate(std.testing.io);
     var buf: [32]u8 = undefined;
     id.toHex(&buf);
     const parsed = TraceId.parse(&buf).?;
@@ -294,7 +294,7 @@ test "TraceId: format/parse roundtrip" {
 
 test "SpanId: format/parse roundtrip" {
     // Act / Assert
-    const id = SpanId.generate();
+    const id = SpanId.generate(std.testing.io);
     var buf: [16]u8 = undefined;
     id.toHex(&buf);
     const parsed = SpanId.parse(&buf).?;
@@ -316,8 +316,8 @@ test "SpanId: parse rejects invalid hex" {
 test "SpanContext: isValid and isSampled" {
     // Arrange
     const sc = SpanContext{
-        .trace_id = TraceId.generate(),
-        .span_id = SpanId.generate(),
+        .trace_id = TraceId.generate(std.testing.io),
+        .span_id = SpanId.generate(std.testing.io),
         .trace_flags = SpanContext.sampled_flag,
     };
     try testing.expect(sc.isValid());
@@ -331,8 +331,8 @@ test "SpanContext: isValid and isSampled" {
 test "formatTraceparent/parseTraceparent roundtrip" {
     // Arrange
     const sc = SpanContext{
-        .trace_id = TraceId.generate(),
-        .span_id = SpanId.generate(),
+        .trace_id = TraceId.generate(std.testing.io),
+        .span_id = SpanId.generate(std.testing.io),
         .trace_flags = SpanContext.sampled_flag,
     };
     var buf: [55]u8 = undefined;
@@ -406,8 +406,8 @@ test "custom TracerProvider receives calls" {
             self.last_name = name;
             self.last_kind = kind;
             return .{
-                .trace_id = TraceId.generate(),
-                .span_id = SpanId.generate(),
+                .trace_id = TraceId.generate(std.testing.io),
+                .span_id = SpanId.generate(std.testing.io),
                 .trace_flags = SpanContext.sampled_flag,
             };
         }

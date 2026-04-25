@@ -87,19 +87,21 @@ pub fn removeFinalizer(metadata: anytype, finalizer: []const u8) bool {
 /// Retries automatically on 409 Conflict (resourceVersion mismatch).
 pub fn ensureFinalizer(
     comptime T: type,
+    io: std.Io,
     api: Api_mod.Api(T),
     allocator: Allocator,
     name: []const u8,
     finalizer: []const u8,
 ) anyerror!void {
     const Ctx = struct {
+        io: std.Io,
         api: Api_mod.Api(T),
         allocator: Allocator,
         name: []const u8,
         finalizer: []const u8,
 
         fn action(self: @This()) anyerror!void {
-            const result = try self.api.get(self.name);
+            const result = try self.api.get(self.io, self.name);
             var resource = try result.value();
             defer resource.deinit();
 
@@ -108,7 +110,7 @@ pub fn ensureFinalizer(
                     const added = try addFinalizer(meta_ptr, self.allocator, self.finalizer);
                     if (added) {
                         defer self.allocator.free(meta_ptr.finalizers.?);
-                        const update_result = try self.api.update(self.name, resource.value, .{});
+                        const update_result = try self.api.update(self.io, self.name, resource.value, .{});
                         (try update_result.value()).deinit();
                     }
                 }
@@ -116,8 +118,9 @@ pub fn ensureFinalizer(
         }
     };
     try retry_conflict.retryOnConflict(
+        io,
         Ctx,
-        .{ .api = api, .allocator = allocator, .name = name, .finalizer = finalizer },
+        .{ .io = io, .api = api, .allocator = allocator, .name = name, .finalizer = finalizer },
         Ctx.action,
         retry_conflict.default_conflict_policy,
         api.ctx,
@@ -128,31 +131,34 @@ pub fn ensureFinalizer(
 /// Retries automatically on 409 Conflict (resourceVersion mismatch).
 pub fn removeFinalizerAndUpdate(
     comptime T: type,
+    io: std.Io,
     api: Api_mod.Api(T),
     name: []const u8,
     finalizer: []const u8,
 ) anyerror!void {
     const Ctx = struct {
+        io: std.Io,
         api: Api_mod.Api(T),
         name: []const u8,
         finalizer: []const u8,
 
         fn action(self: @This()) anyerror!void {
-            const result = try self.api.get(self.name);
+            const result = try self.api.get(self.io, self.name);
             var resource = try result.value();
             defer resource.deinit();
 
             if (resource.value.metadata) |*meta_ptr| {
                 if (removeFinalizer(meta_ptr, self.finalizer)) {
-                    const update_result = try self.api.update(self.name, resource.value, .{});
+                    const update_result = try self.api.update(self.io, self.name, resource.value, .{});
                     (try update_result.value()).deinit();
                 }
             }
         }
     };
     try retry_conflict.retryOnConflict(
+        io,
         Ctx,
-        .{ .api = api, .name = name, .finalizer = finalizer },
+        .{ .io = io, .api = api, .name = name, .finalizer = finalizer },
         Ctx.action,
         retry_conflict.default_conflict_policy,
         api.ctx,

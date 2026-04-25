@@ -16,7 +16,7 @@ const testing = std.testing;
 /// Validate that a resource name is non-empty and contains no slashes.
 /// Return `error.InvalidResourceName` if validation fails.
 pub fn validateName(name: []const u8) !void {
-    if (name.len == 0 or std.mem.indexOfScalar(u8, name, '/') != null) {
+    if (name.len == 0 or std.mem.findScalar(u8, name, '/') != null) {
         return error.InvalidResourceName;
     }
 }
@@ -43,8 +43,15 @@ pub fn appendWatchQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opt
     }
     if (opts.timeout_seconds) |ts| {
         try buf.appendSlice(alloc, "&timeoutSeconds=");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{ts});
+        try appendInt(buf, alloc, ts);
     }
+}
+
+/// Append a base-10 integer to the buffer.
+fn appendInt(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, value: anytype) !void {
+    var int_buf: [32]u8 = undefined;
+    const slice = std.fmt.bufPrint(&int_buf, "{d}", .{value}) catch unreachable;
+    try buf.appendSlice(alloc, slice);
 }
 
 /// Append an ampersand separator (if needed) and the parameter key.
@@ -91,7 +98,7 @@ pub fn appendListQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts
 
     if (opts.limit) |n| {
         try appendParamKey(buf, alloc, &need_amp, "limit=");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+        try appendInt(buf, alloc, n);
     }
 
     if (opts.continue_token) |ct| {
@@ -101,7 +108,7 @@ pub fn appendListQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts
 
     if (opts.timeout_seconds) |ts| {
         try appendParamKey(buf, alloc, &need_amp, "timeoutSeconds=");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{ts});
+        try appendInt(buf, alloc, ts);
     }
 }
 
@@ -165,12 +172,12 @@ pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts:
 
     if (opts.tail_lines) |n| {
         try appendParamKey(buf, alloc, &need_amp, "tailLines=");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+        try appendInt(buf, alloc, n);
     }
 
     if (opts.since_seconds) |n| {
         try appendParamKey(buf, alloc, &need_amp, "sinceSeconds=");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+        try appendInt(buf, alloc, n);
     }
 
     if (opts.timestamps) |t| {
@@ -185,7 +192,7 @@ pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts:
 
     if (opts.limit_bytes) |n| {
         try appendParamKey(buf, alloc, &need_amp, "limitBytes=");
-        try std.fmt.format(buf.writer(alloc), "{d}", .{n});
+        try appendInt(buf, alloc, n);
     }
 }
 
@@ -212,7 +219,7 @@ pub fn serializeDeleteOpts(alloc: std.mem.Allocator, opts: DeleteOptions) !?[]co
         opts.precondition_uid == null and
         opts.precondition_resource_version == null) return null;
 
-    var out: std.io.Writer.Allocating = .init(alloc);
+    var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
     const w = &out.writer;
 
