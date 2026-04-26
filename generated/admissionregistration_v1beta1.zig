@@ -19,23 +19,23 @@ pub const AdmissionregistrationV1beta1JSONPatch = struct {
 
 /// MatchCondition represents a condition which must be fulfilled for a request to be sent to a webhook.
 pub const AdmissionregistrationV1beta1MatchCondition = struct {
-    /// Expression represents the expression which will be evaluated by CEL. Must evaluate to bool. CEL expressions have access to the contents of the AdmissionRequest and Authorizer, organized into CEL variables:
+    /// expression represents the expression which will be evaluated by CEL. Must evaluate to bool. CEL expressions have access to the contents of the AdmissionRequest and Authorizer, organized into CEL variables:
     expression: []const u8,
-    /// Name is an identifier for this match condition, used for strategic merging of MatchConditions, as well as providing an identifier for logging purposes. A good name should be descriptive of the associated expression. Name must be a qualified name consisting of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]') with an optional DNS subdomain prefix and '/' (e.g. 'example.com/MyName')
+    /// name is an identifier for this match condition, used for strategic merging of MatchConditions, as well as providing an identifier for logging purposes. A good name should be descriptive of the associated expression. Name must be a qualified name consisting of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character (e.g. 'MyName',  or 'my.name',  or '123-abc', regex used for validation is '([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9]') with an optional DNS subdomain prefix and '/' (e.g. 'example.com/MyName')
     name: []const u8,
 };
 
 /// MatchResources decides whether to run the admission control policy on an object based on whether it meets the match criteria. The exclude rules take precedence over include rules (if a resource matches both, it is excluded)
 pub const AdmissionregistrationV1beta1MatchResources = struct {
-    /// ExcludeResourceRules describes what operations on what resources/subresources the ValidatingAdmissionPolicy should not care about. The exclude rules take precedence over include rules (if a resource matches both, it is excluded)
+    /// excludeResourceRules describes what operations on what resources/subresources the ValidatingAdmissionPolicy should not care about. The exclude rules take precedence over include rules (if a resource matches both, it is excluded)
     excludeResourceRules: ?[]const AdmissionregistrationV1beta1NamedRuleWithOperations = null,
     /// matchPolicy defines how the "MatchResources" list is used to match incoming requests. Allowed values are "Exact" or "Equivalent".
     matchPolicy: ?[]const u8 = null,
-    /// NamespaceSelector decides whether to run the admission control policy on an object based on whether the namespace for that object matches the selector. If the object itself is a namespace, the matching is performed on object.metadata.labels. If the object is another cluster scoped resource, it never skips the policy.
+    /// namespaceSelector decides whether to run the admission control policy on an object based on whether the namespace for that object matches the selector. If the object itself is a namespace, the matching is performed on object.metadata.labels. If the object is another cluster scoped resource, it never skips the policy.
     namespaceSelector: ?meta_v1.MetaV1LabelSelector = null,
-    /// ObjectSelector decides whether to run the validation based on if the object has matching labels. objectSelector is evaluated against both the oldObject and newObject that would be sent to the cel validation, and is considered to match if either object matches the selector. A null object (oldObject in the case of create, or newObject in the case of delete) or an object that cannot have labels (like a DeploymentRollback or a PodProxyOptions object) is not considered to match. Use the object selector only if the webhook is opt-in, because end users may skip the admission webhook by setting the labels. Default to the empty LabelSelector, which matches everything.
+    /// objectSelector decides whether to run the validation based on if the object has matching labels. objectSelector is evaluated against both the oldObject and newObject that would be sent to the cel validation, and is considered to match if either object matches the selector. A null object (oldObject in the case of create, or newObject in the case of delete) or an object that cannot have labels (like a DeploymentRollback or a PodProxyOptions object) is not considered to match. Use the object selector only if the webhook is opt-in, because end users may skip the admission webhook by setting the labels. Default to the empty LabelSelector, which matches everything.
     objectSelector: ?meta_v1.MetaV1LabelSelector = null,
-    /// ResourceRules describes what operations on what resources/subresources the ValidatingAdmissionPolicy matches. The policy cares about an operation if it matches _any_ Rule.
+    /// resourceRules describes what operations on what resources/subresources the ValidatingAdmissionPolicy matches. The policy cares about an operation if it matches _any_ Rule.
     resourceRules: ?[]const AdmissionregistrationV1beta1NamedRuleWithOperations = null,
 };
 
@@ -54,9 +54,9 @@ pub const AdmissionregistrationV1beta1MutatingAdmissionPolicy = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object metadata; More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata.
+    /// metadata is the standard object metadata; More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata.
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
-    /// Specification of the desired behavior of the MutatingAdmissionPolicy.
+    /// spec defines the desired behavior of the MutatingAdmissionPolicy.
     spec: ?AdmissionregistrationV1beta1MutatingAdmissionPolicySpec = null,
 };
 
@@ -75,9 +75,9 @@ pub const AdmissionregistrationV1beta1MutatingAdmissionPolicyBinding = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object metadata; More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata.
+    /// metadata is the standard object metadata; More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata.
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
-    /// Specification of the desired behavior of the MutatingAdmissionPolicyBinding.
+    /// spec defines the desired behavior of the MutatingAdmissionPolicyBinding.
     spec: ?AdmissionregistrationV1beta1MutatingAdmissionPolicyBindingSpec = null,
 };
 
@@ -89,7 +89,7 @@ pub const AdmissionregistrationV1beta1MutatingAdmissionPolicyBindingList = struc
     items: []const AdmissionregistrationV1beta1MutatingAdmissionPolicyBinding,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard list metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+    /// metadata is the standard list metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     metadata: ?meta_v1.MetaV1ListMeta = null,
 };
 
@@ -111,7 +111,7 @@ pub const AdmissionregistrationV1beta1MutatingAdmissionPolicyList = struct {
     items: []const AdmissionregistrationV1beta1MutatingAdmissionPolicy,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard list metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+    /// metadata is the standard list metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     metadata: ?meta_v1.MetaV1ListMeta = null,
 };
 
@@ -145,15 +145,15 @@ pub const AdmissionregistrationV1beta1Mutation = struct {
 
 /// NamedRuleWithOperations is a tuple of Operations and Resources with ResourceNames.
 pub const AdmissionregistrationV1beta1NamedRuleWithOperations = struct {
-    /// APIGroups is the API groups the resources belong to. '*' is all groups. If '*' is present, the length of the slice must be one. Required.
+    /// apiGroups is the API groups the resources belong to. '*' is all groups. If '*' is present, the length of the slice must be one. Required.
     apiGroups: ?[]const []const u8 = null,
-    /// APIVersions is the API versions the resources belong to. '*' is all versions. If '*' is present, the length of the slice must be one. Required.
+    /// apiVersions is the API versions the resources belong to. '*' is all versions. If '*' is present, the length of the slice must be one. Required.
     apiVersions: ?[]const []const u8 = null,
-    /// Operations is the operations the admission hook cares about - CREATE, UPDATE, DELETE, CONNECT or * for all of those operations and any future admission operations that are added. If '*' is present, the length of the slice must be one. Required.
+    /// operations is the operations the admission hook cares about - CREATE, UPDATE, DELETE, CONNECT or * for all of those operations and any future admission operations that are added. If '*' is present, the length of the slice must be one. Required.
     operations: ?[]const []const u8 = null,
-    /// ResourceNames is an optional white list of names that the rule applies to.  An empty set means that everything is allowed.
+    /// resourceNames is an optional white list of names that the rule applies to.  An empty set means that everything is allowed.
     resourceNames: ?[]const []const u8 = null,
-    /// Resources is a list of resources this rule applies to.
+    /// resources is a list of resources this rule applies to.
     resources: ?[]const []const u8 = null,
     /// scope specifies the scope of this rule. Valid values are "Cluster", "Namespaced", and "*" "Cluster" means that only cluster-scoped resources will match this rule. Namespace API objects are cluster-scoped. "Namespaced" means that only namespaced resources will match this rule. "*" means that there are no scope restrictions. Subresources match the scope of their parent resource. Default is "*".
     scope: ?[]const u8 = null,
@@ -161,9 +161,9 @@ pub const AdmissionregistrationV1beta1NamedRuleWithOperations = struct {
 
 /// ParamKind is a tuple of Group Kind and Version.
 pub const AdmissionregistrationV1beta1ParamKind = struct {
-    /// APIVersion is the API group version the resources belong to. In format of "group/version". Required.
+    /// apiVersion is the API group version the resources belong to. In format of "group/version". Required.
     apiVersion: ?[]const u8 = null,
-    /// Kind is the API kind the resources belong to. Required.
+    /// kind is the API kind the resources belong to. Required.
     kind: ?[]const u8 = null,
 };
 
@@ -173,7 +173,7 @@ pub const AdmissionregistrationV1beta1ParamRef = struct {
     name: ?[]const u8 = null,
     /// namespace is the namespace of the referenced resource. Allows limiting the search for params to a specific namespace. Applies to both `name` and `selector` fields.
     namespace: ?[]const u8 = null,
-    /// `parameterNotFoundAction` controls the behavior of the binding when the resource exists, and name or selector is valid, but there are no parameters matched by the binding. If the value is set to `Allow`, then no matched parameters will be treated as successful validation by the binding. If set to `Deny`, then no matched parameters will be subject to the `failurePolicy` of the policy.
+    /// parameterNotFoundAction controls the behavior of the binding when the resource exists, and name or selector is valid, but there are no parameters matched by the binding. If the value is set to `Allow`, then no matched parameters will be treated as successful validation by the binding. If set to `Deny`, then no matched parameters will be subject to the `failurePolicy` of the policy.
     parameterNotFoundAction: ?[]const u8 = null,
     /// selector can be used to match multiple param objects based on their labels. Supply selector: {} to match all resources of the ParamKind.
     selector: ?meta_v1.MetaV1LabelSelector = null,
@@ -181,8 +181,8 @@ pub const AdmissionregistrationV1beta1ParamRef = struct {
 
 /// Variable is the definition of a variable that is used for composition. A variable is defined as a named expression.
 pub const AdmissionregistrationV1beta1Variable = struct {
-    /// Expression is the expression that will be evaluated as the value of the variable. The CEL expression has access to the same identifiers as the CEL expressions in Validation.
+    /// expression is the expression that will be evaluated as the value of the variable. The CEL expression has access to the same identifiers as the CEL expressions in Validation.
     expression: []const u8,
-    /// Name is the name of the variable. The name must be a valid CEL identifier and unique among all variables. The variable can be accessed in other expressions through `variables` For example, if name is "foo", the variable will be available as `variables.foo`
+    /// name is the name of the variable. The name must be a valid CEL identifier and unique among all variables. The variable can be accessed in other expressions through `variables` For example, if name is "foo", the variable will be available as `variables.foo`
     name: []const u8,
 };

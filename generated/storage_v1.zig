@@ -50,6 +50,8 @@ pub const StorageV1CSIDriverSpec = struct {
     nodeAllocatableUpdatePeriodSeconds: ?i64 = null,
     /// podInfoOnMount indicates this CSI volume driver requires additional pod information (like podName, podUID, etc.) during mount operations, if set to true. If set to false, pod information will not be passed on mount. Default is false.
     podInfoOnMount: ?bool = null,
+    /// PreventPodSchedulingIfMissing indicates that the CSI driver wants to prevent pod scheduling if the CSI driver on the node is missing.
+    preventPodSchedulingIfMissing: ?bool = null,
     /// requiresRepublish indicates the CSI driver wants `NodePublishVolume` being periodically called to reflect any possible change in the mounted volume. This field defaults to false.
     requiresRepublish: ?bool = null,
     /// seLinuxMount specifies if the CSI driver supports "-o context" mount option.
