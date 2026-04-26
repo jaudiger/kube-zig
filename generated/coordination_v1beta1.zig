@@ -23,7 +23,7 @@ pub const CoordinationV1beta1LeaseCandidate = struct {
     /// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec contains the specification of the Lease. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?CoordinationV1beta1LeaseCandidateSpec = null,
+    spec: CoordinationV1beta1LeaseCandidateSpec,
 };
 
 /// LeaseCandidateList is a list of Lease objects.

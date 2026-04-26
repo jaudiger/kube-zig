@@ -1047,6 +1047,12 @@ pub const CoreV1ImageVolumeSource = struct {
     reference: ?[]const u8 = null,
 };
 
+/// ImageVolumeStatus represents the image-based volume status.
+pub const CoreV1ImageVolumeStatus = struct {
+    /// ImageRef is the digest of the image used for this volume. It should have a value that's similar to the pod's status.containerStatuses[i].imageID. The ImageRef length should not exceed 256 characters.
+    imageRef: []const u8,
+};
+
 /// Maps a string key to a path within a volume.
 pub const CoreV1KeyToPath = struct {
     /// key is the key to project.
@@ -1294,6 +1300,16 @@ pub const CoreV1NodeAffinity = struct {
     preferredDuringSchedulingIgnoredDuringExecution: ?[]const CoreV1PreferredSchedulingTerm = null,
     /// If the affinity requirements specified by this field are not met at scheduling time, the pod will not be scheduled onto the node. If the affinity requirements specified by this field cease to be met at some point during pod execution (e.g. due to an update), the system may or may not try to eventually evict the pod from its node.
     requiredDuringSchedulingIgnoredDuringExecution: ?CoreV1NodeSelector = null,
+};
+
+/// NodeAllocatableResourceClaimStatus describes the status of node allocatable resources allocated via DRA.
+pub const CoreV1NodeAllocatableResourceClaimStatus = struct {
+    /// Containers lists the names of all containers in this pod that reference the claim.
+    containers: ?[]const []const u8 = null,
+    /// ResourceClaimName is the resource claim referenced by the pod that resulted in this node allocatable resource allocation.
+    resourceClaimName: []const u8,
+    /// Resources is a map of the node-allocatable resource name to the aggregate quantity allocated to the claim.
+    resources: json.ArrayHashMap(api_resource.ApiResourceQuantity),
 };
 
 /// NodeCondition contains condition information for a node.
@@ -1692,7 +1708,7 @@ pub const CoreV1PersistentVolumeSpec = struct {
     persistentVolumeReclaimPolicy: ?[]const u8 = null,
     /// photonPersistentDisk represents a PhotonController persistent disk attached and mounted on kubelets host machine. Deprecated: PhotonPersistentDisk is deprecated and the in-tree photonPersistentDisk type is no longer supported.
     photonPersistentDisk: ?CoreV1PhotonPersistentDiskVolumeSource = null,
-    /// portworxVolume represents a portworx volume attached and mounted on kubelets host machine. Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate is on.
+    /// portworxVolume represents a portworx volume attached and mounted on kubelets host machine. Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type are redirected to the pxd.portworx.com CSI driver.
     portworxVolume: ?CoreV1PortworxVolumeSource = null,
     /// quobyte represents a Quobyte mount on the host that shares a pod's lifetime. Deprecated: Quobyte is deprecated and the in-tree quobyte type is no longer supported.
     quobyte: ?CoreV1QuobyteVolumeSource = null,
@@ -1813,7 +1829,7 @@ pub const CoreV1PodCondition = struct {
     lastTransitionTime: ?meta_v1.MetaV1Time = null,
     /// Human-readable message indicating details about last transition.
     message: ?[]const u8 = null,
-    /// If set, this represents the .metadata.generation that the pod condition was set based upon. The PodObservedGenerationTracking feature gate must be enabled to use this field.
+    /// If set, this represents the .metadata.generation that the pod condition was set based upon.
     observedGeneration: ?i64 = null,
     /// Unique, one-word, CamelCase reason for the condition's last transition.
     reason: ?[]const u8 = null,
@@ -1893,7 +1909,7 @@ pub const CoreV1PodResourceClaim = struct {
 pub const CoreV1PodResourceClaimStatus = struct {
     /// Name uniquely identifies this resource claim inside the pod. This must match the name of an entry in pod.spec.resourceClaims, which implies that the string must be a DNS_LABEL.
     name: []const u8,
-    /// ResourceClaimName is the name of the ResourceClaim that was generated for the Pod in the namespace of the Pod. If this is unset, then generating a ResourceClaim was not necessary. The pod.spec.resourceClaims entry can be ignored in this case.
+    /// ResourceClaimName is the name of the ResourceClaim that was generated for the Pod in the namespace of the Pod.
     resourceClaimName: ?[]const u8 = null,
 };
 
@@ -1901,6 +1917,12 @@ pub const CoreV1PodResourceClaimStatus = struct {
 pub const CoreV1PodSchedulingGate = struct {
     /// Name of the scheduling gate. Each scheduling gate must have a unique name field.
     name: []const u8,
+};
+
+/// PodSchedulingGroup identifies the runtime scheduling group instance that a Pod belongs to. The scheduler uses this information to apply workload-aware scheduling semantics. Exactly one field must be specified.
+pub const CoreV1PodSchedulingGroup = struct {
+    /// PodGroupName specifies the name of the standalone PodGroup object that represents the runtime instance of this group. Must be a DNS subdomain.
+    podGroupName: ?[]const u8 = null,
 };
 
 /// PodSecurityContext holds pod-level security attributes and common container settings. Some fields are also present in container.securityContext.  Field values of container.securityContext take precedence over field values of PodSecurityContext.
@@ -1959,7 +1981,7 @@ pub const CoreV1PodSpec = struct {
     hostNetwork: ?bool = null,
     /// Use the host's pid namespace. Optional: Default to false.
     hostPID: ?bool = null,
-    /// Use the host's user namespace. Optional: Default to true. If set to true or not present, the pod will be run in the host user namespace, useful for when the pod needs a feature only available to the host user namespace, such as loading a kernel module with CAP_SYS_MODULE. When set to false, a new userns is created for the pod. Setting false is useful for mitigating container breakout vulnerabilities even allowing users to run their containers as root without actually having root privileges on the host. This field is alpha-level and is only honored by servers that enable the UserNamespacesSupport feature.
+    /// Use the host's user namespace. Optional: Default to true. If set to true or not present, the pod will be run in the host user namespace, useful for when the pod needs a feature only available to the host user namespace, such as loading a kernel module with CAP_SYS_MODULE. When set to false, a new userns is created for the pod. Setting false is useful for mitigating container breakout vulnerabilities even allowing users to run their containers as root without actually having root privileges on the host.
     hostUsers: ?bool = null,
     /// Specifies the hostname of the Pod If not specified, the pod's hostname will be set to a system-defined value.
     hostname: ?[]const u8 = null,
@@ -1997,6 +2019,8 @@ pub const CoreV1PodSpec = struct {
     schedulerName: ?[]const u8 = null,
     /// SchedulingGates is an opaque list of values that if specified will block scheduling the pod. If schedulingGates is not empty, the pod will stay in the SchedulingGated state and the scheduler will not attempt to schedule the pod.
     schedulingGates: ?[]const CoreV1PodSchedulingGate = null,
+    /// SchedulingGroup provides a reference to the immediate scheduling runtime grouping object that this Pod belongs to. This field is used by the scheduler to identify the group and apply the correct group scheduling policies. The association with a group also impacts other lifecycle aspects of a Pod that are relevant in a wider context of scheduling like preemption, resource attachment, etc. If not specified, the Pod is treated as a single unit in all of these aspects. The group object referenced by this field may not exist at the time the Pod is created. This field is immutable, but a group object with the same name may be recreated with different policies. Doing this during pod scheduling may result in the placement not conforming to the expected policies.
+    schedulingGroup: ?CoreV1PodSchedulingGroup = null,
     /// SecurityContext holds pod-level security attributes and common container settings. Optional: Defaults to empty.  See type description for default values of each field.
     securityContext: ?CoreV1PodSecurityContext = null,
     /// DeprecatedServiceAccount is a deprecated alias for ServiceAccountName. Deprecated: Use serviceAccountName instead.
@@ -2017,8 +2041,6 @@ pub const CoreV1PodSpec = struct {
     topologySpreadConstraints: ?[]const CoreV1TopologySpreadConstraint = null,
     /// List of volumes that can be mounted by containers belonging to the pod. More info: https://kubernetes.io/docs/concepts/storage/volumes
     volumes: ?[]const CoreV1Volume = null,
-    /// WorkloadRef provides a reference to the Workload object that this Pod belongs to. This field is used by the scheduler to identify the PodGroup and apply the correct group scheduling policies. The Workload object referenced by this field may not exist at the time the Pod is created. This field is immutable, but a Workload object with the same name may be recreated with different policies. Doing this during pod scheduling may result in the placement not conforming to the expected policies.
-    workloadRef: ?CoreV1WorkloadReference = null,
 };
 
 /// PodStatus represents information about the status of a pod. Status may trail the actual state of a system, especially if the node that hosts the pod cannot contact the control plane.
@@ -2041,6 +2063,8 @@ pub const CoreV1PodStatus = struct {
     initContainerStatuses: ?[]const CoreV1ContainerStatus = null,
     /// A human readable message indicating details about why the pod is in this condition.
     message: ?[]const u8 = null,
+    /// NodeAllocatableResourceClaimStatuses contains the status of node-allocatable resources that were allocated for this pod through DRA claims. This includes resources currently reported in v1.Node `status.allocatable` that are not extended resources (see https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#extended-resources). Examples include "cpu", "memory", "ephemeral-storage", and hugepages.
+    nodeAllocatableResourceClaimStatuses: ?[]const CoreV1NodeAllocatableResourceClaimStatus = null,
     /// nominatedNodeName is set only when this pod preempts other pods on the node, but it cannot be scheduled right away as preemption victims receive their graceful termination periods. This field does not guarantee that the pod will be scheduled on this node. Scheduler may decide to place the pod elsewhere if other nodes become available sooner. Scheduler may also decide to give the resources on this node to a higher priority pod that is created after preemption. As a result, this field may be different than PodSpec.nodeName when the pod is scheduled.
     nominatedNodeName: ?[]const u8 = null,
     /// If set, this represents the .metadata.generation that the pod status was set based upon. The PodObservedGenerationTracking feature gate must be enabled to use this field.
@@ -2321,6 +2345,8 @@ pub const CoreV1ResourceFieldSelector = struct {
 pub const CoreV1ResourceHealth = struct {
     /// Health of the resource. can be one of:
     health: ?[]const u8 = null,
+    /// Message provides human-readable context for Health (e.g. "ECC error count exceeded threshold"). This field is populated by the kubelet when ResourceHealthStatusMessage is enabled if the DRA plugin returns a message, and is null otherwise.
+    message: ?[]const u8 = null,
     /// ResourceID is the unique identifier of the resource. See the ResourceID type for more information.
     resourceID: []const u8,
 };
@@ -2577,7 +2603,7 @@ pub const CoreV1SecurityContext = struct {
     capabilities: ?CoreV1Capabilities = null,
     /// Run container in privileged mode. Processes in privileged containers are essentially equivalent to root on the host. Defaults to false. Note that this field cannot be set when spec.os.name is windows.
     privileged: ?bool = null,
-    /// procMount denotes the type of proc mount to use for the containers. The default value is Default which uses the container runtime defaults for readonly paths and masked paths. This requires the ProcMountType feature flag to be enabled. Note that this field cannot be set when spec.os.name is windows.
+    /// procMount denotes the type of proc mount to use for the containers. The default value is Default which uses the container runtime defaults for readonly paths and masked paths. Note that this field cannot be set when spec.os.name is windows.
     procMount: ?[]const u8 = null,
     /// Whether this container has a read-only root filesystem. Default is false. Note that this field cannot be set when spec.os.name is windows.
     readOnlyRootFilesystem: ?bool = null,
@@ -2931,7 +2957,7 @@ pub const CoreV1Volume = struct {
     persistentVolumeClaim: ?CoreV1PersistentVolumeClaimVolumeSource = null,
     /// photonPersistentDisk represents a PhotonController persistent disk attached and mounted on kubelets host machine. Deprecated: PhotonPersistentDisk is deprecated and the in-tree photonPersistentDisk type is no longer supported.
     photonPersistentDisk: ?CoreV1PhotonPersistentDiskVolumeSource = null,
-    /// portworxVolume represents a portworx volume attached and mounted on kubelets host machine. Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate is on.
+    /// portworxVolume represents a portworx volume attached and mounted on kubelets host machine. Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type are redirected to the pxd.portworx.com CSI driver.
     portworxVolume: ?CoreV1PortworxVolumeSource = null,
     /// projected items for all in one resources secrets, configmaps, and downward API
     projected: ?CoreV1ProjectedVolumeSource = null,
@@ -2985,6 +3011,8 @@ pub const CoreV1VolumeMountStatus = struct {
     readOnly: ?bool = null,
     /// RecursiveReadOnly must be set to Disabled, Enabled, or unspecified (for non-readonly mounts). An IfPossible value in the original VolumeMount must be translated to Disabled or Enabled, depending on the mount result.
     recursiveReadOnly: ?[]const u8 = null,
+    /// volumeStatus represents volume-type-specific status about the mounted volume.
+    volumeStatus: ?CoreV1VolumeStatus = null,
 };
 
 /// VolumeNodeAffinity defines constraints that limit what nodes this volume can be accessed from.
@@ -3017,6 +3045,12 @@ pub const CoreV1VolumeResourceRequirements = struct {
     requests: ?json.ArrayHashMap(api_resource.ApiResourceQuantity) = null,
 };
 
+/// VolumeStatus represents the status of a mounted volume. At most one of its members must be specified.
+pub const CoreV1VolumeStatus = struct {
+    /// image represents an OCI object (a container image or artifact) pulled and mounted on the kubelet's host machine.
+    image: ?CoreV1ImageVolumeStatus = null,
+};
+
 /// Represents a vSphere volume resource.
 pub const CoreV1VsphereVirtualDiskVolumeSource = struct {
     /// fsType is filesystem type to mount. Must be a filesystem type supported by the host operating system. Ex. "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified.
@@ -3047,14 +3081,4 @@ pub const CoreV1WindowsSecurityContextOptions = struct {
     hostProcess: ?bool = null,
     /// The UserName in Windows to run the entrypoint of the container process. Defaults to the user specified in image metadata if unspecified. May also be set in PodSecurityContext. If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
     runAsUserName: ?[]const u8 = null,
-};
-
-/// WorkloadReference identifies the Workload object and PodGroup membership that a Pod belongs to. The scheduler uses this information to apply workload-aware scheduling semantics.
-pub const CoreV1WorkloadReference = struct {
-    /// Name defines the name of the Workload object this Pod belongs to. Workload must be in the same namespace as the Pod. If it doesn't match any existing Workload, the Pod will remain unschedulable until a Workload object is created and observed by the kube-scheduler. It must be a DNS subdomain.
-    name: []const u8,
-    /// PodGroup is the name of the PodGroup within the Workload that this Pod belongs to. If it doesn't match any existing PodGroup within the Workload, the Pod will remain unschedulable until the Workload object is recreated and observed by the kube-scheduler. It must be a DNS label.
-    podGroup: []const u8,
-    /// PodGroupReplicaKey specifies the replica key of the PodGroup to which this Pod belongs. It is used to distinguish pods belonging to different replicas of the same pod group. The pod group policy is applied separately to each replica. When set, it must be a DNS label.
-    podGroupReplicaKey: ?[]const u8 = null,
 };

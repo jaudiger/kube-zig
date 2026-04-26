@@ -24,7 +24,7 @@ pub const BatchV1CronJob = struct {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Specification of the desired behavior of a cron job, including the schedule. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?BatchV1CronJobSpec = null,
+    spec: BatchV1CronJobSpec,
     /// Current status of a cron job. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     status: ?BatchV1CronJobStatus = null,
 };
