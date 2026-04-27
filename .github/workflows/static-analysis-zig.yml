@@ -1,26 +1,24 @@
-name: Continuous Integration - Tests
+name: Continuous Integration - Static Analysis (Zig)
 
 on:
   push:
     paths:
-      - ".github/workflows/tests.yml"
+      - ".github/workflows/static-analysis-zig.yml"
       - "**/*.zig"
       - "build.zig.zon"
-      - "test/fixtures/**"
   pull_request:
     paths:
-      - ".github/workflows/tests.yml"
+      - ".github/workflows/static-analysis-zig.yml"
       - "**/*.zig"
       - "build.zig.zon"
-      - "test/fixtures/**"
   workflow_dispatch:
 
 concurrency:
-  group: tests-${{ github.ref_name }}
+  group: static-analysis-zig-${{ github.ref_name }}
   cancel-in-progress: true
 
 jobs:
-  zig-unit-tests:
+  zig-lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,5 +29,8 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Run tests
-        run: zig build test
+      - name: Check formatting
+        run: zig fmt --check .
+
+      - name: Build
+        run: zig build
