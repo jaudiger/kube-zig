@@ -1,4 +1,4 @@
-name: Continuous Integration - GitHub Actions
+name: Continuous Integration - Static Analysis (GitHub Actions)
 
 on:
   push:
@@ -14,6 +14,6 @@ on:
 # Do not include a 'concurrency' block, the one used will come from the callee workflow
 
 jobs:
-  static-analysis:
-    uses: jaudiger/reusable-workflows/.github/workflows/github-actions.yml@a726b827a64dfa2fcb36519c71ec4c80ae3f1659
+  github-actions-lint:
+    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-github-actions.yml@17d014bb569a31fe51a5ccc9e756d61977d41a62
     secrets: inherit
