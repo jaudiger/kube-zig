@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  zig-lint:
+  zig-format:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,5 +32,16 @@ jobs:
       - name: Check formatting
         run: zig fmt --check .
 
-      - name: Build
-        run: zig build
+  zig-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+
+      - name: Check linting
+        run: find . -type f \( -name '*.zig' -o -name '*.zon' \) -print0 | xargs -0 -n1 zig ast-check
