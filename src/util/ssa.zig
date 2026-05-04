@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const http = std.http;
-const KubeStatus = @import("../client/Client.zig").Client.KubeStatus;
+const KubeStatus = @import("../root.zig").KubeStatus;
 const testing = std.testing;
 
 /// Information extracted from an SSA conflict error response.

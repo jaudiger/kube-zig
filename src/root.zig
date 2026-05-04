@@ -8,8 +8,16 @@
 //! defer client.deinit();
 //!
 //! const pods = kube_zig.Api(kube_zig.types.CoreV1Pod).init(&client, client.context(), "default");
-//! const list = try (try pods.list(.{})).value();
-//! defer list.deinit();
+//! switch ((try pods.list(.{})).unwrap()) {
+//!     .ok => |list| {
+//!         defer list.deinit();
+//!         // use list.value
+//!     },
+//!     .failure => |*f| {
+//!         defer f.deinit();
+//!         return f.statusError();
+//!     },
+//! }
 //! ```
 //!
 //! In-cluster mode (HTTPS + service-account token):
@@ -23,8 +31,16 @@
 //! defer client.deinit();
 //!
 //! const pods = kube_zig.Api(kube_zig.types.CoreV1Pod).init(&client, client.context(), config.namespace);
-//! const list = try (try pods.list(.{})).value();
-//! defer list.deinit();
+//! switch ((try pods.list(.{})).unwrap()) {
+//!     .ok => |list| {
+//!         defer list.deinit();
+//!         // use list.value
+//!     },
+//!     .failure => |*f| {
+//!         defer f.deinit();
+//!         return f.statusError();
+//!     },
+//! }
 //! ```
 
 const client_mod = @import("client/Client.zig");
@@ -42,6 +58,12 @@ pub const ParseError = Client.ParseError;
 pub const RequestError = Client.RequestError;
 pub const ApiErrorResponse = Client.ApiErrorResponse;
 pub const ApiResult = Client.ApiResult;
+pub const ApiFailure = Client.ApiFailure;
+pub const UnwrapResult = Client.UnwrapResult;
+pub const KubeStatus = Client.KubeStatus;
+pub const KubeStatusDetails = Client.KubeStatusDetails;
+pub const KubeStatusCause = Client.KubeStatusCause;
+pub const statusToError = Client.statusToError;
 pub const FlowControl = @import("client/flow_control.zig").FlowControl;
 pub const PoolStats = client_mod.PoolStats;
 

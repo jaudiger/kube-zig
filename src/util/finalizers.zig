@@ -102,7 +102,14 @@ pub fn ensureFinalizer(
 
         fn action(self: @This()) anyerror!void {
             const result = try self.api.get(self.io, self.name);
-            var resource = try result.value();
+            var get_unwrapped = result.unwrap();
+            var resource = switch (get_unwrapped) {
+                .ok => |p| p,
+                .failure => |*f| {
+                    defer f.deinit();
+                    return f.statusError();
+                },
+            };
             defer resource.deinit();
 
             if (resource.value.metadata) |*meta_ptr| {
@@ -111,7 +118,14 @@ pub fn ensureFinalizer(
                     if (added) {
                         defer self.allocator.free(meta_ptr.finalizers.?);
                         const update_result = try self.api.update(self.io, self.name, resource.value, .{});
-                        (try update_result.value()).deinit();
+                        var update_unwrapped = update_result.unwrap();
+                        switch (update_unwrapped) {
+                            .ok => |p| p.deinit(),
+                            .failure => |*f| {
+                                defer f.deinit();
+                                return f.statusError();
+                            },
+                        }
                     }
                 }
             }
@@ -144,13 +158,27 @@ pub fn removeFinalizerAndUpdate(
 
         fn action(self: @This()) anyerror!void {
             const result = try self.api.get(self.io, self.name);
-            var resource = try result.value();
+            var get_unwrapped = result.unwrap();
+            var resource = switch (get_unwrapped) {
+                .ok => |p| p,
+                .failure => |*f| {
+                    defer f.deinit();
+                    return f.statusError();
+                },
+            };
             defer resource.deinit();
 
             if (resource.value.metadata) |*meta_ptr| {
                 if (removeFinalizer(meta_ptr, self.finalizer)) {
                     const update_result = try self.api.update(self.io, self.name, resource.value, .{});
-                    (try update_result.value()).deinit();
+                    var update_unwrapped = update_result.unwrap();
+                    switch (update_unwrapped) {
+                        .ok => |p| p.deinit(),
+                        .failure => |*f| {
+                            defer f.deinit();
+                            return f.statusError();
+                        },
+                    }
                 }
             }
         }

@@ -75,9 +75,14 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  Failed to apply deployment: {}\n", .{err});
         return;
     };
-    const dep_parsed = dep_result.value() catch |err| {
-        try w.print("  Failed to apply deployment: {}\n", .{err});
-        return;
+    var dep_unwrapped = dep_result.unwrap();
+    const dep_parsed = switch (dep_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  Failed to apply deployment: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            return;
+        },
     };
     defer dep_parsed.deinit();
 
@@ -108,10 +113,15 @@ pub fn main(init: std.process.Init) !void {
         deleteResource(DeployApi, deployments, io, "Deployment", w);
         return;
     };
-    const svc_parsed = svc_result.value() catch |err| {
-        try w.print("  Failed to apply service: {}\n", .{err});
-        deleteResource(DeployApi, deployments, io, "Deployment", w);
-        return;
+    var svc_unwrapped = svc_result.unwrap();
+    const svc_parsed = switch (svc_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  Failed to apply service: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            deleteResource(DeployApi, deployments, io, "Deployment", w);
+            return;
+        },
     };
     defer svc_parsed.deinit();
 
@@ -127,10 +137,15 @@ pub fn main(init: std.process.Init) !void {
         cleanupAll(deployments, services, io, w);
         return;
     };
-    const dep_get = dep_get_result.value() catch |err| {
-        try w.print("  Failed to get deployment: {}\n", .{err});
-        cleanupAll(deployments, services, io, w);
-        return;
+    var dep_get_unwrapped = dep_get_result.unwrap();
+    const dep_get = switch (dep_get_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  Failed to get deployment: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            cleanupAll(deployments, services, io, w);
+            return;
+        },
     };
     defer dep_get.deinit();
 
@@ -143,10 +158,15 @@ pub fn main(init: std.process.Init) !void {
         cleanupAll(deployments, services, io, w);
         return;
     };
-    const svc_get = svc_get_result.value() catch |err| {
-        try w.print("  Failed to get service: {}\n", .{err});
-        cleanupAll(deployments, services, io, w);
-        return;
+    var svc_get_unwrapped = svc_get_result.unwrap();
+    const svc_get = switch (svc_get_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  Failed to get service: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            cleanupAll(deployments, services, io, w);
+            return;
+        },
     };
     defer svc_get.deinit();
 

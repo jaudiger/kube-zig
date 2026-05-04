@@ -244,7 +244,8 @@ pub const DiscoveryClient = struct {
         if (self.options.cache_ttl_ns == 0) {
             // Caching disabled: fetch, populate cache for current call, return.
             const result = try self.apiGroups(io);
-            switch (result) {
+            var unwrapped = result.unwrap();
+            switch (unwrapped) {
                 .ok => |parsed| {
                     self.mu.lockUncancelable(io);
                     defer self.mu.unlock(io);
@@ -255,9 +256,13 @@ pub const DiscoveryClient = struct {
                     };
                     return;
                 },
-                .api_error => |e| {
-                    defer e.deinit();
-                    return e.statusError();
+                .failure => |*f| {
+                    defer f.deinit();
+                    self.client.logger.warn("apiGroups discovery api error", &.{
+                        LogField.string("status", @tagName(f.status)),
+                        LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                    });
+                    return f.statusError();
                 },
             }
         }
@@ -273,7 +278,8 @@ pub const DiscoveryClient = struct {
 
         // Cache miss or expired: fetch without lock.
         const result = try self.apiGroups(io);
-        switch (result) {
+        var unwrapped = result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| {
                 self.mu.lockUncancelable(io);
                 defer self.mu.unlock(io);
@@ -283,9 +289,13 @@ pub const DiscoveryClient = struct {
                     .fetched_at = .now(io, .awake),
                 };
             },
-            .api_error => |e| {
-                defer e.deinit();
-                return e.statusError();
+            .failure => |*f| {
+                defer f.deinit();
+                self.client.logger.warn("apiGroups discovery api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
+                return f.statusError();
             },
         }
     }
@@ -297,7 +307,8 @@ pub const DiscoveryClient = struct {
         if (self.options.cache_ttl_ns == 0) {
             // Caching disabled: fetch, populate, return.
             const result = try self.fetchResources(io, group, version);
-            switch (result) {
+            var unwrapped = result.unwrap();
+            switch (unwrapped) {
                 .ok => |parsed| {
                     self.mu.lockUncancelable(io);
                     defer self.mu.unlock(io);
@@ -317,10 +328,16 @@ pub const DiscoveryClient = struct {
                     };
                     return .cached;
                 },
-                .api_error => |e| {
-                    defer e.deinit();
-                    if (e.status == .not_found) return .not_found;
-                    return e.statusError();
+                .failure => |*f| {
+                    defer f.deinit();
+                    if (f.status == .not_found) return .not_found;
+                    self.client.logger.warn("group resources discovery api error", &.{
+                        LogField.string("group", group),
+                        LogField.string("version", version),
+                        LogField.string("status", @tagName(f.status)),
+                        LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                    });
+                    return f.statusError();
                 },
             }
         }
@@ -336,7 +353,8 @@ pub const DiscoveryClient = struct {
 
         // Cache miss or expired: fetch without lock.
         const result = try self.fetchResources(io, group, version);
-        switch (result) {
+        var unwrapped = result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| {
                 self.mu.lockUncancelable(io);
                 defer self.mu.unlock(io);
@@ -356,10 +374,16 @@ pub const DiscoveryClient = struct {
                 };
                 return .cached;
             },
-            .api_error => |e| {
-                defer e.deinit();
-                if (e.status == .not_found) return .not_found;
-                return e.statusError();
+            .failure => |*f| {
+                defer f.deinit();
+                if (f.status == .not_found) return .not_found;
+                self.client.logger.warn("group resources discovery api error", &.{
+                    LogField.string("group", group),
+                    LogField.string("version", version),
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
+                return f.statusError();
             },
         }
     }

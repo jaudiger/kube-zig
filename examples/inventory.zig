@@ -116,10 +116,20 @@ fn queryAndCollect(
         entry.failed = true;
         return;
     };
-    const parsed = result.value() catch |err| {
-        logger.err("failed to parse response", &.{ kube_zig.LogField.string("kind", entry.kind), kube_zig.LogField.err("error", err) });
-        entry.failed = true;
-        return;
+    var unwrapped = result.unwrap();
+    const parsed = switch (unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            const status_msg = if (f.statusObj()) |s| (s.message orelse "") else "";
+            logger.err("api error listing resources", &.{
+                kube_zig.LogField.string("kind", entry.kind),
+                kube_zig.LogField.err("error", f.statusError()),
+                kube_zig.LogField.string("message", status_msg),
+            });
+            entry.failed = true;
+            return;
+        },
     };
     defer parsed.deinit();
 

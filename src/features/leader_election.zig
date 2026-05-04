@@ -290,7 +290,8 @@ pub const LeaderElector = struct {
             return .err;
         };
 
-        switch (get_result) {
+        var unwrapped = get_result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| {
                 // Lease exists.
                 defer parsed.deinit();
@@ -333,12 +334,16 @@ pub const LeaderElector = struct {
                 // Expired or no holder; take over.
                 return self.updateLeaseTakeover(io, lease.spec, rv, now_str);
             },
-            .api_error => |api_err| {
-                defer api_err.deinit();
-                if (api_err.status == .not_found) {
+            .failure => |*f| {
+                defer f.deinit();
+                if (f.status == .not_found) {
                     // 404: create a new lease.
                     return self.createLease(io, now_str);
                 }
+                self.config.logger.warn("get lease api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
                 return .err;
             },
         }
@@ -373,7 +378,8 @@ pub const LeaderElector = struct {
             return .err;
         };
 
-        switch (create_result) {
+        var unwrapped = create_result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
                 const rv = if (parsed.value.metadata) |m| m.resourceVersion else null;
@@ -383,8 +389,12 @@ pub const LeaderElector = struct {
                 self.observed_renew_time = .now(io, .awake);
                 return .acquired;
             },
-            .api_error => |api_err| {
-                api_err.deinit();
+            .failure => |*f| {
+                defer f.deinit();
+                self.config.logger.warn("create lease api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
                 return .err;
             },
         }
@@ -423,7 +433,8 @@ pub const LeaderElector = struct {
             return .err;
         };
 
-        switch (update_result) {
+        var unwrapped = update_result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
                 const new_rv = if (parsed.value.metadata) |m| m.resourceVersion else null;
@@ -433,8 +444,12 @@ pub const LeaderElector = struct {
                 self.observed_renew_time = .now(io, .awake);
                 return .renewed;
             },
-            .api_error => |api_err| {
-                api_err.deinit();
+            .failure => |*f| {
+                defer f.deinit();
+                self.config.logger.warn("update lease api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
                 return .err;
             },
         }
@@ -478,7 +493,8 @@ pub const LeaderElector = struct {
             return .err;
         };
 
-        switch (update_result) {
+        var unwrapped = update_result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
                 const new_rv = if (parsed.value.metadata) |m| m.resourceVersion else null;
@@ -488,8 +504,12 @@ pub const LeaderElector = struct {
                 self.observed_renew_time = .now(io, .awake);
                 return .acquired;
             },
-            .api_error => |api_err| {
-                api_err.deinit();
+            .failure => |*f| {
+                defer f.deinit();
+                self.config.logger.warn("takeover lease api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
                 return .err;
             },
         }
@@ -506,7 +526,8 @@ pub const LeaderElector = struct {
 
         const get_result = api.get(self.config.lease_name) catch return;
 
-        switch (get_result) {
+        var get_unwrapped = get_result.unwrap();
+        switch (get_unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
                 const lease = parsed.value;
@@ -531,13 +552,24 @@ pub const LeaderElector = struct {
                 };
 
                 const update_result = api.update(self.config.lease_name, release_body, .{}) catch return;
-                switch (update_result) {
+                var update_unwrapped = update_result.unwrap();
+                switch (update_unwrapped) {
                     .ok => |p| p.deinit(),
-                    .api_error => |e| e.deinit(),
+                    .failure => |*f| {
+                        defer f.deinit();
+                        self.config.logger.warn("release lease api error", &.{
+                            LogField.string("status", @tagName(f.status)),
+                            LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                        });
+                    },
                 }
             },
-            .api_error => |api_err| {
-                api_err.deinit();
+            .failure => |*f| {
+                defer f.deinit();
+                self.config.logger.warn("release lease get api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
+                });
             },
         }
     }

@@ -639,11 +639,33 @@ pub const Client = struct {
     /// API-level errors (4xx/5xx) are returned via `ApiResult` rather than this set.
     pub const RequestError = TransportError || ParseError || error{ Canceled, CircuitBreakerOpen };
 
+    /// One entry of the Kubernetes Status `details.causes` array.
+    pub const KubeStatusCause = struct {
+        field: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+        reason: ?[]const u8 = null,
+    };
+
+    /// Server-supplied details on a Kubernetes Status failure.
+    /// Carries the resource UID/kind/group/name, the per-field validation causes,
+    /// and the optional retry-after hint used for 409 resourceVersion conflicts.
+    pub const KubeStatusDetails = struct {
+        causes: ?[]const KubeStatusCause = null,
+        group: ?[]const u8 = null,
+        kind: ?[]const u8 = null,
+        name: ?[]const u8 = null,
+        retryAfterSeconds: ?i32 = null,
+        uid: ?[]const u8 = null,
+    };
+
     /// Minimal Kubernetes Status object for error response parsing.
+    /// Contains the fields callers typically need to surface webhook
+    /// rejections, validation messages, and resourceVersion conflict hints.
     pub const KubeStatus = struct {
         message: ?[]const u8 = null,
         reason: ?[]const u8 = null,
         code: ?i32 = null,
+        details: ?KubeStatusDetails = null,
     };
 
     /// Captured API error response with HTTP status and body.
@@ -671,27 +693,77 @@ pub const Client = struct {
         }
     };
 
+    /// Owning failure value produced by `ApiResult(T).unwrap()`.
+    /// Carries the HTTP status, the raw response body, and an eagerly parsed
+    /// `KubeStatus` (when the body deserialized successfully). The caller
+    /// owns the body and the parsed Status arena and must call `deinit`.
+    pub const ApiFailure = struct {
+        status: http.Status,
+        body: []const u8,
+        parsed: ?std.json.Parsed(KubeStatus),
+        allocator: std.mem.Allocator,
+
+        /// Map the HTTP status to an `ApiRequestError`.
+        pub fn statusError(self: ApiFailure) ApiRequestError {
+            return statusToError(self.status);
+        }
+
+        /// Return the parsed Kubernetes Status object, or null if the body
+        /// was not a Status JSON.
+        pub fn statusObj(self: ApiFailure) ?KubeStatus {
+            return if (self.parsed) |p| p.value else null;
+        }
+
+        /// Free the body and the parsed Status arena.
+        pub fn deinit(self: *ApiFailure) void {
+            if (self.parsed) |p| p.deinit();
+            self.allocator.free(self.body);
+        }
+    };
+
+    /// Result of `ApiResult(T).unwrap()`. The caller owns the active arm
+    /// and must call its `deinit` (`v.deinit()` on `.ok`, `f.deinit()` on `.failure`).
+    pub fn UnwrapResult(comptime T: type) type {
+        return union(enum) {
+            ok: T,
+            failure: ApiFailure,
+        };
+    }
+
     /// Result type for API operations. On success, contains the parsed value.
     /// On API-level error (4xx/5xx), contains the error response details.
+    ///
+    /// Callers extract the value via `unwrap`, which produces an owning
+    /// `UnwrapResult(T)` whose failure arm carries the parsed Kubernetes
+    /// Status object so admission webhook rejections, validation messages,
+    /// and 409 resourceVersion hints survive the error path.
     pub fn ApiResult(comptime T: type) type {
         return union(enum) {
             ok: T,
             api_error: ApiErrorResponse,
 
-            /// Extract the success value, returning an `ApiRequestError` on API errors.
-            /// On error, the error response is freed automatically.
-            pub fn value(self: @This()) ApiRequestError!T {
+            /// Consume the result and return an owning `UnwrapResult(T)`.
+            /// On `.ok` the caller takes ownership of the success value.
+            /// On `.failure` the caller takes ownership of an `ApiFailure`
+            /// that carries the eagerly parsed Kubernetes Status.
+            ///
+            /// Do NOT call `deinit` on the original result after `unwrap`;
+            /// ownership transfers to the returned arm.
+            pub fn unwrap(self: @This()) UnwrapResult(T) {
                 switch (self) {
-                    .ok => |v| return v,
-                    .api_error => |e| {
-                        const err = e.statusError();
-                        e.deinit();
-                        return err;
-                    },
+                    .ok => |v| return .{ .ok = v },
+                    .api_error => |e| return .{ .failure = .{
+                        .status = e.status,
+                        .body = e.body,
+                        .parsed = e.parseStatus(),
+                        .allocator = e.allocator,
+                    } },
                 }
             }
 
-            /// Release the underlying success value or error response.
+            /// Release every resource owned by this result.
+            /// Call this only when both arms are being discarded; otherwise
+            /// use `unwrap` and `deinit` the returned arm.
             pub fn deinit(self: @This()) void {
                 switch (self) {
                     .ok => |v| v.deinit(),
@@ -1617,4 +1689,28 @@ test "TransportResponse.deinit: frees untaken body and flow-control" {
     resp.deinit();
 
     // Assert: no leak (testing.allocator detects leaks)
+}
+
+test "ApiResult.unwrap: failure arm preserves status, body, and parsed Status with details" {
+    // Arrange
+    const body = try testing.allocator.dupe(u8,
+        \\{"kind":"Status","status":"Failure","message":"admission webhook denied the request","reason":"Forbidden","code":403,"details":{"name":"my-pod","kind":"Pod","uid":"abc-123","causes":[{"field":"spec.containers[0].image","message":"image is required","reason":"FieldValueRequired"}]}}
+    );
+    const result: Client.ApiResult(struct {
+        pub fn deinit(_: @This()) void {}
+    }) = .{
+        .api_error = .{ .status = .forbidden, .body = body, .allocator = testing.allocator },
+    };
+
+    // Act
+    var unwrapped = result.unwrap();
+    defer unwrapped.failure.deinit();
+
+    // Assert
+    try testing.expectEqual(error.HttpForbidden, unwrapped.failure.statusError());
+    const status_obj = unwrapped.failure.statusObj().?;
+    try testing.expectEqualStrings("admission webhook denied the request", status_obj.message.?);
+    try testing.expectEqualStrings("Forbidden", status_obj.reason.?);
+    try testing.expectEqualStrings("abc-123", status_obj.details.?.uid.?);
+    try testing.expectEqualStrings("spec.containers[0].image", status_obj.details.?.causes.?[0].field.?);
 }

@@ -427,7 +427,14 @@ pub fn Api(comptime T: type) type {
                     try self.listAll(io, page_opts)
                 else
                     try self.list(io, page_opts);
-                const parsed = try api_result.value();
+                var unwrapped = api_result.unwrap();
+                const parsed = switch (unwrapped) {
+                    .ok => |p| p,
+                    .failure => |*f| {
+                        defer f.deinit();
+                        return f.statusError();
+                    },
+                };
                 defer parsed.deinit();
 
                 // Save resource version from the first page.

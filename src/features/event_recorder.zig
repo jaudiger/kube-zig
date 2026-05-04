@@ -145,9 +145,17 @@ pub const EventRecorder = struct {
 
         const api = EventApi.init(self.client, self.client.context(), effective_ns);
         const result = try api.create(io, ev, .{});
-        switch (result) {
+        var unwrapped = result.unwrap();
+        switch (unwrapped) {
             .ok => |parsed| parsed.deinit(),
-            .api_error => |err_resp| err_resp.deinit(),
+            .failure => |*f| {
+                defer f.deinit();
+                const status_msg = if (f.statusObj()) |s| (s.message orelse "") else "";
+                self.client.logger.warn("event creation api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", status_msg),
+                });
+            },
         }
     }
 };

@@ -63,9 +63,14 @@ pub fn main(init: std.process.Init) !void {
         try w.print("  Failed to create CronTab: {}\n", .{err});
         return;
     };
-    const created = create_result.value() catch |err| {
-        try w.print("  API error creating CronTab: {}\n", .{err});
-        return;
+    var create_unwrapped = create_result.unwrap();
+    const created = switch (create_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  API error creating CronTab: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            return;
+        },
     };
     defer created.deinit();
 
@@ -90,10 +95,15 @@ pub fn main(init: std.process.Init) !void {
         cleanup(crontabs, io, w);
         return;
     };
-    const list_parsed = list_result.value() catch |err| {
-        try w.print("  API error listing CronTabs: {}\n", .{err});
-        cleanup(crontabs, io, w);
-        return;
+    var list_unwrapped = list_result.unwrap();
+    const list_parsed = switch (list_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  API error listing CronTabs: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            cleanup(crontabs, io, w);
+            return;
+        },
     };
     defer list_parsed.deinit();
 
@@ -123,10 +133,15 @@ pub fn main(init: std.process.Init) !void {
         cleanup(crontabs, io, w);
         return;
     };
-    const fetched = get_result.value() catch |err| {
-        try w.print("  API error getting CronTab: {}\n", .{err});
-        cleanup(crontabs, io, w);
-        return;
+    var get_unwrapped = get_result.unwrap();
+    const fetched = switch (get_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  API error getting CronTab: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            cleanup(crontabs, io, w);
+            return;
+        },
     };
     defer fetched.deinit();
 
@@ -154,10 +169,15 @@ pub fn main(init: std.process.Init) !void {
         cleanup(crontabs, io, w);
         return;
     };
-    const patched = patch_result.value() catch |err| {
-        try w.print("  API error patching CronTab: {}\n", .{err});
-        cleanup(crontabs, io, w);
-        return;
+    var patch_unwrapped = patch_result.unwrap();
+    const patched = switch (patch_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("  API error patching CronTab: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            cleanup(crontabs, io, w);
+            return;
+        },
     };
     defer patched.deinit();
 

@@ -75,8 +75,10 @@ const ApplyOptions = options_mod.ApplyOptions;
 ///       .resource = "crontabs",
 ///       .namespaced = true,
 ///   }, "default");
-///   const list_result = try (try api.list(.{})).value();
-///   defer list_result.deinit();
+///   switch ((try api.list(.{})).unwrap()) {
+///       .ok => |list_result| { defer list_result.deinit(); },
+///       .failure => |*f| { defer f.deinit(); return f.statusError(); },
+///   }
 pub const DynamicApi = struct {
     client: *Client,
     ctx: Context,

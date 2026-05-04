@@ -15,6 +15,19 @@ const DiscoveryClient = kube_zig.DiscoveryClient;
 // Test helpers
 // ============================================================================
 
+/// Unwrap an ApiResult expecting success; on api_error, deinit the failure
+/// and return error.UnexpectedApiError so the test fails with a clear signal.
+fn expectOk(api_result: anytype) !@TypeOf(api_result.unwrap().ok) {
+    var unwrapped = api_result.unwrap();
+    return switch (unwrapped) {
+        .ok => |v| v,
+        .failure => |*f| {
+            defer f.deinit();
+            return error.UnexpectedApiError;
+        },
+    };
+}
+
 /// Minimal pod JSON for list responses.
 const pod_list_json =
     \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"100"},"items":[{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"99"}}]}
@@ -53,7 +66,7 @@ test "Api(CoreV1Pod).list: parses pod list from mock response" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try (try pods.list(std.testing.io, .{})).value();
+    const result = try expectOk(try pods.list(std.testing.io, .{}));
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), result.value.items.len);
@@ -74,7 +87,7 @@ test "Api(CoreV1Pod).get: parses single pod from mock response" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try (try pods.get(std.testing.io, "test-pod")).value();
+    const result = try expectOk(try pods.get(std.testing.io, "test-pod"));
     defer result.deinit();
 
     try testing.expectEqualStrings("test-pod", result.value.metadata.?.name.?);
@@ -98,7 +111,7 @@ test "Api(CoreV1Pod).create: sends POST with serialized body" {
         .metadata = .{ .name = "test-pod", .namespace = "default" },
     };
 
-    const result = try (try pods.create(std.testing.io, pod, .{})).value();
+    const result = try expectOk(try pods.create(std.testing.io, pod, .{}));
     defer result.deinit();
 
     try testing.expectEqual(@as(usize, 1), mock.requestCount());
@@ -150,7 +163,7 @@ test "Api(AppsV1Deployment).create: sends to correct named-group path" {
         .metadata = .{ .name = "test-deploy", .namespace = "default" },
     };
 
-    const result = try (try deploys.create(std.testing.io, deploy, .{})).value();
+    const result = try expectOk(try deploys.create(std.testing.io, deploy, .{}));
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -173,7 +186,7 @@ test "Api(CoreV1Node).get: cluster-scoped path has no namespace" {
 
     const nodes = Api(k8s.CoreV1Node).init(&c, c.context(), null);
 
-    const result = try (try nodes.get(std.testing.io, "node-1")).value();
+    const result = try expectOk(try nodes.get(std.testing.io, "node-1"));
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -321,7 +334,7 @@ test "Api(CoreV1Pod).list: label selector is included in request path" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const result = try (try pods.list(std.testing.io, .{ .label_selector = "app=nginx" })).value();
+    const result = try expectOk(try pods.list(std.testing.io, .{ .label_selector = "app=nginx" }));
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -345,7 +358,7 @@ test "Api(CoreV1Pod).update: sends PUT with body serializer" {
         .metadata = .{ .name = "test-pod", .namespace = "default", .resourceVersion = "99" },
     };
 
-    const result = try (try pods.update(std.testing.io, "test-pod", pod, .{})).value();
+    const result = try expectOk(try pods.update(std.testing.io, "test-pod", pod, .{}));
     defer result.deinit();
 
     const req = mock.getRequest(0).?;
@@ -370,10 +383,10 @@ test "Multiple requests are recorded in order" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    const list_result = try (try pods.list(std.testing.io, .{})).value();
+    const list_result = try expectOk(try pods.list(std.testing.io, .{}));
     defer list_result.deinit();
 
-    const get_result = try (try pods.get(std.testing.io, "test-pod")).value();
+    const get_result = try expectOk(try pods.get(std.testing.io, "test-pod"));
     defer get_result.deinit();
 
     const del_result = try pods.delete(std.testing.io, "test-pod", .{});
@@ -829,7 +842,7 @@ test "Api(CoreV1Pod).apply: sends PATCH with apply content type and core apiVers
     };
 
     // Act
-    const result = try (try pods.apply(std.testing.io, "test-pod", body, .{ .field_manager = "test" })).value();
+    const result = try expectOk(try pods.apply(std.testing.io, "test-pod", body, .{ .field_manager = "test" }));
     defer result.deinit();
 
     // Assert
@@ -857,7 +870,7 @@ test "Api(AppsV1Deployment).apply: named group has apiVersion apps/v1" {
     };
 
     // Act
-    const result = try (try deploys.apply(std.testing.io, "test-deploy", body, .{ .field_manager = "test" })).value();
+    const result = try expectOk(try deploys.apply(std.testing.io, "test-deploy", body, .{ .field_manager = "test" }));
     defer result.deinit();
 
     // Assert
@@ -900,7 +913,7 @@ test "DynamicApi.apply: sets apiVersion and kind on object body" {
     defer parsed.deinit();
 
     // Act
-    const result = try (try api.apply(std.testing.io, "test-deploy", parsed.value, .{ .field_manager = "test" })).value();
+    const result = try expectOk(try api.apply(std.testing.io, "test-deploy", parsed.value, .{ .field_manager = "test" }));
     defer result.deinit();
 
     // Assert
@@ -931,7 +944,7 @@ test "DynamicApi.apply: non-object body sent without apiVersion/kind injection" 
     }, "default");
 
     // Act
-    const result = try (try api.apply(std.testing.io, "test-cm", .{ .string = "raw-content" }, .{ .field_manager = "test" })).value();
+    const result = try expectOk(try api.apply(std.testing.io, "test-cm", .{ .string = "raw-content" }, .{ .field_manager = "test" }));
     defer result.deinit();
 
     // Assert

@@ -29,7 +29,15 @@ pub fn main(init: std.process.Init) !void {
 
     // List all nodes (cluster-scoped, no namespace needed).
     const nodes_api = kube_zig.Api(k8s.CoreV1Node).init(&client, client.context(), null);
-    const parsed = try (try nodes_api.list(io, .{})).value();
+    var nodes_unwrapped = (try nodes_api.list(io, .{})).unwrap();
+    const parsed = switch (nodes_unwrapped) {
+        .ok => |p| p,
+        .failure => |*f| {
+            defer f.deinit();
+            try w.print("Failed to list nodes: {s}\n", .{if (f.statusObj()) |s| (s.message orelse "") else ""});
+            return f.statusError();
+        },
+    };
     defer parsed.deinit();
 
     const items = parsed.value.items;
