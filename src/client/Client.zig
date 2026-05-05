@@ -39,7 +39,8 @@ pub const CancelSource = context_mod.CancelSource;
 
 // Transport interface
 /// Request options passed from the client to the transport layer.
-/// Contains the HTTP method, URI, headers, and optional payload.
+/// Contains the HTTP method, URI, headers, optional payload, and the
+/// calling context's absolute deadline (in nanoseconds since the epoch).
 pub const RequestOptions = struct {
     method: http.Method,
     uri: Uri,
@@ -49,6 +50,7 @@ pub const RequestOptions = struct {
     traceparent: ?[]const u8 = null,
     keep_alive: bool = true,
     payload: ?[]const u8 = null,
+    deadline_ns: ?i128 = null,
 };
 
 /// Response returned by the transport layer.
@@ -257,8 +259,6 @@ pub const StdHttpTransport = struct {
     }
 
     fn sendImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) !TransportResponse {
-        // io is unused: http.Client reads its own io field from `self.http_client.io`.
-        _ = io;
         const has_body = opts.payload != null or body != null;
         const accept_header = std.http.Header{ .name = "Accept", .value = opts.accept orelse "application/json" };
         const traceparent_header = std.http.Header{ .name = "traceparent", .value = opts.traceparent orelse "" };
@@ -280,7 +280,7 @@ pub const StdHttpTransport = struct {
         });
         defer req.deinit();
 
-        self.configureSocket(&req);
+        self.configureSocket(io, &req, opts.deadline_ns, false);
 
         if (body) |b| {
             // Streaming body via BodySerializer: use chunked transfer encoding.
@@ -309,8 +309,6 @@ pub const StdHttpTransport = struct {
     }
 
     fn sendStreamImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) !StreamResponse {
-        // io is unused: http.Client reads its own io field from `self.http_client.io`.
-        _ = io;
         const state = try allocator.create(StreamState);
         errdefer allocator.destroy(state);
 
@@ -333,22 +331,7 @@ pub const StdHttpTransport = struct {
         };
         errdefer state.request.deinit();
 
-        self.configureSocket(&state.request);
-
-        // Apply watch-specific read timeout (safety net for shutdown).
-        const watch_timeout = self.watch_read_timeout_ms orelse self.read_timeout_ms;
-        if (watch_timeout) |ms| {
-            if (state.request.connection) |conn| {
-                const fd = conn.stream_reader.stream.socket.handle;
-                const tv = std.posix.timeval{
-                    .sec = @intCast(ms / 1000),
-                    .usec = @intCast(@as(u32, ms % 1000) * 1000),
-                };
-                std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {
-                    self.logger.warn("setsockopt SO_RCVTIMEO (watch) failed", &.{});
-                };
-            }
-        }
+        self.configureSocket(io, &state.request, opts.deadline_ns, true);
 
         try state.request.sendBodiless();
 
@@ -438,28 +421,53 @@ pub const StdHttpTransport = struct {
     else
         0;
 
+    /// Return the smaller of the static timeout and the time remaining
+    /// before `deadline_ns`, in milliseconds. Returns `null` when both
+    /// inputs are absent. An expired deadline yields 1 ms.
+    fn effectiveTimeoutMs(io: std.Io, static_ms: ?u32, deadline_ns: ?i128) ?u32 {
+        const dl_ms: ?u32 = blk: {
+            const dl = deadline_ns orelse break :blk null;
+            const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
+            const rem_ns = dl - now_ns;
+            if (rem_ns <= 0) break :blk 1;
+            const rem_ms_i128 = @divTrunc(rem_ns, std.time.ns_per_ms);
+            break :blk std.math.cast(u32, rem_ms_i128) orelse std.math.maxInt(u32);
+        };
+        if (static_ms) |s| {
+            if (dl_ms) |d| return @min(s, d);
+            return s;
+        }
+        return dl_ms;
+    }
+
+    fn makeTimeval(ms: u32) std.posix.timeval {
+        return .{
+            .sec = @intCast(ms / 1000),
+            .usec = @intCast(@as(u32, ms % 1000) * 1000),
+        };
+    }
+
     /// Configure socket-level options (timeouts, keepalive).
+    /// `watch` selects the watch-specific receive timeout when true.
     /// These options are best-effort and may not be supported on all
     /// platforms; failures are logged as warnings rather than propagated.
-    fn configureSocket(self: *StdHttpTransport, req: *http.Client.Request) void {
+    fn configureSocket(self: *StdHttpTransport, io: std.Io, req: *http.Client.Request, deadline_ns: ?i128, watch: bool) void {
         const conn = req.connection orelse return;
         const fd = conn.stream_reader.stream.socket.handle;
 
-        if (self.read_timeout_ms) |ms| {
-            const tv = std.posix.timeval{
-                .sec = @intCast(ms / 1000),
-                .usec = @intCast(@as(u32, ms % 1000) * 1000),
-            };
+        const static_recv_ms: ?u32 = if (watch)
+            self.watch_read_timeout_ms orelse self.read_timeout_ms
+        else
+            self.read_timeout_ms;
+        if (effectiveTimeoutMs(io, static_recv_ms, deadline_ns)) |ms| {
+            const tv = makeTimeval(ms);
             std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {
                 self.logger.warn("setsockopt SO_RCVTIMEO failed", &.{});
             };
         }
 
-        if (self.write_timeout_ms) |ms| {
-            const tv = std.posix.timeval{
-                .sec = @intCast(ms / 1000),
-                .usec = @intCast(@as(u32, ms % 1000) * 1000),
-            };
+        if (effectiveTimeoutMs(io, self.write_timeout_ms, deadline_ns)) |ms| {
+            const tv = makeTimeval(ms);
             std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {
                 self.logger.warn("setsockopt SO_SNDTIMEO failed", &.{});
             };
@@ -886,6 +894,7 @@ pub const Client = struct {
             .accept = "application/json",
             .auth_header = auth_header,
             .keep_alive = false,
+            .deadline_ns = ctx.deadline_ns,
         }, self.allocator) catch |err| {
             self.recordRequestLatency(io, request_start);
 
@@ -1067,7 +1076,7 @@ pub const Client = struct {
         return .{ .uri = Uri.parse(url) catch return error.HttpRequestFailed, .heap_buf = null };
     }
 
-    fn doRequestOnce(self: *Client, io: std.Io, method: http.Method, uri: Uri, payload: ?[]const u8, content_type: ?[]const u8, accept: ?[]const u8, body: ?BodySerializer, parent_span: ?SpanContext) TransportError!RawResult {
+    fn doRequestOnce(self: *Client, io: std.Io, method: http.Method, uri: Uri, payload: ?[]const u8, content_type: ?[]const u8, accept: ?[]const u8, body: ?BodySerializer, parent_span: ?SpanContext, deadline_ns: ?i128) TransportError!RawResult {
         const method_name = @tagName(method);
         const path = uri.path.percent_encoded;
 
@@ -1103,6 +1112,7 @@ pub const Client = struct {
             .traceparent = traceparent,
             .keep_alive = self.keep_alive,
             .payload = payload,
+            .deadline_ns = deadline_ns,
         }, body, self.allocator) catch |err| {
             self.tracer.endSpan(span_ctx, .@"error");
             return mapTransportError(err);
@@ -1134,11 +1144,12 @@ pub const Client = struct {
             accept: ?[]const u8,
             body: ?BodySerializer,
             parent_span: ?SpanContext,
+            deadline_ns: ?i128,
 
             fn call(req_ctx: @This(), s: *Client, req_io: std.Io, uri: Uri) TransportError!RawResult {
-                return s.doRequestOnce(req_io, req_ctx.method, uri, req_ctx.payload, req_ctx.content_type, req_ctx.accept, req_ctx.body, req_ctx.parent_span);
+                return s.doRequestOnce(req_io, req_ctx.method, uri, req_ctx.payload, req_ctx.content_type, req_ctx.accept, req_ctx.body, req_ctx.parent_span, req_ctx.deadline_ns);
             }
-        }{ .method = method, .payload = payload, .content_type = content_type, .accept = accept, .body = body, .parent_span = ctx.span_context }, path, ctx);
+        }{ .method = method, .payload = payload, .content_type = content_type, .accept = accept, .body = body, .parent_span = ctx.span_context, .deadline_ns = ctx.deadline_ns }, path, ctx);
     }
 
     /// Context cancellation, rate limiting, and circuit breaker gate.

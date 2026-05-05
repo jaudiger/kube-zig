@@ -73,6 +73,7 @@ pub const MockTransport = struct {
         had_body_serializer: bool,
         serialized_body: ?[]const u8,
         traceparent: ?[]const u8,
+        deadline_ns: ?i128,
 
         pub fn deinit(self: RecordedRequest, allocator: std.mem.Allocator) void {
             allocator.free(self.path);
@@ -278,6 +279,7 @@ pub const MockTransport = struct {
             .had_body_serializer = body != null,
             .serialized_body = serialized_body,
             .traceparent = tp_dupe,
+            .deadline_ns = opts.deadline_ns,
         }) catch {
             self.allocator.free(path_str);
             if (ct_dupe) |ct| self.allocator.free(ct);
@@ -355,6 +357,7 @@ pub const MockTransport = struct {
             .had_body_serializer = false,
             .serialized_body = null,
             .traceparent = tp_dupe,
+            .deadline_ns = opts.deadline_ns,
         }) catch {
             self.allocator.free(path_str);
             if (tp_dupe) |tp| self.allocator.free(tp);

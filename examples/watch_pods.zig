@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     const pods = kube_zig.Api(k8s.CoreV1Pod).init(&client, client.context(), config.namespace);
 
     var stream = try pods.watch(io, .{ .timeout_seconds = 300 });
-    defer stream.close();
+    defer stream.close(io);
 
     while (try stream.next(io)) |event| {
         defer event.deinit();

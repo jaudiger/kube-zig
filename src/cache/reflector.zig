@@ -499,7 +499,7 @@ pub fn Reflector(comptime T: type) type {
             self.active_stream_state = null;
             self.watch_mu.unlock(io);
             if (self.watch_stream) |*ws| {
-                ws.close(); // infallible (returns void)
+                ws.close(io);
                 self.watch_stream = null;
             }
         }

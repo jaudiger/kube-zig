@@ -10,6 +10,7 @@ const client_mod = @import("../client/Client.zig");
 const Client = client_mod.Client;
 const Context = client_mod.Context;
 const StreamState = client_mod.StreamState;
+const CancelSource = client_mod.CancelSource;
 const Io = std.Io;
 const Logger = @import("../util/logging.zig").Logger;
 const LogField = @import("../util/logging.zig").Field;
@@ -229,11 +230,52 @@ pub fn WatchStream(comptime T: type) type {
         last_resource_version: ?[]const u8,
         closed: bool,
         max_line_size: usize,
+        watcher: ?*CancelWatcher,
+
+        /// Background helper that translates context cancellation into a
+        /// socket shutdown so a blocked `next()` returns immediately.
+        const CancelWatcher = struct {
+            io: Io,
+            ctx: Context,
+            state: *StreamState,
+            done: std.atomic.Value(u32),
+            thread: std.Thread,
+
+            const poll_ns: u64 = 200 * std.time.ns_per_ms;
+
+            fn run(self: *CancelWatcher) void {
+                const timeout: Io.Timeout = .{ .duration = .{
+                    .clock = .awake,
+                    .raw = .{ .nanoseconds = poll_ns },
+                } };
+                while (true) {
+                    if (self.done.load(.acquire) != 0) return;
+                    if (self.ctx.isCanceled(self.io)) {
+                        self.state.interrupt(self.io);
+                        return;
+                    }
+                    self.io.futexWaitTimeout(u32, &self.done.raw, 0, timeout) catch {};
+                }
+            }
+        };
 
         /// Initialize a watch stream by opening an HTTP streaming connection.
         pub fn init(client_ptr: *Client, io: std.Io, ctx: Context, path: []const u8, max_line_size: usize) !Self {
             client_ptr.logger.info("watch started", &.{});
             const stream_resp = try client_ptr.watchStream(io, path, ctx);
+            errdefer stream_resp.state.deinit();
+
+            const watcher = try client_ptr.allocator.create(CancelWatcher);
+            errdefer client_ptr.allocator.destroy(watcher);
+            watcher.* = .{
+                .io = io,
+                .ctx = ctx,
+                .state = stream_resp.state,
+                .done = std.atomic.Value(u32).init(0),
+                .thread = undefined,
+            };
+            watcher.thread = try std.Thread.spawn(.{}, CancelWatcher.run, .{watcher});
+
             return .{
                 .allocator = client_ptr.allocator,
                 .client = client_ptr,
@@ -242,6 +284,7 @@ pub fn WatchStream(comptime T: type) type {
                 .last_resource_version = null,
                 .closed = false,
                 .max_line_size = max_line_size,
+                .watcher = watcher,
             };
         }
 
@@ -300,12 +343,20 @@ pub fn WatchStream(comptime T: type) type {
         }
 
         /// Close the watch stream and release all resources.
-        pub fn close(self: *Self) void {
+        /// Joins the cancellation watcher thread before freeing state.
+        pub fn close(self: *Self, io: Io) void {
             if (self.closed) return;
             self.closed = true;
             self.client.logger.debug("watch stream closed", &.{
                 LogField.string("last_resource_version", self.last_resource_version orelse ""),
             });
+            if (self.watcher) |w| {
+                w.done.store(1, .release);
+                io.futexWake(u32, &w.done.raw, std.math.maxInt(u32));
+                w.thread.join();
+                self.allocator.destroy(w);
+                self.watcher = null;
+            }
             if (self.last_resource_version) |rv| {
                 self.allocator.free(rv);
                 self.last_resource_version = null;
