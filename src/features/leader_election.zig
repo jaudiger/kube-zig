@@ -1,9 +1,9 @@
 //! Leader election using a Kubernetes `coordination.k8s.io/v1` Lease resource.
 //!
-//! A background thread periodically attempts to acquire or renew a Lease
-//! object. When leadership is acquired or lost, caller-provided callbacks
-//! are invoked. On graceful shutdown the holder identity is cleared so
-//! another replica can take over immediately.
+//! A background thread acquires or renews a Lease and invokes
+//! caller-provided callbacks on transitions. After losing leadership the
+//! elector returns to acquisition until stopped. On graceful shutdown the
+//! holder identity is cleared.
 
 const std = @import("std");
 const HealthCheck = @import("../util/health_check.zig").HealthCheck;
@@ -61,8 +61,8 @@ pub const LeaderElector = struct {
     renew_thread: ?std.Thread,
     /// Heap-owned resourceVersion from the last observed Lease.
     observed_resource_version: ?[]const u8,
-    /// Monotonic time of the last observed lease renewal.
-    observed_renew_time: ?std.Io.Clock.Timestamp,
+    /// Monotonic time of our own last successful create/renew/takeover.
+    our_last_renew_time: ?std.Io.Clock.Timestamp,
 
     pub const State = enum(u8) {
         idle,
@@ -75,7 +75,7 @@ pub const LeaderElector = struct {
         acquired,
         renewed,
         lost,
-        err,
+        transient,
     };
 
     /// Create an elector in `idle` state. Asserts that `renew_interval_s < lease_duration_s`.
@@ -96,7 +96,7 @@ pub const LeaderElector = struct {
             .state = std.atomic.Value(State).init(.idle),
             .renew_thread = null,
             .observed_resource_version = null,
-            .observed_renew_time = null,
+            .our_last_renew_time = null,
         };
     }
 
@@ -162,10 +162,11 @@ pub const LeaderElector = struct {
         }.check);
     }
 
-    // Background thread entry point
     fn run(self: *LeaderElector, io: std.Io) void {
-        if (!self.runAcquirePhase(io)) return;
-        self.runRenewPhase(io);
+        while (self.state.load(.acquire) != .stopped) {
+            if (!self.runAcquirePhase(io)) return;
+            self.runRenewPhase(io);
+        }
     }
 
     /// Retry until we become the leader or are stopped.
@@ -182,7 +183,7 @@ pub const LeaderElector = struct {
                 LogField.string("identity", self.config.identity),
             });
             const result = self.tryAcquireOrRenew(io);
-            if (result == .acquired) {
+            if (result == .acquired or result == .renewed) {
                 {
                     self.mutex.lockUncancelable(io);
                     defer self.mutex.unlock(io);
@@ -213,7 +214,6 @@ pub const LeaderElector = struct {
         while (true) {
             if (self.state.raw == .stopped) return;
 
-            // Sleep for renew_interval_s (interruptible).
             const renew_ns: u64 = std.math.cast(u64, @as(i64, self.config.renew_interval_s) * std.time.ns_per_s) orelse 10 * std.time.ns_per_s;
             const not_stopped = self.interruptibleSleep(io, renew_ns);
             if (!not_stopped) {
@@ -225,30 +225,31 @@ pub const LeaderElector = struct {
                 return;
             }
 
-            const result = self.tryAcquireOrRenew(io);
-            if (result == .renewed) {
-                self.config.logger.debug("renewed lease", &.{
-                    LogField.string("identity", self.config.identity),
-                    LogField.string("lease_name", self.config.lease_name),
-                });
-                continue;
-            }
-
-            // Check if renewal deadline exceeded.
-            if (self.renewalDeadlineExceeded(io)) {
-                self.transitionToStandby(io);
-                return;
-            }
-
-            if (result == .lost or result == .err) {
-                if (result == .err) {
-                    self.config.logger.err("lease renewal failed", &.{
+            switch (self.tryAcquireOrRenew(io)) {
+                .renewed, .acquired => {
+                    self.config.logger.debug("renewed lease", &.{
                         LogField.string("identity", self.config.identity),
                         LogField.string("lease_name", self.config.lease_name),
                     });
-                }
-                self.transitionToStandby(io);
-                return;
+                },
+                .lost => {
+                    self.transitionToStandby(io);
+                    return;
+                },
+                .transient => {
+                    if (self.renewalDeadlineExceeded(io)) {
+                        self.config.logger.err("renewal deadline exceeded", &.{
+                            LogField.string("identity", self.config.identity),
+                            LogField.string("lease_name", self.config.lease_name),
+                        });
+                        self.transitionToStandby(io);
+                        return;
+                    }
+                    self.config.logger.warn("lease renewal transiently failed; will retry", &.{
+                        LogField.string("identity", self.config.identity),
+                        LogField.string("lease_name", self.config.lease_name),
+                    });
+                },
             }
         }
     }
@@ -287,7 +288,7 @@ pub const LeaderElector = struct {
                 LogField.string("error", @errorName(err)),
                 LogField.string("lease_name", self.config.lease_name),
             });
-            return .err;
+            return .transient;
         };
 
         var unwrapped = get_result.unwrap();
@@ -311,27 +312,13 @@ pub const LeaderElector = struct {
                     return self.updateLease(io, rv, now_str);
                 }
 
-                // Someone else holds it. Check if expired.
                 const lease_duration_s = if (lease.spec) |s| (s.leaseDurationSeconds orelse self.config.lease_duration_s) else self.config.lease_duration_s;
 
-                if (holder) |h| if (h.len > 0) {
-                    // Check expiry based on our observed renewal time.
-                    if (self.observed_renew_time) |obs| {
-                        const elapsed_i: i96 = obs.untilNow(io).raw.nanoseconds;
-                        const elapsed_ns: u64 = if (elapsed_i < 0) 0 else @intCast(elapsed_i);
-                        const lease_duration_ns: u64 = std.math.cast(u64, @as(i64, lease_duration_s) * std.time.ns_per_s) orelse 0;
-                        if (elapsed_ns < lease_duration_ns) {
-                            // Not expired yet.
-                            return .lost;
-                        }
-                    } else {
-                        // First observation; record it and report lost.
-                        self.observed_renew_time = .now(io, .awake);
-                        return .lost;
-                    }
-                };
+                const has_active_holder = if (holder) |h| h.len > 0 else false;
+                if (has_active_holder and !apiserverLeaseExpired(io, lease.spec, lease_duration_s)) {
+                    return .lost;
+                }
 
-                // Expired or no holder; take over.
                 return self.updateLeaseTakeover(io, lease.spec, rv, now_str);
             },
             .failure => |*f| {
@@ -344,7 +331,7 @@ pub const LeaderElector = struct {
                     LogField.string("status", @tagName(f.status)),
                     LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
                 });
-                return .err;
+                return .transient;
             },
         }
     }
@@ -375,7 +362,7 @@ pub const LeaderElector = struct {
                 LogField.string("error", @errorName(err)),
                 LogField.string("lease_name", self.config.lease_name),
             });
-            return .err;
+            return .transient;
         };
 
         var unwrapped = create_result.unwrap();
@@ -386,16 +373,23 @@ pub const LeaderElector = struct {
                 if (rv) |new_rv| {
                     self.setObservedResourceVersion(new_rv);
                 }
-                self.observed_renew_time = .now(io, .awake);
+                self.our_last_renew_time = .now(io, .awake);
                 return .acquired;
             },
             .failure => |*f| {
                 defer f.deinit();
+                if (f.status == .conflict) {
+                    self.config.logger.info("lease already exists; ownership not granted", &.{
+                        LogField.string("identity", self.config.identity),
+                        LogField.string("lease_name", self.config.lease_name),
+                    });
+                    return .lost;
+                }
                 self.config.logger.warn("create lease api error", &.{
                     LogField.string("status", @tagName(f.status)),
                     LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
                 });
-                return .err;
+                return .transient;
             },
         }
     }
@@ -430,7 +424,7 @@ pub const LeaderElector = struct {
                 LogField.string("error", @errorName(err)),
                 LogField.string("lease_name", self.config.lease_name),
             });
-            return .err;
+            return .transient;
         };
 
         var unwrapped = update_result.unwrap();
@@ -441,16 +435,23 @@ pub const LeaderElector = struct {
                 if (new_rv) |nrv| {
                     self.setObservedResourceVersion(nrv);
                 }
-                self.observed_renew_time = .now(io, .awake);
+                self.our_last_renew_time = .now(io, .awake);
                 return .renewed;
             },
             .failure => |*f| {
                 defer f.deinit();
+                if (f.status == .conflict) {
+                    self.config.logger.info("lease renewal conflict; ownership lost", &.{
+                        LogField.string("identity", self.config.identity),
+                        LogField.string("lease_name", self.config.lease_name),
+                    });
+                    return .lost;
+                }
                 self.config.logger.warn("update lease api error", &.{
                     LogField.string("status", @tagName(f.status)),
                     LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
                 });
-                return .err;
+                return .transient;
             },
         }
     }
@@ -490,7 +491,7 @@ pub const LeaderElector = struct {
                 LogField.string("error", @errorName(err)),
                 LogField.string("lease_name", self.config.lease_name),
             });
-            return .err;
+            return .transient;
         };
 
         var unwrapped = update_result.unwrap();
@@ -501,16 +502,23 @@ pub const LeaderElector = struct {
                 if (new_rv) |nrv| {
                     self.setObservedResourceVersion(nrv);
                 }
-                self.observed_renew_time = .now(io, .awake);
+                self.our_last_renew_time = .now(io, .awake);
                 return .acquired;
             },
             .failure => |*f| {
                 defer f.deinit();
+                if (f.status == .conflict) {
+                    self.config.logger.info("takeover conflict; another writer beat us", &.{
+                        LogField.string("identity", self.config.identity),
+                        LogField.string("lease_name", self.config.lease_name),
+                    });
+                    return .lost;
+                }
                 self.config.logger.warn("takeover lease api error", &.{
                     LogField.string("status", @tagName(f.status)),
                     LogField.string("message", if (f.statusObj()) |s| (s.message orelse "") else ""),
                 });
-                return .err;
+                return .transient;
             },
         }
     }
@@ -583,9 +591,31 @@ pub const LeaderElector = struct {
         self.observed_resource_version = new_copy;
     }
 
+    /// Returns `true` when `spec.renewTime` (or `spec.acquireTime` as a
+    /// fallback) is at least `lease_duration_s` ago on the wall clock.
+    /// Missing or unparseable timestamps return `true`; a reference in
+    /// the future returns `false`.
+    fn apiserverLeaseExpired(io: std.Io, spec: ?types.CoordinationV1LeaseSpec, lease_duration_s: i32) bool {
+        const reference: []const u8 = blk: {
+            const s = spec orelse break :blk "";
+            if (s.renewTime) |rt| break :blk rt;
+            if (s.acquireTime) |at| break :blk at;
+            break :blk "";
+        };
+        if (reference.len == 0) return true;
+        const epoch_s = time_mod.parseTimestamp(reference) orelse return true;
+
+        const now_wall_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
+        const reference_wall_ns: i128 = @as(i128, epoch_s) * std.time.ns_per_s;
+        const elapsed_ns: i128 = now_wall_ns - reference_wall_ns;
+        if (elapsed_ns < 0) return false;
+        const lease_duration_ns: i128 = @as(i128, lease_duration_s) * std.time.ns_per_s;
+        return elapsed_ns >= lease_duration_ns;
+    }
+
     /// Returns `true` when we haven't successfully renewed within `lease_duration_s`.
     fn renewalDeadlineExceeded(self: *LeaderElector, io: std.Io) bool {
-        const obs = self.observed_renew_time orelse return true;
+        const obs = self.our_last_renew_time orelse return true;
         const elapsed_i: i96 = obs.untilNow(io).raw.nanoseconds;
         if (elapsed_i < 0) return true;
         const elapsed_ns: u64 = @intCast(elapsed_i);
@@ -663,7 +693,7 @@ test "renewalDeadlineExceeded: false within duration" {
     defer elector.deinit();
 
     // Assert
-    elector.observed_renew_time = .now(std.testing.io, .awake);
+    elector.our_last_renew_time = .now(std.testing.io, .awake);
 
     try testing.expect(!elector.renewalDeadlineExceeded(std.testing.io));
 }
@@ -687,10 +717,43 @@ test "renewalDeadlineExceeded: true past duration" {
     // Assert
     // Set observed time to now, then set duration to 0 so any elapsed
     // time exceeds the deadline.
-    elector.observed_renew_time = .now(std.testing.io, .awake);
+    elector.our_last_renew_time = .now(std.testing.io, .awake);
     elector.config.lease_duration_s = 0;
 
     try testing.expect(elector.renewalDeadlineExceeded(std.testing.io));
+}
+
+test "apiserverLeaseExpired: degraded input is treated as expired" {
+    // Arrange
+    const empty_spec = types.CoordinationV1LeaseSpec{};
+    const unparseable_spec = types.CoordinationV1LeaseSpec{ .renewTime = "not-a-timestamp-----" };
+
+    // Act / Assert
+    try testing.expect(LeaderElector.apiserverLeaseExpired(std.testing.io, null, 15));
+    try testing.expect(LeaderElector.apiserverLeaseExpired(std.testing.io, empty_spec, 15));
+    try testing.expect(LeaderElector.apiserverLeaseExpired(std.testing.io, unparseable_spec, 15));
+}
+
+test "apiserverLeaseExpired: wall-clock comparison decides expiry" {
+    // Arrange
+    var buf: [time_mod.Precision.seconds.bufLen()]u8 = undefined;
+    const now_str = time_mod.bufNow(std.testing.io, .seconds, &buf);
+    const ancient = types.CoordinationV1LeaseSpec{ .renewTime = "1970-01-01T00:00:00Z" };
+    const future = types.CoordinationV1LeaseSpec{ .renewTime = "9999-12-31T23:59:59Z" };
+    const current = types.CoordinationV1LeaseSpec{ .renewTime = now_str };
+
+    // Act / Assert
+    try testing.expect(LeaderElector.apiserverLeaseExpired(std.testing.io, ancient, 15));
+    try testing.expect(!LeaderElector.apiserverLeaseExpired(std.testing.io, future, 15));
+    try testing.expect(LeaderElector.apiserverLeaseExpired(std.testing.io, current, 0));
+}
+
+test "apiserverLeaseExpired: acquireTime is used when renewTime is null" {
+    // Arrange
+    const spec = types.CoordinationV1LeaseSpec{ .acquireTime = "9999-12-31T23:59:59Z" };
+
+    // Act / Assert
+    try testing.expect(!LeaderElector.apiserverLeaseExpired(std.testing.io, spec, 15));
 }
 
 test "interruptibleSleep wakes on stop" {
