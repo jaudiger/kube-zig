@@ -2,14 +2,13 @@
 //!
 //! Drives the initial paginated list and ongoing watch stream as a state
 //! machine, producing `ReflectorEvent` values for the owning `Informer`
-//! to process. Handles 410 Gone re-listing, exponential backoff on
-//! transient errors, and cross-thread watch interruption for shutdown.
+//! to process. Handles 410 Gone re-listing and exponential backoff on
+//! transient errors.
 
 const std = @import("std");
 const client_mod = @import("../client/Client.zig");
 const Client = client_mod.Client;
 const Context = client_mod.Context;
-const StreamState = client_mod.StreamState;
 const watch_mod = @import("../api/watch.zig");
 const store_mod = @import("store.zig");
 const ObjectKey = @import("../object_key.zig").ObjectKey;
@@ -148,11 +147,6 @@ pub fn Reflector(comptime T: type) type {
         retry_policy: RetryPolicy,
         backoff_attempt: u32,
         consecutive_errors: u32,
-        /// Mutex protecting `active_stream_state` for cross-thread interrupt.
-        watch_mu: std.Io.Mutex = .init,
-        /// Points to the current watch stream's `StreamState` while active.
-        /// Guarded by `watch_mu`.
-        active_stream_state: ?*StreamState = null,
 
         /// Create a new reflector for the given resource type and namespace.
         pub fn init(
@@ -191,16 +185,6 @@ pub fn Reflector(comptime T: type) type {
             self.closeWatch(io);
             if (self.resource_version) |rv| self.allocator.free(rv);
             if (self.continue_token) |ct| self.allocator.free(ct);
-        }
-
-        /// Shut down the active watch socket, causing any blocked `read()`
-        /// to return immediately.  Safe to call from another thread.
-        pub fn interruptWatch(self: *Self, io: std.Io) void {
-            self.watch_mu.lockUncancelable(io);
-            defer self.watch_mu.unlock(io);
-            if (self.active_stream_state) |state| {
-                state.interrupt(io);
-            }
         }
 
         /// Run one step of the reflector state machine.
@@ -383,10 +367,6 @@ pub fn Reflector(comptime T: type) type {
                     }
                     return self.recordError(err);
                 };
-                // Register the active stream state for cross-thread interrupt.
-                self.watch_mu.lockUncancelable(io);
-                self.active_stream_state = self.watch_stream.?.state;
-                self.watch_mu.unlock(io);
                 self.resetErrors();
             }
 
@@ -493,11 +473,6 @@ pub fn Reflector(comptime T: type) type {
 
         // Helpers
         fn closeWatch(self: *Self, io: std.Io) void {
-            // Clear the active stream state under lock *before* closing,
-            // so interruptWatch() cannot operate on a deinit'd stream.
-            self.watch_mu.lockUncancelable(io);
-            self.active_stream_state = null;
-            self.watch_mu.unlock(io);
             if (self.watch_stream) |*ws| {
                 ws.close(io);
                 self.watch_stream = null;

@@ -242,7 +242,6 @@ pub fn Informer(comptime T: type) type {
                 LogField.string("resource", meta.resource),
             });
             self.cancel.cancel(io);
-            self.reflector.interruptWatch(io);
         }
 
         /// Has the initial list been fully synced to the store?

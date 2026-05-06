@@ -10,7 +10,6 @@ const client_mod = @import("../client/Client.zig");
 const Client = client_mod.Client;
 const Context = client_mod.Context;
 const StreamState = client_mod.StreamState;
-const CancelSource = client_mod.CancelSource;
 const Io = std.Io;
 const Logger = @import("../util/logging.zig").Logger;
 const LogField = @import("../util/logging.zig").Field;
@@ -241,7 +240,7 @@ pub fn WatchStream(comptime T: type) type {
             done: std.atomic.Value(u32),
             thread: std.Thread,
 
-            const poll_ns: u64 = 200 * std.time.ns_per_ms;
+            const poll_ns: u64 = 50 * std.time.ns_per_ms;
 
             fn run(self: *CancelWatcher) void {
                 const timeout: Io.Timeout = .{ .duration = .{
@@ -362,12 +361,6 @@ pub fn WatchStream(comptime T: type) type {
                 self.last_resource_version = null;
             }
             self.state.deinit();
-        }
-
-        /// Shut down the underlying socket, causing any blocked `read()`
-        /// in `next()` to return immediately. Safe to call from another thread.
-        pub fn interrupt(self: *Self, io: std.Io) void {
-            self.state.interrupt(io);
         }
 
         fn readLine(self: *Self) ![]const u8 {
