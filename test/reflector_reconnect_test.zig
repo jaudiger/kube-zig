@@ -63,12 +63,9 @@ const watch_partial_json =
 // Helpers
 // ============================================================================
 
-/// Free an init_page's items (arena + entry wrapper for each, then the slice).
+/// Free an init_page's items and the backing slice.
 fn freeInitPage(allocator: std.mem.Allocator, page: ReflectorEvent(Pod).InitPage) void {
-    for (page.items) |item| {
-        item.arena.deinit();
-        allocator.destroy(item.arena);
-    }
+    for (page.items) |item| item.deinit();
     allocator.free(page.items);
 }
 

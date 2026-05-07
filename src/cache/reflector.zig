@@ -94,7 +94,8 @@ pub fn ReflectorEvent(comptime T: type) type {
             is_last: bool,
             resource_version: ResourceVersion,
 
-            /// Free metadata memory. Caller must handle item arenas separately.
+            /// Free the items slice. Each item's arena must be freed first via
+            /// `item.deinit()` or transferred to the store via `replace()`.
             pub fn deinitMeta(self: *InitPage, allocator: std.mem.Allocator) void {
                 allocator.free(self.items);
             }
@@ -316,7 +317,8 @@ pub fn Reflector(comptime T: type) type {
                     // Save resource version from the last page.
                     if (new_rv) |rv_str| {
                         self.updateResourceVersion(rv_str) catch |err| {
-                            self.freeReplaceItems(replace_items);
+                            for (replace_items) |item| item.deinit();
+                            self.allocator.free(replace_items);
                             return self.recordError(err);
                         };
                     }
@@ -324,7 +326,8 @@ pub fn Reflector(comptime T: type) type {
                     // Save continue token.
                     if (new_continue) |ct| {
                         const owned_ct = self.allocator.dupe(u8, ct) catch |err| {
-                            self.freeReplaceItems(replace_items);
+                            for (replace_items) |item| item.deinit();
+                            self.allocator.free(replace_items);
                             return self.recordError(err);
                         };
                         if (self.continue_token) |old_ct| self.allocator.free(old_ct);
@@ -507,15 +510,6 @@ pub fn Reflector(comptime T: type) type {
             }
         }
 
-        /// Free a slice of ReplaceItems, deinitializing each arena.
-        fn freeReplaceItems(self: *Self, items: []store_mod.Store(T).ReplaceItem) void {
-            for (items) |item| {
-                item.arena.deinit();
-                self.allocator.destroy(item.arena);
-            }
-            self.allocator.free(items);
-        }
-
         fn randomizedWatchTimeout(self: *Self, io: std.Io) i64 {
             const base = self.options.watch_timeout_seconds;
             if (base <= 0) return 300;
@@ -583,10 +577,7 @@ pub fn Reflector(comptime T: type) type {
         fn cloneItemsToArenas(self: *Self, items: []const T) ![]store_mod.Store(T).ReplaceItem {
             var result_list: std.ArrayList(store_mod.Store(T).ReplaceItem) = .empty;
             errdefer {
-                for (result_list.items) |item| {
-                    item.arena.deinit();
-                    self.allocator.destroy(item.arena);
-                }
+                for (result_list.items) |item| item.deinit();
                 result_list.deinit(self.allocator);
             }
 

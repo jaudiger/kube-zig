@@ -184,10 +184,7 @@ pub fn Informer(comptime T: type) type {
         /// Release all resources including the store, reflector, and staging buffer.
         pub fn deinit(self: *Self, io: std.Io) void {
             // Free any remaining staging items.
-            for (self.staging.items) |item| {
-                item.arena.deinit();
-                self.allocator.destroy(item.arena);
-            }
+            for (self.staging.items) |item| item.deinit();
             self.staging.deinit(self.allocator);
             self.handlers.deinit(self.allocator);
             self.reflector.deinit(io);
@@ -284,7 +281,8 @@ pub fn Informer(comptime T: type) type {
             // If a previous page failed, discard all subsequent pages
             // to prevent a partial store replacement.
             if (self.sync_failed.load(.acquire)) {
-                self.freeReplaceItems(page.items);
+                for (page.items) |item| item.deinit();
+                self.allocator.free(page.items);
                 return;
             }
 
@@ -293,7 +291,8 @@ pub fn Informer(comptime T: type) type {
                 // On OOM, free the items we couldn't stage and abort the
                 // entire sync to prevent a partial store.replace().
                 self.logger.err("staging append failed: OOM, aborting sync", &.{});
-                self.freeReplaceItems(page.items);
+                for (page.items) |item| item.deinit();
+                self.allocator.free(page.items);
                 return self.abortSyncAndRelist(io);
             };
             // Free the items array (items themselves are now in staging).
@@ -349,7 +348,7 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const old = self.store.put(io, key, obj, parsed.arena) catch {
+                    const old = self.store.put(io, .{ .key = key, .object = obj, .arena = parsed.arena }) catch {
                         self.logger.err("watch add failed (OOM), forcing re-list", &.{});
                         self.reflector.forceRelist(io);
                         return;
@@ -373,7 +372,7 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const old = self.store.put(io, key, obj, parsed.arena) catch {
+                    const old = self.store.put(io, .{ .key = key, .object = obj, .arena = parsed.arena }) catch {
                         self.logger.err("watch modify failed (OOM), forcing re-list", &.{});
                         self.reflector.forceRelist(io);
                         return;
@@ -427,20 +426,8 @@ pub fn Informer(comptime T: type) type {
         }
 
         fn clearStaging(self: *Self) void {
-            for (self.staging.items) |item| {
-                item.arena.deinit();
-                self.allocator.destroy(item.arena);
-            }
+            for (self.staging.items) |item| item.deinit();
             self.staging.clearRetainingCapacity();
-        }
-
-        /// Free a standalone slice of ReplaceItems, deinitializing each arena.
-        fn freeReplaceItems(self: *Self, items: []StoreT.ReplaceItem) void {
-            for (items) |item| {
-                item.arena.deinit();
-                self.allocator.destroy(item.arena);
-            }
-            self.allocator.free(items);
         }
 
         /// Abort the current sync and force the reflector to re-list.

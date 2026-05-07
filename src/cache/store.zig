@@ -70,11 +70,19 @@ pub fn Store(comptime T: type) type {
             }
         };
 
-        /// Input for `replace()`: an object with its key and owning arena.
+        /// Input for `replace()` and `put()`: an owned object with its key and arena.
+        /// Call `deinit()` to free when not passing to the store.
         pub const ReplaceItem = struct {
             key: ObjectKey,
             object: T,
             arena: *std.heap.ArenaAllocator,
+
+            /// Free the arena and all memory it owns.
+            pub fn deinit(self: ReplaceItem) void {
+                const child = self.arena.child_allocator;
+                self.arena.deinit();
+                child.destroy(self.arena);
+            }
         };
 
         /// Create an empty store backed by the given allocator.
@@ -83,6 +91,8 @@ pub fn Store(comptime T: type) type {
         }
 
         /// Free all stored objects and internal map storage.
+        ///
+        /// Callers must ensure no concurrent operations are in progress.
         pub fn deinit(self: *Self, io: std.Io) void {
             var items: ItemMap = blk: {
                 self.mutex.lockUncancelable(io);
@@ -295,10 +305,7 @@ pub fn Store(comptime T: type) type {
                 new_map.deinit(self.allocator);
 
                 // Free arenas for items not yet consumed.
-                for (new_items[items_consumed..]) |item| {
-                    item.arena.deinit();
-                    self.allocator.destroy(item.arena);
-                }
+                for (new_items[items_consumed..]) |item| item.deinit();
             }
 
             try new_map.ensureTotalCapacity(self.allocator, std.math.cast(ItemMap.Size, new_items.len) orelse return error.Overflow);
@@ -322,8 +329,7 @@ pub fn Store(comptime T: type) type {
                         LogField.string("namespace", item.key.namespace),
                         LogField.string("name", item.key.name),
                     });
-                    item.arena.deinit();
-                    self.allocator.destroy(item.arena);
+                    item.deinit();
                     self.allocator.destroy(entry);
                 } else {
                     gop.value_ptr.* = entry;
@@ -408,22 +414,19 @@ pub fn Store(comptime T: type) type {
 
         /// Add or replace a single item in the store.
         ///
-        /// Takes unconditional ownership of `arena` on success and on error.
-        /// On error, this function frees `arena`; the caller must not free it.
-        /// On success, ownership transfers to the stored entry.
+        /// Takes unconditional ownership of `item` on success and on error.
+        /// On error, this function calls `item.deinit()`; the caller must not
+        /// free the item's arena. On success, ownership transfers to the stored entry.
         /// Returns the old entry if one existed. The caller must call
         /// `entry.release()` on it after handler dispatch.
-        pub fn put(self: *Self, io: std.Io, key: ObjectKey, object: T, arena: *std.heap.ArenaAllocator) !?*Entry {
-            errdefer {
-                arena.deinit();
-                self.allocator.destroy(arena);
-            }
+        pub fn put(self: *Self, io: std.Io, item: ReplaceItem) !?*Entry {
+            errdefer item.deinit();
 
             const entry = try self.allocator.create(Entry);
             entry.* = .{
-                .key = key,
-                .object = object,
-                .arena = arena,
+                .key = item.key,
+                .object = item.object,
+                .arena = item.arena,
                 .backing_allocator = self.allocator,
             };
             errdefer self.allocator.destroy(entry);
@@ -431,13 +434,13 @@ pub fn Store(comptime T: type) type {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
 
-            const gop = try self.items.getOrPut(self.allocator, key);
+            const gop = try self.items.getOrPut(self.allocator, item.key);
             if (gop.found_existing) {
                 const old = gop.value_ptr.*;
                 gop.value_ptr.* = entry;
                 // Update key to point to new arena's strings (old key's
                 // memory will be freed when caller releases the old entry).
-                gop.key_ptr.* = key;
+                gop.key_ptr.* = item.key;
                 return old;
             } else {
                 gop.value_ptr.* = entry;
@@ -736,7 +739,7 @@ test "Store: put adds new item" {
     const item = try makeEntry(testing.allocator, "default", "pod-1", 3);
 
     // Assert
-    const old = try store.put(std.testing.io, item.key, item.object, item.arena);
+    const old = try store.put(std.testing.io, item);
 
     try testing.expect(old == null);
     try testing.expectEqual(@as(u32, 1), store.len(std.testing.io));
@@ -753,13 +756,13 @@ test "Store: put replaces existing item and returns old" {
 
     // Act
     const item1 = try makeEntry(testing.allocator, "default", "pod-1", 1);
-    const old1 = try store.put(std.testing.io, item1.key, item1.object, item1.arena);
+    const old1 = try store.put(std.testing.io, item1);
     try testing.expect(old1 == null);
 
     // Assert
     const item2 = try makeEntry(testing.allocator, "default", "pod-1", 5);
 
-    const old2 = try store.put(std.testing.io, item2.key, item2.object, item2.arena);
+    const old2 = try store.put(std.testing.io, item2);
 
     try testing.expect(old2 != null);
     try testing.expectEqual(@as(i64, 1), old2.?.object.spec.?.replicas.?);
@@ -777,7 +780,7 @@ test "Store: remove returns entry" {
 
     // Act
     const item = try makeEntry(testing.allocator, "default", "pod-1", 1);
-    _ = try store.put(std.testing.io, item.key, item.object, item.arena);
+    _ = try store.put(std.testing.io, item);
 
     // Assert
     const removed = store.remove(std.testing.io, .{ .namespace = "default", .name = "pod-1" });
@@ -943,7 +946,7 @@ test "Store: put OOM on entry allocation does not corrupt store" {
     // Make next allocation fail (Entry.create inside put)
     fa.fail_index = fa.alloc_index;
 
-    try testing.expectError(error.OutOfMemory, fail_store.put(std.testing.io, item.key, item.object, item.arena));
+    try testing.expectError(error.OutOfMemory, fail_store.put(std.testing.io, item));
 
     try testing.expectEqual(@as(u32, 0), fail_store.len(std.testing.io));
 }
@@ -977,7 +980,7 @@ test "Store: concurrent reads and writes do not crash" {
         fn run(io: std.Io, s: *Store(TestResource)) void {
             for (0..20) |i| {
                 const entry_item = makeEntry(testing.allocator, "default", "pod-w", @intCast(i)) catch continue;
-                const old = s.put(io, entry_item.key, entry_item.object, entry_item.arena) catch continue;
+                const old = s.put(io, entry_item) catch continue;
                 if (old) |o| o.release();
             }
         }
