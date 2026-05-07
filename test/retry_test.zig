@@ -151,11 +151,11 @@ test "GET retries on ConnectionResetByPeer (idempotent)" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
-    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
-    mock.respondWith(.ok, "{}");
+    try mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
+    try mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.retry_policy = zero_backoff;
 
@@ -171,9 +171,9 @@ test "POST does not retry on ConnectionResetByPeer" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
+    try mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.retry_policy = zero_backoff;
 
@@ -188,10 +188,10 @@ test "GET retries on 503 without Retry-After" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWith(.service_unavailable, "busy");
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.service_unavailable, "busy");
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.retry_policy = zero_backoff;
 
@@ -207,9 +207,9 @@ test "POST does not retry on 503 without Retry-After" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWith(.service_unavailable, "busy");
+    try mock.respondWith(.service_unavailable, "busy");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.retry_policy = zero_backoff;
 
@@ -228,10 +228,10 @@ test "POST retries on 429/503 with Retry-After" {
         // Arrange
         var mock = MockTransport.init(testing.allocator);
         defer mock.deinit();
-        mock.respondWithRetryAfterNs(status, "wait", 0);
-        mock.respondWith(.ok, "{}");
+        try mock.respondWithRetryAfterNs(status, "wait", 0);
+        try mock.respondWith(.ok, "{}");
 
-        var c = mock.client(std.testing.io);
+        var c = try mock.client(std.testing.io);
         defer c.deinit(std.testing.io);
         c.retry_policy = zero_backoff;
 
@@ -251,9 +251,9 @@ test "POST does not retry on 502/504 even with Retry-After" {
         // Arrange
         var mock = MockTransport.init(testing.allocator);
         defer mock.deinit();
-        mock.respondWithRetryAfterNs(status, "gateway", 0);
+        try mock.respondWithRetryAfterNs(status, "gateway", 0);
 
-        var c = mock.client(std.testing.io);
+        var c = try mock.client(std.testing.io);
         defer c.deinit(std.testing.io);
         c.retry_policy = zero_backoff;
 
@@ -270,9 +270,9 @@ test "HttpRequestFailed (catch-all) does not retry on GET" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWithTransportError();
+    try mock.respondWithTransportError();
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.retry_policy = zero_backoff;
 

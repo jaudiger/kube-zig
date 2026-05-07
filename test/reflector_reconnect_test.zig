@@ -85,14 +85,14 @@ test "watch 410 triggers re-list" {
 
     // Act
     // 1st: initial list succeeds.
-    mock.respondWith(.ok, pod_list_one);
+    try mock.respondWith(.ok, pod_list_one);
     // 2nd: watch stream sends in-stream 410 ERROR.
-    mock.respondWithStream(.ok, watch_410_error);
+    try mock.respondWithStream(.ok, watch_410_error);
     // 3rd: re-list after 410.
-    mock.respondWith(.ok, pod_list_one);
+    try mock.respondWith(.ok, pod_list_one);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
@@ -133,14 +133,14 @@ test "network disconnect reconnects with resourceVersion" {
 
     // Act
     // 1st: initial list (rv 100).
-    mock.respondWith(.ok, pod_list_one);
+    try mock.respondWith(.ok, pod_list_one);
     // 2nd: watch stream with ADDED event (rv 101), then clean end.
-    mock.respondWithStream(.ok, watch_added_then_end);
+    try mock.respondWithStream(.ok, watch_added_then_end);
     // 3rd: reconnected watch stream with another event.
-    mock.respondWithStream(.ok, watch_added_then_end);
+    try mock.respondWithStream(.ok, watch_added_then_end);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
@@ -186,11 +186,11 @@ test "bookmark updates resourceVersion" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_list_one);
-    mock.respondWithStream(.ok, watch_bookmark);
+    try mock.respondWith(.ok, pod_list_one);
+    try mock.respondWithStream(.ok, watch_bookmark);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
@@ -220,7 +220,7 @@ test "repeated failures use backoff" {
     // Don't enqueue any responses; every list attempt fails with HttpRequestFailed.
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
@@ -256,7 +256,7 @@ test "context cancellation stops reflector" {
     cs.cancel(std.testing.io);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, cs.context(), "default", .{});
@@ -277,14 +277,14 @@ test "empty re-list after 410 clears cache" {
 
     // Act
     // 1st: initial list with 2 pods.
-    mock.respondWith(.ok, pod_list_two);
+    try mock.respondWith(.ok, pod_list_two);
     // 2nd: watch stream sends 410 ERROR.
-    mock.respondWithStream(.ok, watch_410_error);
+    try mock.respondWithStream(.ok, watch_410_error);
     // 3rd: re-list returns empty list.
-    mock.respondWith(.ok, pod_list_empty);
+    try mock.respondWith(.ok, pod_list_empty);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
@@ -340,11 +340,11 @@ test "partial JSON line treated as disconnect" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_list_one);
-    mock.respondWithStream(.ok, watch_partial_json);
+    try mock.respondWith(.ok, pod_list_one);
+    try mock.respondWithStream(.ok, watch_partial_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
@@ -373,12 +373,12 @@ test "410 on initial list retries without resourceVersion" {
 
     // Act
     // 1st: initial list returns 410.
-    mock.respondWith(.gone, gone_json);
+    try mock.respondWith(.gone, gone_json);
     // 2nd: re-list succeeds.
-    mock.respondWith(.ok, pod_list_one);
+    try mock.respondWith(.ok, pod_list_one);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});

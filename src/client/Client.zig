@@ -118,6 +118,8 @@ pub const StreamState = struct {
     response: ?http.Client.Response,
     reader: ?*std.Io.Reader,
     deinit_fn: ?*const fn (*StreamState) void = null,
+    /// Opaque pointer for transport-specific use (e.g. mock backing storage).
+    extra: ?*anyopaque = null,
 
     /// Release the stream state and its underlying HTTP connection.
     /// Delegates to `deinit_fn` when set (e.g. by mock transports).
@@ -160,24 +162,24 @@ pub const Transport = struct {
             opts: RequestOptions,
             body: ?BodySerializer,
             allocator: std.mem.Allocator,
-        ) anyerror!TransportResponse,
+        ) Client.TransportError!TransportResponse,
         send_stream_fn: *const fn (
             ptr: *anyopaque,
             io: std.Io,
             opts: RequestOptions,
             allocator: std.mem.Allocator,
-        ) anyerror!StreamResponse,
+        ) Client.StreamTransportError!StreamResponse,
         deinit_fn: *const fn (ptr: *anyopaque, io: std.Io) void,
         pool_stats_fn: ?*const fn (ptr: *anyopaque, io: std.Io) PoolStats = null,
     };
 
     /// Send a request and return the full response.
-    pub fn send(self: Transport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+    pub fn send(self: Transport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) Client.TransportError!TransportResponse {
         return self.vtable.send_fn(self.ptr, io, opts, body, allocator);
     }
 
     /// Open a streaming connection and return a `StreamResponse`.
-    pub fn sendStream(self: Transport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+    pub fn sendStream(self: Transport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) Client.StreamTransportError!StreamResponse {
         return self.vtable.send_stream_fn(self.ptr, io, opts, allocator);
     }
 
@@ -223,12 +225,12 @@ pub const StdHttpTransport = struct {
         };
     }
 
-    fn vtableSend(ptr: *anyopaque, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+    fn vtableSend(ptr: *anyopaque, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) Client.TransportError!TransportResponse {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ptr));
         return self.sendImpl(io, opts, body, allocator);
     }
 
-    fn vtableSendStream(ptr: *anyopaque, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+    fn vtableSendStream(ptr: *anyopaque, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) Client.StreamTransportError!StreamResponse {
         const self: *StdHttpTransport = @ptrCast(@alignCast(ptr));
         return self.sendStreamImpl(io, opts, allocator);
     }
@@ -258,13 +260,13 @@ pub const StdHttpTransport = struct {
         };
     }
 
-    fn sendImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) !TransportResponse {
+    fn sendImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) Client.TransportError!TransportResponse {
         const has_body = opts.payload != null or body != null;
         const accept_header = std.http.Header{ .name = "Accept", .value = opts.accept orelse "application/json" };
         const traceparent_header = std.http.Header{ .name = "traceparent", .value = opts.traceparent orelse "" };
         const extra_with_tp = [_]std.http.Header{ accept_header, traceparent_header };
         const extra_without_tp = [_]std.http.Header{accept_header};
-        var req = try self.http_client.request(opts.method, opts.uri, .{
+        var req = self.http_client.request(opts.method, opts.uri, .{
             .keep_alive = opts.keep_alive,
             .headers = if (has_body) .{
                 .content_type = .{ .override = opts.content_type orelse "application/json" },
@@ -277,7 +279,7 @@ pub const StdHttpTransport = struct {
                 &.{.{ .name = "Authorization", .value = ah }}
             else
                 &.{},
-        });
+        }) catch |err| return self.mapTransportError(err);
         defer req.deinit();
 
         self.configureSocket(io, &req, opts.deadline_ns, false);
@@ -286,35 +288,35 @@ pub const StdHttpTransport = struct {
             // Streaming body via BodySerializer: use chunked transfer encoding.
             req.transfer_encoding = .chunked;
             var body_buf: [1024]u8 = undefined;
-            var body_writer = try req.sendBodyUnflushed(&body_buf);
+            var body_writer = req.sendBodyUnflushed(&body_buf) catch |err| return self.mapTransportError(err);
             // Serialization writes to the HTTP body stream. Any failure,
             // whether from the serializer or the underlying socket, is
             // surfaced as a connection error since the request is unrecoverable.
             b.write(&body_writer.writer) catch
                 return error.ConnectionResetByPeer;
-            try body_writer.end();
-            if (req.connection) |conn| try conn.flush();
+            body_writer.end() catch |err| return self.mapTransportError(err);
+            if (req.connection) |conn| conn.flush() catch |err| return self.mapTransportError(err);
         } else if (opts.payload) |p| {
             req.transfer_encoding = .{ .content_length = p.len };
             var body_buf: [1024]u8 = undefined;
-            var body_writer = try req.sendBodyUnflushed(&body_buf);
-            try body_writer.writer.writeAll(p);
-            try body_writer.end();
-            if (req.connection) |conn| try conn.flush();
+            var body_writer = req.sendBodyUnflushed(&body_buf) catch |err| return self.mapTransportError(err);
+            body_writer.writer.writeAll(p) catch |err| return self.mapTransportError(err);
+            body_writer.end() catch |err| return self.mapTransportError(err);
+            if (req.connection) |conn| conn.flush() catch |err| return self.mapTransportError(err);
         } else {
-            try req.sendBodiless();
+            req.sendBodiless() catch |err| return self.mapTransportError(err);
         }
 
-        return self.receiveResponse(&req, allocator);
+        return self.receiveResponse(&req, allocator) catch |err| return self.mapTransportError(err);
     }
 
-    fn sendStreamImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) !StreamResponse {
-        const state = try allocator.create(StreamState);
+    fn sendStreamImpl(self: *StdHttpTransport, io: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) Client.StreamTransportError!StreamResponse {
+        const state = allocator.create(StreamState) catch return error.OutOfMemory;
         errdefer allocator.destroy(state);
 
         state.* = .{
             .allocator = allocator,
-            .request = try self.http_client.request(opts.method, opts.uri, .{
+            .request = self.http_client.request(opts.method, opts.uri, .{
                 .keep_alive = false,
                 .extra_headers = &.{
                     .{ .name = "Accept", .value = opts.accept orelse "application/json" },
@@ -323,26 +325,28 @@ pub const StdHttpTransport = struct {
                     &.{.{ .name = "Authorization", .value = ah }}
                 else
                     &.{},
-            }),
+            }) catch |err| return self.mapTransportError(err),
             .redirect_buf = undefined,
             .transfer_buf = undefined,
             .response = null,
             .reader = null,
+            .extra = null,
         };
         errdefer state.request.deinit();
 
         self.configureSocket(io, &state.request, opts.deadline_ns, true);
 
-        try state.request.sendBodiless();
+        state.request.sendBodiless() catch |err| return self.mapTransportError(err);
 
-        state.response = try state.request.receiveHead(&state.redirect_buf);
+        state.response = state.request.receiveHead(&state.redirect_buf) catch |err| return self.mapTransportError(err);
 
         if (state.response.?.head.status.class() != .success) {
-            // Return the error and let errdefer handle cleanup of
-            // state.request and state itself. Do NOT manually deinit
-            // here, as that would double-free when the errdefers fire.
-            if (state.response.?.head.status == .gone) return error.HttpGone;
-            return error.HttpRequestFailed;
+            const status = state.response.?.head.status;
+            // Drain best-effort so the connection can be reused or closed cleanly.
+            var drain_buf: [4096]u8 = undefined;
+            var drain_reader = state.response.?.reader(&drain_buf);
+            _ = drain_reader.discardRemaining() catch {};
+            return statusToStreamError(status);
         }
 
         state.reader = state.response.?.reader(&state.transfer_buf);
@@ -350,6 +354,44 @@ pub const StdHttpTransport = struct {
         return .{
             .status = state.response.?.head.status,
             .state = state,
+        };
+    }
+
+    /// Map a non-2xx HTTP status to a `StreamTransportError` variant.
+    fn statusToStreamError(status: http.Status) Client.StreamTransportError {
+        if (status == .gone) return error.HttpGone;
+        return Client.statusToError(status);
+    }
+
+    /// Map a raw `std.http` or OS error to a named `TransportError`.
+    /// Logs unmapped errors at warn level so they are not silently discarded.
+    fn mapTransportError(self: *const StdHttpTransport, err: anyerror) Client.TransportError {
+        return mapTransportErrorWithLogger(self.logger, err);
+    }
+
+    fn mapTransportErrorWithLogger(logger: Logger, err: anyerror) Client.TransportError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ConnectionRefused => error.ConnectionRefused,
+            error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+            error.ConnectionTimedOut => error.ConnectionTimedOut,
+            error.TemporaryNameServerFailure => error.TemporaryNameServerFailure,
+            error.TlsFailure => error.TlsFailure,
+            error.ResponseTooLarge => error.ResponseTooLarge,
+            error.UnknownHostName,
+            error.NameServerFailure,
+            error.HostLacksNetworkAddresses,
+            error.UnableToResolveHost,
+            => error.DnsResolveFailed,
+            error.BrokenPipe,
+            error.NetworkUnreachable,
+            error.OperationAborted,
+            error.SystemResources,
+            => error.IoFailed,
+            else => {
+                logger.warn("unmapped transport error", &.{LogField.string("error", @errorName(err))});
+                return error.HttpRequestFailed;
+            },
         };
     }
 
@@ -635,7 +677,13 @@ pub const Client = struct {
         TlsFailure,
         HttpRequestFailed,
         ResponseTooLarge,
+        DnsResolveFailed,
+        IoFailed,
+        TokenReadFailed,
     };
+
+    /// Full error set for streaming transport operations (transport + HTTP status + 410 Gone).
+    pub const StreamTransportError = TransportError || ApiRequestError || error{HttpGone};
 
     /// Errors from JSON response parsing.
     pub const ParseError = error{
@@ -681,6 +729,7 @@ pub const Client = struct {
         status: http.Status,
         body: []const u8,
         allocator: std.mem.Allocator,
+        retry_after_ns: ?u64 = null,
 
         /// Map the HTTP status to an `ApiRequestError`.
         pub fn statusError(self: ApiErrorResponse) ApiRequestError {
@@ -710,6 +759,7 @@ pub const Client = struct {
         body: []const u8,
         parsed: ?std.json.Parsed(KubeStatus),
         allocator: std.mem.Allocator,
+        retry_after_ns: ?u64 = null,
 
         /// Map the HTTP status to an `ApiRequestError`.
         pub fn statusError(self: ApiFailure) ApiRequestError {
@@ -720,6 +770,17 @@ pub const Client = struct {
         /// was not a Status JSON.
         pub fn statusObj(self: ApiFailure) ?KubeStatus {
             return if (self.parsed) |p| p.value else null;
+        }
+
+        /// Return the retry delay from the Retry-After header, falling back to
+        /// `details.retryAfterSeconds` from the parsed Kubernetes Status.
+        pub fn retryAfterNs(self: ApiFailure) ?u64 {
+            if (self.retry_after_ns) |ns| return ns;
+            const s = self.statusObj() orelse return null;
+            const d = s.details orelse return null;
+            const secs = d.retryAfterSeconds orelse return null;
+            if (secs <= 0) return null;
+            return @as(u64, @intCast(secs)) * std.time.ns_per_s;
         }
 
         /// Free the body and the parsed Status arena.
@@ -765,6 +826,7 @@ pub const Client = struct {
                         .body = e.body,
                         .parsed = e.parseStatus(),
                         .allocator = e.allocator,
+                        .retry_after_ns = e.retry_after_ns,
                     } },
                 }
             }
@@ -799,9 +861,10 @@ pub const Client = struct {
         self.transport.deinit(io);
     }
 
-    /// Return the current API Priority and Fairness flow-control state.
-    pub fn flowControl(self: *Client, io: std.Io) FlowControl {
-        return self.flow_tracker.get(io);
+    /// Return an owned snapshot of the current API Priority and Fairness flow-control state.
+    /// The caller must call `deinit` on the returned value.
+    pub fn flowControl(self: *Client, allocator: std.mem.Allocator, io: std.Io) error{OutOfMemory}!FlowControl {
+        return self.flow_tracker.get(allocator, io);
     }
 
     /// Return connection pool statistics, if supported by the transport.
@@ -905,12 +968,12 @@ pub const Client = struct {
                 return error.HttpGone;
             }
             self.metrics.request_error_total.inc();
-            const mapped = mapTransportError(err);
+            if (err == error.HttpUnauthorized) self.auth.markUnauthorized();
             if (self.circuit_breaker) |*cb| {
-                if (isRetryableTransport(mapped)) cb.recordFailure(io);
+                if (isRetryableStreamTransport(err)) cb.recordFailure(io);
             }
             self.updateCircuitBreakerGauge();
-            return mapped;
+            return err;
         };
 
         self.recordRequestLatency(io, request_start);
@@ -1115,7 +1178,7 @@ pub const Client = struct {
             .deadline_ns = deadline_ns,
         }, body, self.allocator) catch |err| {
             self.tracer.endSpan(span_ctx, .@"error");
-            return mapTransportError(err);
+            return err;
         };
         defer resp.deinit();
 
@@ -1257,7 +1320,7 @@ pub const Client = struct {
     }
 
     const RetryReason = union(enum) {
-        transport: anyerror,
+        transport: TransportError,
         api_status: http.Status,
     };
 
@@ -1288,6 +1351,18 @@ pub const Client = struct {
     /// any unmapped `std.http` error, and retrying (or recording a circuit
     /// breaker failure for) an unknown error class is unsafe.
     fn isRetryableTransport(err: TransportError) bool {
+        return switch (err) {
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.ConnectionTimedOut,
+            error.TemporaryNameServerFailure,
+            => true,
+            else => false,
+        };
+    }
+
+    /// Same as `isRetryableTransport` but accepts the wider `StreamTransportError` set.
+    fn isRetryableStreamTransport(err: StreamTransportError) bool {
         return switch (err) {
             error.ConnectionRefused,
             error.ConnectionResetByPeer,
@@ -1349,6 +1424,7 @@ pub const Client = struct {
                     .status = e.status,
                     .body = e.body,
                     .allocator = self.allocator,
+                    .retry_after_ns = e.retry_after_ns,
                 } };
             },
         }
@@ -1365,23 +1441,10 @@ pub const Client = struct {
                     .status = e.status,
                     .body = e.body,
                     .allocator = allocator,
+                    .retry_after_ns = e.retry_after_ns,
                 } };
             },
         }
-    }
-
-    /// Map a transport-layer error to the named `TransportError` set.
-    fn mapTransportError(err: anyerror) TransportError {
-        return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.ConnectionRefused => error.ConnectionRefused,
-            error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-            error.ConnectionTimedOut => error.ConnectionTimedOut,
-            error.TemporaryNameServerFailure => error.TemporaryNameServerFailure,
-            error.TlsFailure => error.TlsFailure,
-            error.ResponseTooLarge => error.ResponseTooLarge,
-            else => error.HttpRequestFailed,
-        };
     }
 
     // Construction
@@ -1615,21 +1678,26 @@ test "healthCheck: reflects shutdown state" {
 }
 
 test "mapTransportError: maps known transport errors" {
+    const noop = @import("../util/logging.zig").Logger.noop;
     // Act / Assert
-    try testing.expectEqual(error.OutOfMemory, Client.mapTransportError(error.OutOfMemory));
-    try testing.expectEqual(error.ConnectionRefused, Client.mapTransportError(error.ConnectionRefused));
-    try testing.expectEqual(error.ConnectionResetByPeer, Client.mapTransportError(error.ConnectionResetByPeer));
-    try testing.expectEqual(error.ConnectionTimedOut, Client.mapTransportError(error.ConnectionTimedOut));
-    try testing.expectEqual(error.TemporaryNameServerFailure, Client.mapTransportError(error.TemporaryNameServerFailure));
-    try testing.expectEqual(error.TlsFailure, Client.mapTransportError(error.TlsFailure));
-    try testing.expectEqual(error.ResponseTooLarge, Client.mapTransportError(error.ResponseTooLarge));
+    try testing.expectEqual(error.OutOfMemory, StdHttpTransport.mapTransportErrorWithLogger(noop, error.OutOfMemory));
+    try testing.expectEqual(error.ConnectionRefused, StdHttpTransport.mapTransportErrorWithLogger(noop, error.ConnectionRefused));
+    try testing.expectEqual(error.ConnectionResetByPeer, StdHttpTransport.mapTransportErrorWithLogger(noop, error.ConnectionResetByPeer));
+    try testing.expectEqual(error.ConnectionTimedOut, StdHttpTransport.mapTransportErrorWithLogger(noop, error.ConnectionTimedOut));
+    try testing.expectEqual(error.TemporaryNameServerFailure, StdHttpTransport.mapTransportErrorWithLogger(noop, error.TemporaryNameServerFailure));
+    try testing.expectEqual(error.TlsFailure, StdHttpTransport.mapTransportErrorWithLogger(noop, error.TlsFailure));
+    try testing.expectEqual(error.ResponseTooLarge, StdHttpTransport.mapTransportErrorWithLogger(noop, error.ResponseTooLarge));
+    try testing.expectEqual(error.DnsResolveFailed, StdHttpTransport.mapTransportErrorWithLogger(noop, error.UnknownHostName));
+    try testing.expectEqual(error.DnsResolveFailed, StdHttpTransport.mapTransportErrorWithLogger(noop, error.NameServerFailure));
+    try testing.expectEqual(error.IoFailed, StdHttpTransport.mapTransportErrorWithLogger(noop, error.BrokenPipe));
+    try testing.expectEqual(error.IoFailed, StdHttpTransport.mapTransportErrorWithLogger(noop, error.NetworkUnreachable));
 }
 
 test "mapTransportError: maps unknown errors to HttpRequestFailed" {
+    const noop = @import("../util/logging.zig").Logger.noop;
     // Act / Assert
-    try testing.expectEqual(error.HttpRequestFailed, Client.mapTransportError(error.Unexpected));
-    try testing.expectEqual(error.HttpRequestFailed, Client.mapTransportError(error.FileNotFound));
-    try testing.expectEqual(error.HttpRequestFailed, Client.mapTransportError(error.BrokenPipe));
+    try testing.expectEqual(error.HttpRequestFailed, StdHttpTransport.mapTransportErrorWithLogger(noop, error.Unexpected));
+    try testing.expectEqual(error.HttpRequestFailed, StdHttpTransport.mapTransportErrorWithLogger(noop, error.FileNotFound));
 }
 
 test "RawResponse.parseAs: parses body and deinit afterward is safe" {

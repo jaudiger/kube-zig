@@ -10,9 +10,19 @@ const std = @import("std");
 
 /// Snapshot of APF flow-control header values from a single response.
 /// Fields are null when the corresponding header was absent.
+/// When returned by `FlowControlTracker.get`, owns its string buffers and
+/// must be released via `deinit`.
 pub const FlowControl = struct {
     flow_schema_uid: ?[]const u8 = null,
     priority_level_uid: ?[]const u8 = null,
+    allocator: ?std.mem.Allocator = null,
+
+    /// Free owned string buffers. Safe to call on non-owning snapshots.
+    pub fn deinit(self: FlowControl) void {
+        const alloc = self.allocator orelse return;
+        if (self.flow_schema_uid) |uid| alloc.free(uid);
+        if (self.priority_level_uid) |uid| alloc.free(uid);
+    }
 };
 
 /// Thread-safe tracker for API Priority and Fairness flow-control state.
@@ -38,11 +48,28 @@ pub const FlowControlTracker = struct {
         self.clearLocked();
     }
 
-    /// Read the current flow-control state (thread-safe).
-    pub fn get(self: *FlowControlTracker, io: std.Io) FlowControl {
+    /// Return an owned snapshot of the current flow-control state (thread-safe).
+    /// The caller owns the returned value and must call `deinit` on it.
+    pub fn get(self: *FlowControlTracker, allocator: std.mem.Allocator, io: std.Io) error{OutOfMemory}!FlowControl {
         self.mu.lockUncancelable(io);
         defer self.mu.unlock(io);
-        return self.state;
+
+        const fs_uid: ?[]const u8 = if (self.state.flow_schema_uid) |uid|
+            try allocator.dupe(u8, uid)
+        else
+            null;
+        errdefer if (fs_uid) |uid| allocator.free(uid);
+
+        const pl_uid: ?[]const u8 = if (self.state.priority_level_uid) |uid|
+            try allocator.dupe(u8, uid)
+        else
+            null;
+
+        return .{
+            .flow_schema_uid = fs_uid,
+            .priority_level_uid = pl_uid,
+            .allocator = allocator,
+        };
     }
 
     /// Update flow-control state from a transport response.

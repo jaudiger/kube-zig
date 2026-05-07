@@ -19,13 +19,13 @@ pub const AuthProvider = struct {
     token_path: ?[]const u8,
     token_buf: ?[]const u8,
     bearer_header: ?[]const u8,
-    token_last_read: ?std.Io.Clock.Timestamp,
+    token_mtime: ?i96,
     mu: std.Io.Mutex,
     last_unauthorized: std.atomic.Value(bool),
     logger: Logger,
 
     /// Error set for authentication operations.
-    pub const Error = error{ OutOfMemory, HttpRequestFailed };
+    pub const Error = error{ OutOfMemory, TokenReadFailed };
 
     /// Create an AuthProvider that reads tokens from `token_path`.
     pub fn init(allocator: std.mem.Allocator, token_path: ?[]const u8, logger: Logger) AuthProvider {
@@ -34,7 +34,7 @@ pub const AuthProvider = struct {
             .token_path = token_path,
             .token_buf = null,
             .bearer_header = null,
-            .token_last_read = null,
+            .token_mtime = null,
             .mu = .init,
             .last_unauthorized = std.atomic.Value(bool).init(false),
             .logger = logger,
@@ -73,71 +73,73 @@ pub const AuthProvider = struct {
     /// copy of the current Authorization header, or null if no auth
     /// is configured. The caller owns the returned slice and must
     /// free it with `self.allocator`.
-    /// Thread-safe: acquires `mu` so that concurrent callers
-    /// cannot race on token state.
+    ///
+    /// Uses mtime-based caching: stat the file outside the lock to avoid
+    /// holding the mutex during disk I/O, then double-check under the lock
+    /// before installing a freshly-read token.
     pub fn getAuthHeader(self: *AuthProvider, io: std.Io, force: bool) Error!?[]const u8 {
-        self.mu.lockUncancelable(io);
-        defer self.mu.unlock(io);
-        try self.readToken(io, force);
-        if (self.bearer_header) |bh| {
-            return self.allocator.dupe(u8, bh) catch return error.OutOfMemory;
-        }
-        return null;
-    }
+        const path = self.token_path orelse return null;
 
-    fn readToken(self: *AuthProvider, io: std.Io, force: bool) Error!void {
-        const path = self.token_path orelse return;
+        const s = std.Io.Dir.cwd().statFile(io, path, .{}) catch return error.TokenReadFailed;
+        const current_mtime: i96 = s.mtime.nanoseconds;
 
-        if (force) {
-            self.logger.warn("forcing token refresh after unauthorized response", &.{});
-        }
-
-        if (!force) {
-            if (self.token_last_read) |last| {
-                const elapsed_ns: i96 = last.untilNow(io).raw.nanoseconds;
-                if (elapsed_ns >= 0 and elapsed_ns < 60 * std.time.ns_per_s) return;
+        // Fast path: cache is valid and no force refresh.
+        {
+            self.mu.lockUncancelable(io);
+            defer self.mu.unlock(io);
+            const should_use_cache = !force and if (self.token_mtime) |m| m == current_mtime else false;
+            if (should_use_cache) {
+                return if (self.bearer_header) |bh|
+                    self.allocator.dupe(u8, bh) catch error.OutOfMemory
+                else
+                    null;
             }
         }
 
-        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch {
+        if (force) self.logger.warn("forcing token refresh after unauthorized response", &.{});
+
+        // Read outside lock.
+        const new_token = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch |err| {
             self.logger.err("failed to read service account token", &.{
                 LogField.string("token_path", path),
-                LogField.string("error", "open failed"),
+                LogField.string("error", @errorName(err)),
             });
-            return error.HttpRequestFailed;
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.TokenReadFailed,
+            };
         };
-        defer file.close(io);
-
-        const new_token = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(1024 * 1024)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                self.logger.err("failed to read service account token", &.{
-                    LogField.string("token_path", path),
-                    LogField.string("error", @errorName(err)),
-                });
-                return error.HttpRequestFailed;
-            },
+        const new_header = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{new_token}) catch {
+            self.allocator.free(new_token);
+            return error.OutOfMemory;
         };
-        self.token_last_read = .now(io, .awake);
 
-        if (self.token_buf) |old| {
-            if (std.mem.eql(u8, old, new_token)) {
-                self.allocator.free(new_token);
-                return;
-            }
-            self.allocator.free(old);
+        // Install if still stale; discard if a concurrent caller already updated.
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+
+        if (force or self.token_mtime == null or current_mtime > self.token_mtime.?) {
+            if (self.token_buf) |old| self.allocator.free(old);
+            if (self.bearer_header) |old| self.allocator.free(old);
+            self.token_buf = new_token;
+            self.bearer_header = new_header;
+            self.token_mtime = current_mtime;
+            self.logger.debug("service account token refreshed", &.{
+                LogField.string("token_path", path),
+            });
+        } else {
+            self.allocator.free(new_token);
+            self.allocator.free(new_header);
         }
-        self.token_buf = new_token;
 
-        if (self.bearer_header) |old_hdr| self.allocator.free(old_hdr);
-        self.bearer_header = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{new_token}) catch return error.OutOfMemory;
-        self.logger.debug("service account token refreshed", &.{
-            LogField.string("token_path", path),
-        });
+        return if (self.bearer_header) |bh|
+            self.allocator.dupe(u8, bh) catch error.OutOfMemory
+        else
+            null;
     }
 };
 
-test "readToken caches within 60s window" {
+test "readToken caches until mtime changes" {
     // Arrange
     const io = std.testing.io;
     var tmp = testing.tmpDir(.{});
@@ -155,12 +157,7 @@ test "readToken caches within 60s window" {
     const h1 = (try auth.getAuthHeader(io, false)).?;
     defer testing.allocator.free(h1);
 
-    try testing.expect(auth.token_last_read != null);
-
-    // Overwrite the file on disk.
-    tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v2" }) catch unreachable;
-
-    // Act: second call within the cache window returns the cached token.
+    // Act: second call with unchanged file returns cached token.
     const h2 = (try auth.getAuthHeader(io, false)).?;
     defer testing.allocator.free(h2);
 

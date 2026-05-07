@@ -58,9 +58,9 @@ test "401 response leaves unauthorized flag set" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.unauthorized, "{\"message\":\"Unauthorized\"}");
+    try mock.respondWith(.unauthorized, "{\"message\":\"Unauthorized\"}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     const ctx = c.context();
 
@@ -77,9 +77,9 @@ test "successful response clears unauthorized flag" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     const ctx = c.context();
 
@@ -98,9 +98,9 @@ test "non-401 error response preserves unauthorized flag" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.internal_server_error, "{\"message\":\"Internal Server Error\"}");
+    try mock.respondWith(.internal_server_error, "{\"message\":\"Internal Server Error\"}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     const ctx = c.context();
 

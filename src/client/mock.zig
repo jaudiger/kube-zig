@@ -17,6 +17,8 @@ const testing = std.testing;
 const RetryPolicy = @import("../util/retry.zig").RetryPolicy;
 const RateLimiter = @import("../util/rate_limit.zig").RateLimiter;
 const CircuitBreaker = @import("../util/circuit_breaker.zig").CircuitBreaker;
+const TransportError = Client.TransportError;
+const StreamTransportError = Client.StreamTransportError;
 
 /// A mock HTTP transport for testing. Serves canned responses from a FIFO
 /// queue and records all requests for later inspection.
@@ -49,19 +51,32 @@ pub const MockTransport = struct {
     /// A canned response to return from send().
     /// When `fail_error` is set, sendImpl returns that error instead of an
     /// HTTP response; `status` and `body` are ignored.
+    /// When `body_owned` is true, the body slice was allocated by this mock
+    /// and will be freed when the response is consumed or the mock is deinited.
     pub const MockResponse = struct {
         status: http.Status,
         body: []const u8,
         retry_after_ns: ?u64 = null,
-        fail_error: ?anyerror = null,
+        fail_error: ?TransportError = null,
         flow_schema_uid: ?[]const u8 = null,
         priority_level_uid: ?[]const u8 = null,
+        body_owned: bool = false,
+
+        pub fn deinit(self: MockResponse, allocator: std.mem.Allocator) void {
+            if (self.body_owned) allocator.free(self.body);
+        }
     };
 
     /// A canned stream response to return from sendStream().
+    /// When `body_owned` is true, the body slice will be freed when consumed.
     pub const MockStreamResponse = struct {
         status: http.Status,
         body: []const u8,
+        body_owned: bool = false,
+
+        pub fn deinit(self: MockStreamResponse, allocator: std.mem.Allocator) void {
+            if (self.body_owned) allocator.free(self.body);
+        }
     };
 
     /// A recorded request for later inspection.
@@ -100,7 +115,9 @@ pub const MockTransport = struct {
             req.deinit(self.allocator);
         }
         self.requests.deinit(self.allocator);
+        for (self.responses.items) |resp| resp.deinit(self.allocator);
         self.responses.deinit(self.allocator);
+        for (self.stream_responses.items) |resp| resp.deinit(self.allocator);
         self.stream_responses.deinit(self.allocator);
     }
 
@@ -114,15 +131,15 @@ pub const MockTransport = struct {
 
     /// Create a `Client` wired to this mock transport.
     /// The returned client has no retry, no rate limiting, and base_url "http://mock".
-    pub fn client(self: *MockTransport, io: std.Io) Client {
+    pub fn client(self: *MockTransport, io: std.Io) error{OutOfMemory}!Client {
         return self.clientWithTracer(io, @import("../util/tracing.zig").TracerProvider.noop);
     }
 
     /// Create a `Client` wired to this mock transport with a custom tracer.
-    pub fn clientWithTracer(self: *MockTransport, io: std.Io, tracer: @import("../util/tracing.zig").TracerProvider) Client {
+    pub fn clientWithTracer(self: *MockTransport, io: std.Io, tracer: @import("../util/tracing.zig").TracerProvider) error{OutOfMemory}!Client {
         return .{
             .allocator = self.allocator,
-            .base_url = self.allocator.dupe(u8, "http://mock") catch @panic("OOM in MockTransport.client"),
+            .base_url = try self.allocator.dupe(u8, "http://mock"),
             .transport = self.transport(),
             .auth = AuthProvider.none(self.allocator),
             .retry_policy = RetryPolicy.disabled,
@@ -139,46 +156,47 @@ pub const MockTransport = struct {
 
     // Response enqueuing
     /// Enqueue a canned response with the given status and body string.
-    pub fn respondWith(self: *MockTransport, status: http.Status, body: []const u8) void {
-        self.responses.append(self.allocator, .{
+    pub fn respondWith(self: *MockTransport, status: http.Status, body: []const u8) error{OutOfMemory}!void {
+        try self.responses.append(self.allocator, .{
             .status = status,
             .body = body,
-        }) catch @panic("OOM in MockTransport.respondWith");
+        });
     }
 
     /// Enqueue a canned response with a Retry-After hint in nanoseconds.
-    pub fn respondWithRetryAfterNs(self: *MockTransport, status: http.Status, body: []const u8, retry_after_ns: u64) void {
-        self.responses.append(self.allocator, .{
+    pub fn respondWithRetryAfterNs(self: *MockTransport, status: http.Status, body: []const u8, retry_after_ns: u64) error{OutOfMemory}!void {
+        try self.responses.append(self.allocator, .{
             .status = status,
             .body = body,
             .retry_after_ns = retry_after_ns,
-        }) catch @panic("OOM in MockTransport.respondWithRetryAfterNs");
+        });
     }
 
     /// Enqueue a slot that returns a generic `HttpRequestFailed` error.
-    pub fn respondWithTransportError(self: *MockTransport) void {
-        self.respondWithTransportErrorKind(error.HttpRequestFailed);
+    pub fn respondWithTransportError(self: *MockTransport) error{OutOfMemory}!void {
+        return self.respondWithTransportErrorKind(error.HttpRequestFailed);
     }
 
-    /// Enqueue a slot that returns the given error from the transport layer.
-    /// Lets tests exercise specific error kinds such as `ConnectionResetByPeer`.
-    pub fn respondWithTransportErrorKind(self: *MockTransport, err: anyerror) void {
-        self.responses.append(self.allocator, .{
+    /// Enqueue a slot that returns the given transport error.
+    pub fn respondWithTransportErrorKind(self: *MockTransport, err: TransportError) error{OutOfMemory}!void {
+        try self.responses.append(self.allocator, .{
             .status = .internal_server_error,
             .body = "",
             .fail_error = err,
-        }) catch @panic("OOM in MockTransport.respondWithTransportErrorKind");
+        });
     }
 
     /// Enqueue a canned response by serializing a value to JSON.
-    pub fn respondWithJson(self: *MockTransport, status: http.Status, value: anytype) void {
-        const body = std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(value, .{
+    pub fn respondWithJson(self: *MockTransport, status: http.Status, value: anytype) error{OutOfMemory}!void {
+        const body = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(value, .{
             .emit_null_optional_fields = false,
-        })}) catch @panic("OOM in MockTransport.respondWithJson");
-        self.responses.append(self.allocator, .{
+        })});
+        errdefer self.allocator.free(body);
+        try self.responses.append(self.allocator, .{
             .status = status,
             .body = body,
-        }) catch @panic("OOM in MockTransport.respondWithJson");
+            .body_owned = true,
+        });
     }
 
     /// Enqueue a canned response with APF flow-control header values.
@@ -188,21 +206,21 @@ pub const MockTransport = struct {
         body: []const u8,
         flow_schema_uid: ?[]const u8,
         priority_level_uid: ?[]const u8,
-    ) void {
-        self.responses.append(self.allocator, .{
+    ) error{OutOfMemory}!void {
+        try self.responses.append(self.allocator, .{
             .status = status,
             .body = body,
             .flow_schema_uid = flow_schema_uid,
             .priority_level_uid = priority_level_uid,
-        }) catch @panic("OOM in MockTransport.respondWithFlowControl");
+        });
     }
 
     /// Enqueue a canned stream response.
-    pub fn respondWithStream(self: *MockTransport, status: http.Status, body: []const u8) void {
-        self.stream_responses.append(self.allocator, .{
+    pub fn respondWithStream(self: *MockTransport, status: http.Status, body: []const u8) error{OutOfMemory}!void {
+        try self.stream_responses.append(self.allocator, .{
             .status = status,
             .body = body,
-        }) catch @panic("OOM in MockTransport.respondWithStream");
+        });
     }
 
     // Request inspection
@@ -218,12 +236,12 @@ pub const MockTransport = struct {
     }
 
     // vtable implementation
-    fn vtableSend(ptr: *anyopaque, _: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+    fn vtableSend(ptr: *anyopaque, _: std.Io, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) TransportError!TransportResponse {
         const self: *MockTransport = @ptrCast(@alignCast(ptr));
         return self.sendImpl(opts, body, allocator);
     }
 
-    fn vtableSendStream(ptr: *anyopaque, _: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+    fn vtableSendStream(ptr: *anyopaque, _: std.Io, opts: RequestOptions, allocator: std.mem.Allocator) StreamTransportError!StreamResponse {
         const self: *MockTransport = @ptrCast(@alignCast(ptr));
         return self.sendStreamImpl(opts, allocator);
     }
@@ -237,14 +255,14 @@ pub const MockTransport = struct {
         return .{ .pool_size = 0, .free_connections = 0, .active_connections = 0 };
     }
 
-    fn sendImpl(self: *MockTransport, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) anyerror!TransportResponse {
+    fn sendImpl(self: *MockTransport, opts: RequestOptions, body: ?BodySerializer, allocator: std.mem.Allocator) TransportError!TransportResponse {
         // Record the request.
         var serialized_body: ?[]const u8 = null;
         if (body) |b| {
             // Serialize the body into a buffer to capture it for inspection.
             var buf_writer = Io.Writer.Allocating.init(self.allocator);
             errdefer buf_writer.deinit();
-            try b.write(&buf_writer.writer);
+            b.write(&buf_writer.writer) catch return error.ConnectionResetByPeer;
             serialized_body = try buf_writer.toOwnedSlice();
         }
 
@@ -300,17 +318,9 @@ pub const MockTransport = struct {
         // Return a copy of the body owned by the caller's allocator,
         // matching real transport behavior.
         const body_copy = try allocator.dupe(u8, resp.body);
-
-        // If the response was allocated by respondWithJson, free it.
-        // We can detect this: respondWith passes a caller-owned slice (not ours to free),
-        // respondWithJson allocates with self.allocator. Since we can't distinguish them
-        // reliably, we don't free here. The mock is short-lived for tests.
-        // Users of respondWithJson should let mock.deinit() handle cleanup if needed,
-        // but since respondWithJson's body gets consumed here, we need to track it.
-        // For simplicity: respondWithJson bodies are freed at mock deinit time.
-        // Actually they're already consumed from the array. We need to free here.
-        // Let's just not free; the test allocator will catch real leaks.
-        // The simplest approach: always dupe in respondWith/respondWithJson and free here.
+        errdefer allocator.free(body_copy);
+        // Free the body if it was allocated by respondWithJson.
+        if (resp.body_owned) self.allocator.free(resp.body);
 
         // Dupe flow-control header values onto the caller's allocator,
         // matching the real transport's ownership contract.
@@ -324,6 +334,7 @@ pub const MockTransport = struct {
             try allocator.dupe(u8, uid)
         else
             null;
+        errdefer if (pl_uid) |uid| allocator.free(uid);
 
         return .{
             .status = resp.status,
@@ -337,7 +348,7 @@ pub const MockTransport = struct {
         };
     }
 
-    fn sendStreamImpl(self: *MockTransport, opts: RequestOptions, allocator: std.mem.Allocator) anyerror!StreamResponse {
+    fn sendStreamImpl(self: *MockTransport, opts: RequestOptions, allocator: std.mem.Allocator) StreamTransportError!StreamResponse {
         // Record the request.
         const path_str = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{
             opts.uri.path.percent_encoded,
@@ -374,6 +385,7 @@ pub const MockTransport = struct {
         // an error instead of a stream (the real transport checks
         // status.class() != .success after receiveHead).
         if (resp.status.class() != .success) {
+            if (resp.body_owned) self.allocator.free(resp.body);
             if (resp.status == .gone) return error.HttpGone;
             return error.HttpRequestFailed;
         }
@@ -384,6 +396,7 @@ pub const MockTransport = struct {
 
         const body_copy = try allocator.dupe(u8, resp.body);
         errdefer allocator.free(body_copy);
+        if (resp.body_owned) self.allocator.free(resp.body);
 
         backing.* = .{
             .allocator = allocator,
@@ -392,7 +405,7 @@ pub const MockTransport = struct {
         };
 
         // Build a StreamState. We don't have a real http.Client.Request,
-        // so we use the deinit_fn override to handle cleanup correctly.
+        // so we use deinit_fn and extra to handle cleanup correctly.
         const state = try allocator.create(StreamState);
         state.* = .{
             .allocator = allocator,
@@ -402,9 +415,10 @@ pub const MockTransport = struct {
             .response = null,
             .reader = &backing.reader,
             .deinit_fn = mockStreamDeinit,
+            // extra holds the backing pointer; redirect_buf is left undefined
+            // because deinit_fn shadows the default cleanup that would touch it.
+            .extra = @ptrCast(backing),
         };
-        // Stash the backing pointer in redirect_buf so we can recover it in deinit.
-        @as(*align(1) *MockStreamBacking, @ptrCast(&state.redirect_buf)).* = backing;
 
         return .{
             .status = resp.status,
@@ -421,8 +435,7 @@ pub const MockTransport = struct {
     };
 
     fn mockStreamDeinit(state: *StreamState) void {
-        // Recover the backing pointer stashed in redirect_buf.
-        const backing = @as(*align(1) *MockStreamBacking, @ptrCast(&state.redirect_buf)).*;
+        const backing: *MockStreamBacking = @ptrCast(@alignCast(state.extra.?));
         backing.allocator.free(backing.data);
         backing.allocator.destroy(backing);
         state.allocator.destroy(state);
@@ -436,10 +449,10 @@ test "MockTransport: send returns canned response and records request" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, "{\"items\":[]}");
+    try mock.respondWith(.ok, "{\"items\":[]}");
 
     // Assert
-    var c = mock.client(io);
+    var c = try mock.client(io);
     defer c.deinit(io);
     const ctx = c.context();
 
@@ -459,7 +472,7 @@ test "MockTransport: empty queue returns error" {
     defer mock.deinit();
 
     // Act
-    var c = mock.client(io);
+    var c = try mock.client(io);
     defer c.deinit(io);
     const ctx = c.context();
 
@@ -475,18 +488,20 @@ test "MockTransport: flow control headers are surfaced on client" {
     defer mock.deinit();
 
     // Act
-    mock.respondWithFlowControl(.ok, "{\"items\":[]}", "fs-uid-123", "pl-uid-456");
+    try mock.respondWithFlowControl(.ok, "{\"items\":[]}", "fs-uid-123", "pl-uid-456");
 
     // Assert
-    var c = mock.client(io);
+    var c = try mock.client(io);
     defer c.deinit(io);
     const ctx = c.context();
 
     const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
-    try testing.expectEqualStrings("fs-uid-123", c.flowControl(io).flow_schema_uid.?);
-    try testing.expectEqualStrings("pl-uid-456", c.flowControl(io).priority_level_uid.?);
+    const fc1 = try c.flowControl(testing.allocator, io);
+    defer fc1.deinit();
+    try testing.expectEqualStrings("fs-uid-123", fc1.flow_schema_uid.?);
+    try testing.expectEqualStrings("pl-uid-456", fc1.priority_level_uid.?);
 }
 
 test "MockTransport: flow control headers are null when absent" {
@@ -496,18 +511,20 @@ test "MockTransport: flow control headers are null when absent" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, "{\"items\":[]}");
+    try mock.respondWith(.ok, "{\"items\":[]}");
 
     // Assert
-    var c = mock.client(io);
+    var c = try mock.client(io);
     defer c.deinit(io);
     const ctx = c.context();
 
     const result = try c.get(io, struct { items: ?[]const u8 = null }, "/api/v1/pods", ctx);
     defer result.deinit();
 
-    try testing.expect(c.flowControl(io).flow_schema_uid == null);
-    try testing.expect(c.flowControl(io).priority_level_uid == null);
+    const fc = try c.flowControl(testing.allocator, io);
+    defer fc.deinit();
+    try testing.expect(fc.flow_schema_uid == null);
+    try testing.expect(fc.priority_level_uid == null);
 }
 
 test "MockTransport: flow control headers are updated on each request" {
@@ -517,23 +534,27 @@ test "MockTransport: flow control headers are updated on each request" {
     defer mock.deinit();
 
     // Act
-    mock.respondWithFlowControl(.ok, "{}", "fs-1", "pl-1");
-    mock.respondWithFlowControl(.ok, "{}", "fs-2", null);
+    try mock.respondWithFlowControl(.ok, "{}", "fs-1", "pl-1");
+    try mock.respondWithFlowControl(.ok, "{}", "fs-2", null);
 
     // Assert
-    var c = mock.client(io);
+    var c = try mock.client(io);
     defer c.deinit(io);
     const ctx = c.context();
 
     const r1 = try c.get(io, struct {}, "/first", ctx);
     defer r1.deinit();
-    try testing.expectEqualStrings("fs-1", c.flowControl(io).flow_schema_uid.?);
-    try testing.expectEqualStrings("pl-1", c.flowControl(io).priority_level_uid.?);
+    const fc1 = try c.flowControl(testing.allocator, io);
+    defer fc1.deinit();
+    try testing.expectEqualStrings("fs-1", fc1.flow_schema_uid.?);
+    try testing.expectEqualStrings("pl-1", fc1.priority_level_uid.?);
 
     const r2 = try c.get(io, struct {}, "/second", ctx);
     defer r2.deinit();
-    try testing.expectEqualStrings("fs-2", c.flowControl(io).flow_schema_uid.?);
-    try testing.expect(c.flowControl(io).priority_level_uid == null);
+    const fc2 = try c.flowControl(testing.allocator, io);
+    defer fc2.deinit();
+    try testing.expectEqualStrings("fs-2", fc2.flow_schema_uid.?);
+    try testing.expect(fc2.priority_level_uid == null);
 }
 
 test "MockTransport: noop tracer does not add traceparent header" {
@@ -543,10 +564,10 @@ test "MockTransport: noop tracer does not add traceparent header" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, "{\"items\":[]}");
+    try mock.respondWith(.ok, "{\"items\":[]}");
 
     // Assert
-    var c = mock.client(io); // uses noop tracer by default
+    var c = try mock.client(io); // uses noop tracer by default
     defer c.deinit(io);
     const ctx = c.context();
 
@@ -601,9 +622,9 @@ test "MockTransport: test tracer adds traceparent header and calls startSpan/end
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, "{\"items\":[]}");
+    try mock.respondWith(.ok, "{\"items\":[]}");
 
-    var c = mock.clientWithTracer(io, provider);
+    var c = try mock.clientWithTracer(io, provider);
     defer c.deinit(io);
     const ctx = c.context();
 
@@ -664,9 +685,9 @@ test "MockTransport: test tracer endSpan called with error on non-2xx" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.not_found, "{\"message\":\"not found\"}");
+    try mock.respondWith(.not_found, "{\"message\":\"not found\"}");
 
-    var c = mock.clientWithTracer(io, provider);
+    var c = try mock.clientWithTracer(io, provider);
     defer c.deinit(io);
     const ctx = c.context();
 

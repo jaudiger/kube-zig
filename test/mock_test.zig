@@ -59,10 +59,10 @@ test "Api(CoreV1Pod).list: parses pod list from mock response" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_list_json);
+    try mock.respondWith(.ok, pod_list_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -80,10 +80,10 @@ test "Api(CoreV1Pod).get: parses single pod from mock response" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_json);
+    try mock.respondWith(.ok, pod_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -101,10 +101,10 @@ test "Api(CoreV1Pod).create: sends POST with serialized body" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.created, pod_json);
+    try mock.respondWith(.created, pod_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -130,10 +130,10 @@ test "Api(CoreV1Pod).delete: sends DELETE to correct path" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.ok, "{}");
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -153,10 +153,10 @@ test "Api(AppsV1Deployment).create: sends to correct named-group path" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.created, deployment_json);
+    try mock.respondWith(.created, deployment_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const deploys = Api(k8s.AppsV1Deployment).init(&c, c.context(), "default");
@@ -177,12 +177,12 @@ test "Api(CoreV1Node).get: cluster-scoped path has no namespace" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"node-1","resourceVersion":"10"}}
     );
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const nodes = Api(k8s.CoreV1Node).init(&c, c.context(), null);
@@ -206,10 +206,10 @@ test "Api(CoreV1Pod).get: 404 response returns api_error with HttpNotFound" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.not_found, not_found_json);
+    try mock.respondWith(.not_found, not_found_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -235,7 +235,7 @@ test "Api(CoreV1Pod).get: transport error propagates" {
     // Don't enqueue any response; the mock will return HttpRequestFailed.
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -261,9 +261,9 @@ test "WatchStream: parses ADDED/MODIFIED/DELETED events from mock stream" {
     ;
 
     // Assert
-    mock.respondWithStream(.ok, stream_body);
+    try mock.respondWithStream(.ok, stream_body);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -301,9 +301,9 @@ test "WatchStream: resourceVersion is tracked" {
     // Note: the trailing `\\` produces a final newline, giving: {...}\n
 
     // Assert
-    mock.respondWithStream(.ok, stream_body);
+    try mock.respondWithStream(.ok, stream_body);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -327,10 +327,10 @@ test "Api(CoreV1Pod).list: label selector is included in request path" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_list_json);
+    try mock.respondWith(.ok, pod_list_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -348,10 +348,10 @@ test "Api(CoreV1Pod).update: sends PUT with body serializer" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_json);
+    try mock.respondWith(.ok, pod_json);
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -374,12 +374,12 @@ test "Multiple requests are recorded in order" {
     defer mock.deinit();
 
     // Act
-    mock.respondWith(.ok, pod_list_json);
-    mock.respondWith(.ok, pod_json);
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.ok, pod_list_json);
+    try mock.respondWith(.ok, pod_json);
+    try mock.respondWith(.ok, "{}");
 
     // Assert
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -408,9 +408,9 @@ test "WatchStream: next returns null on empty stream" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWithStream(.ok, "");
+    try mock.respondWithStream(.ok, "");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -432,9 +432,9 @@ test "WatchStream: resourceVersion returns null before any events" {
         \\{"type":"ADDED","object":{"metadata":{"name":"pod-1","namespace":"default","resourceVersion":"10"}}}
         \\
     ;
-    mock.respondWithStream(.ok, stream_body);
+    try mock.respondWithStream(.ok, stream_body);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -456,9 +456,9 @@ test "WatchStream: close is idempotent" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWithStream(.ok, "");
+    try mock.respondWithStream(.ok, "");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -482,9 +482,9 @@ test "WatchStream: readLine rejects lines exceeding max_line_size" {
     defer testing.allocator.free(big_line);
     @memset(big_line, 'x');
 
-    mock.respondWithStream(.ok, big_line);
+    try mock.respondWithStream(.ok, big_line);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -500,9 +500,9 @@ test "ctx deadline reaches the transport via RequestOptions" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var cs = CancelSource.init();
@@ -520,9 +520,9 @@ test "WatchStream: close after ctx cancel joins watcher without hanging" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWithStream(.ok, "");
+    try mock.respondWithStream(.ok, "");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var cs = CancelSource.init();
@@ -545,11 +545,11 @@ test "collectAll: single page with no continue token returns all items" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"100"},"items":[{"metadata":{"name":"pod-1","namespace":"default"}},{"metadata":{"name":"pod-2","namespace":"default"}}]}
     );
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -570,17 +570,17 @@ test "collectAll: multi-page with continue tokens accumulates items" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"200","continue":"token-abc"},"items":[{"metadata":{"name":"pod-1","namespace":"default"}}]}
     );
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"200","continue":"token-def"},"items":[{"metadata":{"name":"pod-2","namespace":"default"}}]}
     );
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"200"},"items":[{"metadata":{"name":"pod-3","namespace":"default"}}]}
     );
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -601,11 +601,11 @@ test "collectAll: empty continue token treated as end of pagination" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"300","continue":""},"items":[{"metadata":{"name":"pod-1","namespace":"default"}}]}
     );
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -624,14 +624,14 @@ test "collectAll: resource_version matches first page" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"500","continue":"more"},"items":[{"metadata":{"name":"pod-1","namespace":"default"}}]}
     );
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"501"},"items":[{"metadata":{"name":"pod-2","namespace":"default"}}]}
     );
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -658,9 +658,9 @@ test "DiscoveryClient.hasResource: returns true when resource exists" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -678,9 +678,9 @@ test "DiscoveryClient.hasResource: returns false when resource not in list" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("services"));
+    try mock.respondWith(.ok, comptime resourceListJson("services"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -698,9 +698,9 @@ test "DiscoveryClient.hasResource: returns false on 404" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.not_found, not_found_json);
+    try mock.respondWith(.not_found, not_found_json);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -718,11 +718,11 @@ test "DiscoveryClient.hasResource: returns error on 500" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.internal_server_error,
+    try mock.respondWith(.internal_server_error,
         \\{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"internal error","reason":"InternalError","code":500}
     );
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -746,7 +746,7 @@ test "DiscoveryClient.hasGroup: empty string returns true without request" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -765,9 +765,9 @@ test "DiscoveryClient.hasGroup: returns true when group found" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, api_group_list_with_apps);
+    try mock.respondWith(.ok, api_group_list_with_apps);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -785,9 +785,9 @@ test "DiscoveryClient.hasGroup: returns false when group not found" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, api_group_list_without_apps);
+    try mock.respondWith(.ok, api_group_list_without_apps);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -805,7 +805,7 @@ test "DiscoveryClient.findPreferredVersion: empty group returns v1" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -824,9 +824,9 @@ test "DiscoveryClient.findPreferredVersion: returns preferredVersion when set" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, api_group_list_with_apps);
+    try mock.respondWith(.ok, api_group_list_with_apps);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -845,11 +845,11 @@ test "DiscoveryClient.findPreferredVersion: falls back to first version when pre
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"groups":[{"name":"custom.io","versions":[{"groupVersion":"custom.io/v1beta1","version":"v1beta1"}]}]}
     );
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -872,9 +872,9 @@ test "Api(CoreV1Pod).apply: sends PATCH with apply content type and core apiVers
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, pod_json);
+    try mock.respondWith(.ok, pod_json);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
@@ -900,9 +900,9 @@ test "Api(AppsV1Deployment).apply: named group has apiVersion apps/v1" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, deployment_json);
+    try mock.respondWith(.ok, deployment_json);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const deploys = Api(k8s.AppsV1Deployment).init(&c, c.context(), "default");
@@ -931,9 +931,9 @@ test "DynamicApi.apply: sets apiVersion and kind on object body" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const api = try DynamicApi.init(&c, c.context(), .{
@@ -971,9 +971,9 @@ test "DynamicApi.apply: non-object body sent without apiVersion/kind injection" 
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, "{}");
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     const api = try DynamicApi.init(&c, c.context(), .{
@@ -1005,9 +1005,9 @@ test "DiscoveryClient cache: hasResource twice for same group/version uses one r
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -1028,9 +1028,9 @@ test "DiscoveryClient cache: hasResource then isResourceNamespaced shares cache"
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -1052,10 +1052,10 @@ test "DiscoveryClient cache: TTL=0 disables caching" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{ .cache_ttl_ns = 0 });
@@ -1074,10 +1074,10 @@ test "DiscoveryClient cache: invalidateCache forces re-fetch" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -1097,12 +1097,12 @@ test "DiscoveryClient cache: error responses are not cached" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.internal_server_error,
+    try mock.respondWith(.internal_server_error,
         \\{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"internal error","reason":"InternalError","code":500}
     );
-    mock.respondWith(.ok, comptime resourceListJson("pods"));
+    try mock.respondWith(.ok, comptime resourceListJson("pods"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -1124,9 +1124,9 @@ test "DiscoveryClient cache: hasGroup + findPreferredVersion share groups cache"
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, api_group_list_with_apps);
+    try mock.respondWith(.ok, api_group_list_with_apps);
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{});
@@ -1148,12 +1148,12 @@ test "DiscoveryClient cache: max_resource_cache_entries evicts oldest entry" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("things"));
-    mock.respondWith(.ok, comptime resourceListJson("things"));
-    mock.respondWith(.ok, comptime resourceListJson("things"));
-    mock.respondWith(.ok, comptime resourceListJson("things"));
+    try mock.respondWith(.ok, comptime resourceListJson("things"));
+    try mock.respondWith(.ok, comptime resourceListJson("things"));
+    try mock.respondWith(.ok, comptime resourceListJson("things"));
+    try mock.respondWith(.ok, comptime resourceListJson("things"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{
@@ -1176,10 +1176,10 @@ test "DiscoveryClient cache: entries within max limit are retained" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWith(.ok, comptime resourceListJson("things"));
-    mock.respondWith(.ok, comptime resourceListJson("things"));
+    try mock.respondWith(.ok, comptime resourceListJson("things"));
+    try mock.respondWith(.ok, comptime resourceListJson("things"));
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     var discovery = DiscoveryClient.init(testing.allocator, &c, c.context(), .{
@@ -1206,7 +1206,7 @@ test "Client.poolStats: returns stats from mock transport" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
 
     // Act
@@ -1224,11 +1224,11 @@ test "retry loop: transport error after 429 with Retry-After hint" {
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
 
-    mock.respondWithRetryAfterNs(.too_many_requests, "{}", 1);
-    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
-    mock.respondWith(.ok, "{}");
+    try mock.respondWithRetryAfterNs(.too_many_requests, "{}", 1);
+    try mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
+    try mock.respondWith(.ok, "{}");
 
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     c.retry_policy = .{ .max_retries = 2, .initial_backoff_ns = 0, .max_backoff_ns = 0, .backoff_multiplier = 1, .jitter = false };
     defer c.deinit(std.testing.io);
     const ctx = c.context();

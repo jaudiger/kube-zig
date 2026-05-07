@@ -42,10 +42,10 @@ test "retryLoop records transport failures for circuit breaker" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
+    try mock.respondWithTransportErrorKind(error.ConnectionResetByPeer);
 
     // Act
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.circuit_breaker = try CircuitBreaker.init(.{ .failure_threshold = 5 });
     c.retry_policy = RetryPolicy.disabled;
@@ -65,10 +65,10 @@ test "retryLoop does not record HttpRequestFailed as circuit breaker failure" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
-    mock.respondWithTransportError();
+    try mock.respondWithTransportError();
 
     // Act
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.circuit_breaker = try CircuitBreaker.init(.{ .failure_threshold = 5 });
     c.retry_policy = RetryPolicy.disabled;
@@ -91,13 +91,13 @@ test "retryLoop records 502/503/504 as circuit breaker failures" {
         var mock = MockTransport.init(testing.allocator);
         defer mock.deinit();
 
-        var c = mock.client(std.testing.io);
+        var c = try mock.client(std.testing.io);
         defer c.deinit(std.testing.io);
         c.circuit_breaker = try CircuitBreaker.init(.{ .failure_threshold = 5 });
         c.retry_policy = RetryPolicy.disabled;
 
         // Act
-        mock.respondWith(status, "error");
+        try mock.respondWith(status, "error");
 
         const result = try c.get(std.testing.io, struct {}, "/api/v1/pods", c.context());
         defer result.deinit();
@@ -118,7 +118,7 @@ test "retryLoop records 404 and 429 as circuit breaker success" {
         var mock = MockTransport.init(testing.allocator);
         defer mock.deinit();
 
-        var c = mock.client(std.testing.io);
+        var c = try mock.client(std.testing.io);
         defer c.deinit(std.testing.io);
         c.circuit_breaker = try CircuitBreaker.init(.{ .failure_threshold = 5 });
         c.retry_policy = RetryPolicy.disabled;
@@ -130,7 +130,7 @@ test "retryLoop records 404 and 429 as circuit breaker success" {
         }
 
         // Act
-        mock.respondWith(status, "response");
+        try mock.respondWith(status, "response");
 
         const result = try c.get(std.testing.io, struct {}, "/api/v1/pods", c.context());
         defer result.deinit();
@@ -149,7 +149,7 @@ test "CircuitBreakerOpen propagated from retryLoop without transport call" {
     defer mock.deinit();
 
     // Act
-    var c = mock.client(std.testing.io);
+    var c = try mock.client(std.testing.io);
     defer c.deinit(std.testing.io);
     c.circuit_breaker = try CircuitBreaker.init(.{
         .failure_threshold = 1,
