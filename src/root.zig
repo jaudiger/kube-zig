@@ -97,8 +97,10 @@ pub const ObjectKey = @import("object_key.zig").ObjectKey;
 const reflector_mod = @import("cache/reflector.zig");
 pub const Reflector = reflector_mod.Reflector;
 pub const ReflectorEvent = reflector_mod.ReflectorEvent;
+pub const ReflectorError = reflector_mod.ReflectorError;
 pub const ReflectorOptions = reflector_mod.ReflectorOptions;
 pub const ReflectorState = reflector_mod.ReflectorState;
+pub const ResourceVersion = @import("util/resource_version.zig").ResourceVersion;
 
 const informer_mod = @import("cache/informer.zig");
 pub const Informer = informer_mod.Informer;

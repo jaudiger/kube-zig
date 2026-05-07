@@ -63,15 +63,13 @@ const watch_partial_json =
 // Helpers
 // ============================================================================
 
-/// Free an init_page's items (arena + entry wrapper for each, then the slice)
-/// and its owned rv_buf.
+/// Free an init_page's items (arena + entry wrapper for each, then the slice).
 fn freeInitPage(allocator: std.mem.Allocator, page: ReflectorEvent(Pod).InitPage) void {
     for (page.items) |item| {
         item.arena.deinit();
         allocator.destroy(item.arena);
     }
     allocator.free(page.items);
-    if (page.rv_buf) |buf| allocator.free(buf);
 }
 
 // ============================================================================
@@ -113,7 +111,7 @@ test "watch 410 triggers re-list" {
     const ev3 = try reflector.step(std.testing.io);
     try testing.expect(ev3 == null);
     try testing.expect(reflector.state == .initial);
-    try testing.expectEqualStrings("", reflector.resource_version.?);
+    try testing.expectEqualStrings("", reflector.resource_version.slice().?);
 
     // Step 4: initial listing again, re-list succeeds.
     const ev4 = (try reflector.step(std.testing.io)).?;
@@ -155,7 +153,7 @@ test "network disconnect reconnects with resourceVersion" {
     const ev2 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev2 == .watch_event);
     ev2.watch_event.deinit();
-    try testing.expectEqualStrings("101", reflector.resource_version.?);
+    try testing.expectEqualStrings("101", reflector.resource_version.slice().?);
 
     // Step 3: stream ends cleanly, returns watch_ended.
     const ev3 = (try reflector.step(std.testing.io)).?;
@@ -199,12 +197,12 @@ test "bookmark updates resourceVersion" {
     // Step 1: list (rv 100).
     const ev1 = (try reflector.step(std.testing.io)).?;
     freeInitPage(testing.allocator, ev1.init_page);
-    try testing.expectEqualStrings("100", reflector.resource_version.?);
+    try testing.expectEqualStrings("100", reflector.resource_version.slice().?);
 
     // Step 2: watch reads BOOKMARK rv=150. Returns null (internal-only step).
     const ev2 = try reflector.step(std.testing.io);
     try testing.expect(ev2 == null);
-    try testing.expectEqualStrings("150", reflector.resource_version.?);
+    try testing.expectEqualStrings("150", reflector.resource_version.slice().?);
 }
 
 // ============================================================================
@@ -299,7 +297,6 @@ test "empty re-list after 410 clears cache" {
     const replace_result1 = try store.replace(std.testing.io, ev1.init_page.items);
     replace_result1.release();
     testing.allocator.free(ev1.init_page.items);
-    if (ev1.init_page.rv_buf) |buf| testing.allocator.free(buf);
     try testing.expectEqual(@as(u32, 2), store.len(std.testing.io));
 
     // Step 2: watch returns 410 ERROR.
@@ -318,7 +315,6 @@ test "empty re-list after 410 clears cache" {
     // Use replace to get the items that were deleted.
     const replace_result2 = try store.replace(std.testing.io, ev4.init_page.items);
     testing.allocator.free(ev4.init_page.items);
-    if (ev4.init_page.rv_buf) |buf| testing.allocator.free(buf);
 
     // Verify 2 items were removed.
     try testing.expectEqual(@as(usize, 2), replace_result2.entries.len);
@@ -354,11 +350,12 @@ test "partial JSON line treated as disconnect" {
     const ev1 = (try reflector.step(std.testing.io)).?;
     freeInitPage(testing.allocator, ev1.init_page);
 
-    // Step 2: watch opens, reads partial JSON, results in transient error.
+    // Step 2: watch opens, reads partial JSON with no trailing newline.
+    // readLine logs the dropped bytes and returns null, so next() returns null.
+    // The reflector sees a clean stream end and emits watch_ended.
     const ev2 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev2 == .transient_error);
-    try testing.expectEqual(@as(u32, 1), reflector.consecutive_errors);
-    // Watch stream should be closed (reflector will retry).
+    try testing.expect(ev2 == .watch_ended);
+    try testing.expectEqual(@as(u32, 0), reflector.consecutive_errors);
     try testing.expect(reflector.watch_stream == null);
 }
 
@@ -392,7 +389,7 @@ test "410 on initial list retries without resourceVersion" {
     // Step 2: gone resets rv to "" (quorum read).
     const ev2 = try reflector.step(std.testing.io);
     try testing.expect(ev2 == null);
-    try testing.expectEqualStrings("", reflector.resource_version.?);
+    try testing.expectEqualStrings("", reflector.resource_version.slice().?);
 
     // Step 3: re-list succeeds.
     const ev3 = (try reflector.step(std.testing.io)).?;

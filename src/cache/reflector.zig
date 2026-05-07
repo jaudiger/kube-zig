@@ -22,6 +22,48 @@ const InformerMetrics = @import("../util/metrics.zig").InformerMetrics;
 const logging_mod = @import("../util/logging.zig");
 const Logger = logging_mod.Logger;
 const LogField = logging_mod.Field;
+const ResourceVersion = @import("../util/resource_version.zig").ResourceVersion;
+
+/// Typed error set for reflector errors.
+pub const ReflectorError = error{
+    Unauthorized,
+    Forbidden,
+    HttpFailed,
+    NetworkFailed,
+    StreamCorrupt,
+    ParseFailed,
+    LineTooLong,
+    OutOfMemory,
+    Canceled,
+    Other,
+};
+
+fn classifyError(err: anyerror) ReflectorError {
+    return switch (err) {
+        error.HttpUnauthorized => error.Unauthorized,
+        error.HttpForbidden => error.Forbidden,
+        error.HttpGone,
+        error.HttpNotFound,
+        error.HttpServerError,
+        error.HttpRequestFailed,
+        error.HttpConflict,
+        error.HttpUnprocessable,
+        error.HttpServiceUnavailable,
+        => error.HttpFailed,
+        error.ConnectionResetByPeer,
+        error.ConnectionTimedOut,
+        error.TlsFailure,
+        error.DnsResolveFailed,
+        error.IoFailed,
+        => error.NetworkFailed,
+        error.JsonParseFailed, error.UnknownEventType => error.ParseFailed,
+        error.ResourceVersionTooLong => error.StreamCorrupt,
+        error.LineTooLong => error.LineTooLong,
+        error.OutOfMemory => error.OutOfMemory,
+        error.Canceled => error.Canceled,
+        else => error.Other,
+    };
+}
 
 /// Events produced by the Reflector for the Informer to process.
 pub fn ReflectorEvent(comptime T: type) type {
@@ -41,24 +83,20 @@ pub fn ReflectorEvent(comptime T: type) type {
         gone: void,
 
         /// A transient error occurred. The reflector will backoff and retry.
-        transient_error: anyerror,
+        transient_error: ReflectorError,
 
         /// Consecutive errors have exceeded the configured threshold.
         /// The reflector has entered the `.failed` state and will not retry.
-        persistent_error: anyerror,
+        persistent_error: ReflectorError,
 
         pub const InitPage = struct {
             items: []store_mod.Store(T).ReplaceItem,
             is_last: bool,
-            resource_version: []const u8,
-            /// Allocator-owned memory for items array and RV string.
-            /// Caller must free items array after consuming and free rv_buf.
-            rv_buf: ?[]const u8,
+            resource_version: ResourceVersion,
 
             /// Free metadata memory. Caller must handle item arenas separately.
             pub fn deinitMeta(self: *InitPage, allocator: std.mem.Allocator) void {
                 allocator.free(self.items);
-                if (self.rv_buf) |buf| allocator.free(buf);
             }
         };
     };
@@ -138,7 +176,7 @@ pub fn Reflector(comptime T: type) type {
         ctx: Context,
         namespace: if (meta.namespaced) []const u8 else ?[]const u8,
         state: State,
-        resource_version: ?[]const u8,
+        resource_version: ResourceVersion,
         continue_token: ?[]const u8,
         watch_stream: ?watch_mod.WatchStream(T),
         options: ReflectorOptions,
@@ -162,7 +200,7 @@ pub fn Reflector(comptime T: type) type {
                 .ctx = ctx,
                 .namespace = namespace,
                 .state = .initial,
-                .resource_version = null,
+                .resource_version = .{},
                 .continue_token = null,
                 .watch_stream = null,
                 .options = opts,
@@ -183,7 +221,6 @@ pub fn Reflector(comptime T: type) type {
         /// Release all resources owned by the reflector.
         pub fn deinit(self: *Self, io: std.Io) void {
             self.closeWatch(io);
-            if (self.resource_version) |rv| self.allocator.free(rv);
             if (self.continue_token) |ct| self.allocator.free(ct);
         }
 
@@ -215,8 +252,8 @@ pub fn Reflector(comptime T: type) type {
             }
             // First list: rv="0" (serve from watch cache).
             // After 410: rv="" (quorum read).
-            if (self.resource_version == null) {
-                self.resource_version = try self.allocator.dupe(u8, "0");
+            if (!self.resource_version.isSet()) {
+                self.resource_version.assign("0") catch unreachable;
             }
             self.logger.info("initial list starting", &.{
                 LogField.string("resource", meta.resource),
@@ -229,7 +266,7 @@ pub fn Reflector(comptime T: type) type {
             const list_start: std.Io.Clock.Timestamp = .now(io, .awake);
             const api = ApiT.init(self.client, self.ctx, self.namespace);
 
-            const rv = self.resource_version;
+            const rv = self.resource_version.slice();
 
             // Disable pagination when using a specific RV (not "0" or "")
             // to avoid extra etcd load.
@@ -298,25 +335,16 @@ pub fn Reflector(comptime T: type) type {
                         self.logger.info("initial list completed", &.{
                             LogField.string("resource", meta.resource),
                             LogField.uint("item_count", @intCast(replace_items.len)),
-                            LogField.string("resource_version", self.resource_version orelse ""),
+                            LogField.string("resource_version", self.resource_version.slice() orelse ""),
                         });
                         self.transitionTo(.watching);
                     }
-
-                    // Dupe the RV so the event owns its copy independently
-                    // of self.resource_version, which later steps may free.
-                    const rv_for_event = self.resource_version orelse "";
-                    const rv_dupe = self.allocator.dupe(u8, rv_for_event) catch |err| {
-                        self.freeReplaceItems(replace_items);
-                        return self.recordError(err);
-                    };
 
                     return .{
                         .init_page = .{
                             .items = replace_items,
                             .is_last = is_last,
-                            .resource_version = rv_dupe,
-                            .rv_buf = rv_dupe,
+                            .resource_version = self.resource_version,
                         },
                     };
                 },
@@ -342,14 +370,14 @@ pub fn Reflector(comptime T: type) type {
             if (self.watch_stream == null) {
                 self.logger.info("watch reconnecting", &.{
                     LogField.string("resource", meta.resource),
-                    LogField.string("resource_version", self.resource_version orelse ""),
+                    LogField.string("resource_version", self.resource_version.slice() orelse ""),
                 });
                 const timeout = self.randomizedWatchTimeout(io);
                 const api = ApiT.init(self.client, self.ctx, self.namespace);
                 self.watch_stream = api.watch(io, .{
                     .label_selector = self.options.label_selector,
                     .field_selector = self.options.field_selector,
-                    .resource_version = self.resource_version,
+                    .resource_version = self.resource_version.slice(),
                     .timeout_seconds = timeout,
                     .allow_bookmarks = true,
                 }) catch |err| {
@@ -384,9 +412,9 @@ pub fn Reflector(comptime T: type) type {
                 switch (event.event) {
                     .bookmark => |bm| {
                         // Update RV silently, don't forward to informer.
-                        self.updateResourceVersion(bm.resource_version) catch {
+                        self.updateResourceVersion(bm.resource_version) catch |err| {
                             event.deinit();
-                            return self.recordError(error.OutOfMemory);
+                            return self.recordError(err);
                         };
                         event.deinit();
                         return null; // internal-only step
@@ -448,10 +476,9 @@ pub fn Reflector(comptime T: type) type {
             // Reset for a fresh list with quorum read.
             self.logger.warn("re-listing after 410 Gone", &.{
                 LogField.string("resource", meta.resource),
-                LogField.string("old_resource_version", self.resource_version orelse ""),
+                LogField.string("old_resource_version", self.resource_version.slice() orelse ""),
             });
-            if (self.resource_version) |rv| self.allocator.free(rv);
-            self.resource_version = try self.allocator.dupe(u8, "");
+            self.resource_version.assign("") catch unreachable;
             self.transitionTo(.initial);
             return null;
         }
@@ -459,14 +486,12 @@ pub fn Reflector(comptime T: type) type {
         /// Force a re-list by resetting to initial state with a quorum read.
         /// Called by the informer when a watch event cannot be applied
         /// (e.g. OOM on store.put), to ensure the cache is eventually consistent.
-        pub fn forceRelist(self: *Self, io: std.Io) std.mem.Allocator.Error!void {
+        pub fn forceRelist(self: *Self, io: std.Io) void {
             self.logger.warn("forcing re-list", &.{
                 LogField.string("resource", meta.resource),
             });
             self.closeWatch(io);
-            const new_rv = try self.allocator.dupe(u8, "");
-            if (self.resource_version) |rv| self.allocator.free(rv);
-            self.resource_version = new_rv;
+            self.resource_version.assign("") catch unreachable;
             std.debug.assert(self.state != .failed);
             self.state = .initial;
         }
@@ -588,11 +613,8 @@ pub fn Reflector(comptime T: type) type {
             return result_list.toOwnedSlice(self.allocator);
         }
 
-        /// Dupe `new_rv`, free the old one, and store the new owned copy.
-        fn updateResourceVersion(self: *Self, new_rv: []const u8) !void {
-            const owned_rv = try self.allocator.dupe(u8, new_rv);
-            if (self.resource_version) |old_rv| self.allocator.free(old_rv);
-            self.resource_version = owned_rv;
+        fn updateResourceVersion(self: *Self, new_rv: []const u8) error{ResourceVersionTooLong}!void {
+            try self.resource_version.assign(new_rv);
         }
 
         /// Record a transient error and return the appropriate event.
@@ -601,6 +623,7 @@ pub fn Reflector(comptime T: type) type {
         fn recordError(self: *Self, err: anyerror) ReflectorEvent(T) {
             self.consecutive_errors += 1;
             self.backoff_attempt += 1;
+            const classified = classifyError(err);
             if (self.options.max_consecutive_errors) |max| {
                 if (self.consecutive_errors >= max) {
                     self.logger.err("list/watch failed", &.{
@@ -608,10 +631,10 @@ pub fn Reflector(comptime T: type) type {
                         LogField.string("error", @errorName(err)),
                     });
                     self.transitionTo(.failed);
-                    return .{ .persistent_error = err };
+                    return .{ .persistent_error = classified };
                 }
             }
-            return .{ .transient_error = err };
+            return .{ .transient_error = classified };
         }
 
         /// Reset the consecutive error counter on any successful operation.

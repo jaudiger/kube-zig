@@ -281,8 +281,6 @@ pub fn Informer(comptime T: type) type {
         }
 
         fn processInitPage(self: *Self, io: std.Io, page: ReflectorEvent(T).InitPage) void {
-            defer if (page.rv_buf) |buf| self.allocator.free(buf);
-
             // If a previous page failed, discard all subsequent pages
             // to prevent a partial store replacement.
             if (self.sync_failed.load(.acquire)) {
@@ -354,9 +352,7 @@ pub fn Informer(comptime T: type) type {
                     const old = self.store.put(io, key, obj, parsed.arena) catch {
                         parsed.deinit();
                         self.logger.err("watch add failed (OOM), forcing re-list", &.{});
-                        self.reflector.forceRelist(io) catch {
-                            self.logger.err("forceRelist failed: OOM setting resource version", &.{});
-                        };
+                        self.reflector.forceRelist(io);
                         return;
                     };
                     if (old) |old_entry| {
@@ -381,9 +377,7 @@ pub fn Informer(comptime T: type) type {
                     const old = self.store.put(io, key, obj, parsed.arena) catch {
                         parsed.deinit();
                         self.logger.err("watch modify failed (OOM), forcing re-list", &.{});
-                        self.reflector.forceRelist(io) catch {
-                            self.logger.err("forceRelist failed: OOM setting resource version", &.{});
-                        };
+                        self.reflector.forceRelist(io);
                         return;
                     };
                     if (old) |old_entry| {
@@ -453,15 +447,9 @@ pub fn Informer(comptime T: type) type {
 
         /// Abort the current sync and force the reflector to re-list.
         /// Clears staging so the next list cycle starts fresh.
-        /// If forceRelist itself fails (deep OOM), sets sync_failed so
-        /// remaining pages from the old list are discarded.
         fn abortSyncAndRelist(self: *Self, io: std.Io) void {
             self.clearStaging();
-            self.reflector.forceRelist(io) catch {
-                self.logger.err("forceRelist failed: OOM setting resource version", &.{});
-                self.sync_failed.store(true, .release);
-                return;
-            };
+            self.reflector.forceRelist(io);
         }
     };
 }

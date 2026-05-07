@@ -13,6 +13,7 @@ const StreamState = client_mod.StreamState;
 const Io = std.Io;
 const Logger = @import("../util/logging.zig").Logger;
 const LogField = @import("../util/logging.zig").Field;
+const ResourceVersion = @import("../util/resource_version.zig").ResourceVersion;
 const testing = std.testing;
 
 /// Typed Kubernetes watch event.
@@ -226,7 +227,7 @@ pub fn WatchStream(comptime T: type) type {
         client: *Client,
         ctx: Context,
         state: *StreamState,
-        last_resource_version: ?[]const u8,
+        last_resource_version: ResourceVersion,
         closed: bool,
         max_line_size: usize,
         watcher: ?*CancelWatcher,
@@ -280,7 +281,7 @@ pub fn WatchStream(comptime T: type) type {
                 .client = client_ptr,
                 .ctx = ctx,
                 .state = stream_resp.state,
-                .last_resource_version = null,
+                .last_resource_version = .{},
                 .closed = false,
                 .max_line_size = max_line_size,
                 .watcher = watcher,
@@ -294,10 +295,7 @@ pub fn WatchStream(comptime T: type) type {
             if (self.closed) return null;
             self.ctx.check(io) catch return error.Canceled;
 
-            const line = self.readLine() catch |err| switch (err) {
-                error.EndOfStream => return null,
-                else => return err,
-            };
+            const line = try self.readLine() orelse return null;
             defer self.allocator.free(line);
 
             if (line.len == 0) return null;
@@ -327,10 +325,7 @@ pub fn WatchStream(comptime T: type) type {
             // Update last_resource_version for reconnection.
             const rv = extractEventResourceVersion(T, parsed.event);
             if (rv) |new_rv| {
-                // Copy into our own allocator since parsed event's arena owns the original.
-                const owned_rv = try self.allocator.dupe(u8, new_rv);
-                if (self.last_resource_version) |old| self.allocator.free(old);
-                self.last_resource_version = owned_rv;
+                try self.last_resource_version.assign(new_rv);
             }
 
             return parsed;
@@ -338,7 +333,7 @@ pub fn WatchStream(comptime T: type) type {
 
         /// Return the last observed resourceVersion for reconnection.
         pub fn resourceVersion(self: *const Self) ?[]const u8 {
-            return self.last_resource_version;
+            return self.last_resource_version.slice();
         }
 
         /// Close the watch stream and release all resources.
@@ -347,7 +342,7 @@ pub fn WatchStream(comptime T: type) type {
             if (self.closed) return;
             self.closed = true;
             self.client.logger.debug("watch stream closed", &.{
-                LogField.string("last_resource_version", self.last_resource_version orelse ""),
+                LogField.string("last_resource_version", self.last_resource_version.slice() orelse ""),
             });
             if (self.watcher) |w| {
                 w.done.store(1, .release);
@@ -356,15 +351,11 @@ pub fn WatchStream(comptime T: type) type {
                 self.allocator.destroy(w);
                 self.watcher = null;
             }
-            if (self.last_resource_version) |rv| {
-                self.allocator.free(rv);
-                self.last_resource_version = null;
-            }
             self.state.deinit();
         }
 
-        fn readLine(self: *Self) ![]const u8 {
-            const reader = self.state.reader orelse return error.EndOfStream;
+        fn readLine(self: *Self) !?[]const u8 {
+            const reader = self.state.reader orelse return null;
 
             var line_writer = Io.Writer.Allocating.init(self.allocator);
             errdefer line_writer.deinit();
@@ -379,15 +370,17 @@ pub fn WatchStream(comptime T: type) type {
             };
 
             // If the reader buffer still has data, the first byte is the delimiter; consume it.
-            // If the buffer is empty, we hit EOF.
             if (reader.bufferedLen() > 0) {
                 reader.toss(1); // consume the '\n' delimiter
-            } else if (n == 0) {
-                // No data and no delimiter found: clean end of stream.
-                // errdefer will handle line_writer cleanup.
-                return error.EndOfStream;
+            } else {
+                if (n > 0) {
+                    self.client.logger.warn("watch stream truncated mid-line, treating as end-of-stream", &.{
+                        LogField.uint("dropped_bytes", n),
+                    });
+                }
+                line_writer.deinit();
+                return null;
             }
-            // else: EOF with partial line data, return what we have.
 
             return line_writer.toOwnedSlice() catch return error.OutOfMemory;
         }

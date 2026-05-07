@@ -472,6 +472,26 @@ test "WatchStream: close is idempotent" {
     // Assert: no panic or double-free
 }
 
+test "WatchStream: partial line at EOF returns null, not a parse error" {
+    // Arrange
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+
+    // Body with no trailing newline: a truncated line that never completes.
+    try mock.respondWithStream(.ok, "{\"type\":\"ADDED\",\"object\":{\"metadata\":{\"na");
+
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
+
+    const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
+
+    var stream = try pods.watch(std.testing.io, .{});
+    defer stream.close(std.testing.io);
+
+    // Act / Assert
+    try testing.expect(try stream.next(std.testing.io) == null);
+}
+
 test "WatchStream: readLine rejects lines exceeding max_line_size" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
