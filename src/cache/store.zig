@@ -84,13 +84,18 @@ pub fn Store(comptime T: type) type {
 
         /// Free all stored objects and internal map storage.
         pub fn deinit(self: *Self, io: std.Io) void {
-            self.mutex.lockUncancelable(io);
-            defer self.mutex.unlock(io);
-            var it = self.items.iterator();
+            var items: ItemMap = blk: {
+                self.mutex.lockUncancelable(io);
+                defer self.mutex.unlock(io);
+                const taken = self.items;
+                self.items = .empty;
+                break :blk taken;
+            };
+            var it = items.iterator();
             while (it.next()) |entry| {
                 entry.value_ptr.*.release();
             }
-            self.items.deinit(self.allocator);
+            items.deinit(self.allocator);
         }
 
         // Read operations (shared lock)
@@ -403,11 +408,17 @@ pub fn Store(comptime T: type) type {
 
         /// Add or replace a single item in the store.
         ///
-        /// On success, the store takes ownership of the arena.
+        /// Takes unconditional ownership of `arena` on success and on error.
+        /// On error, this function frees `arena`; the caller must not free it.
+        /// On success, ownership transfers to the stored entry.
         /// Returns the old entry if one existed. The caller must call
         /// `entry.release()` on it after handler dispatch.
-        /// On error, ownership is NOT transferred.
         pub fn put(self: *Self, io: std.Io, key: ObjectKey, object: T, arena: *std.heap.ArenaAllocator) !?*Entry {
+            errdefer {
+                arena.deinit();
+                self.allocator.destroy(arena);
+            }
+
             const entry = try self.allocator.create(Entry);
             entry.* = .{
                 .key = key,
@@ -935,10 +946,6 @@ test "Store: put OOM on entry allocation does not corrupt store" {
     try testing.expectError(error.OutOfMemory, fail_store.put(std.testing.io, item.key, item.object, item.arena));
 
     try testing.expectEqual(@as(u32, 0), fail_store.len(std.testing.io));
-
-    // Cleanup: free the arena that was never taken by the store
-    item.arena.deinit();
-    testing.allocator.destroy(item.arena);
 }
 
 // Concurrency tests

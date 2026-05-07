@@ -350,7 +350,6 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("name", key.name),
                     });
                     const old = self.store.put(io, key, obj, parsed.arena) catch {
-                        parsed.deinit();
                         self.logger.err("watch add failed (OOM), forcing re-list", &.{});
                         self.reflector.forceRelist(io);
                         return;
@@ -375,7 +374,6 @@ pub fn Informer(comptime T: type) type {
                         LogField.string("name", key.name),
                     });
                     const old = self.store.put(io, key, obj, parsed.arena) catch {
-                        parsed.deinit();
                         self.logger.err("watch modify failed (OOM), forcing re-list", &.{});
                         self.reflector.forceRelist(io);
                         return;
