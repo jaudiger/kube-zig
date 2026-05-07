@@ -10,8 +10,13 @@ const logging = @import("../util/logging.zig");
 const Logger = logging.Logger;
 const LogField = logging.Field;
 const controller_mod = @import("controller.zig");
+const reconciler_mod = @import("reconciler.zig");
+const informer_mod = @import("../cache/informer.zig");
 const Client = @import("../client/Client.zig").Client;
 const testing = std.testing;
+
+pub const RunError = reconciler_mod.RunError;
+pub const InformerError = informer_mod.InformerError;
 
 /// A type-erased interface for running a controller.
 ///
@@ -25,11 +30,11 @@ pub const Runnable = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        start: *const fn (ptr: *anyopaque, io: std.Io) anyerror!void,
+        start: *const fn (ptr: *anyopaque, io: std.Io) RunError!void,
         cancel: *const fn (ptr: *anyopaque, io: std.Io) void,
         join: *const fn (ptr: *anyopaque) void,
         has_synced: *const fn (ptr: *anyopaque, io: std.Io) bool,
-        get_error: *const fn (ptr: *anyopaque) ?anyerror,
+        get_error: *const fn (ptr: *anyopaque) ?InformerError,
     };
 
     /// Create a `Runnable` from a pointer to `Controller(T)`.
@@ -38,7 +43,7 @@ pub const Runnable = struct {
     /// `Runnable` (and any `ControllerManager` it is added to).
     pub fn fromController(comptime T: type, ctrl: *controller_mod.Controller(T)) Runnable {
         const Impl = struct {
-            fn start(ptr: *anyopaque, io: std.Io) anyerror!void {
+            fn start(ptr: *anyopaque, io: std.Io) RunError!void {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
                 return self.start(io);
             }
@@ -54,7 +59,7 @@ pub const Runnable = struct {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
                 return self.hasSynced(io);
             }
-            fn getError(ptr: *anyopaque) ?anyerror {
+            fn getError(ptr: *anyopaque) ?InformerError {
                 const self: *controller_mod.Controller(T) = @ptrCast(@alignCast(ptr));
                 return self.getInformerError();
             }
@@ -73,7 +78,7 @@ pub const Runnable = struct {
     }
 
     /// Start the controller's informer and reconciler threads.
-    pub fn start(self: Runnable, io: std.Io) anyerror!void {
+    pub fn start(self: Runnable, io: std.Io) RunError!void {
         return self.vtable.start(self.ptr, io);
     }
 
@@ -99,7 +104,7 @@ pub const Runnable = struct {
     }
 
     /// Return the informer error, if any.
-    pub fn getError(self: Runnable) ?anyerror {
+    pub fn getError(self: Runnable) ?InformerError {
         return self.vtable.get_error(self.ptr);
     }
 };
@@ -179,7 +184,7 @@ pub const ControllerManager = struct {
     ///
     /// If controller N fails to start, controllers 0..N-1 are stopped in
     /// reverse order and the error from N is returned.
-    pub fn start(self: *ControllerManager, io: std.Io) !void {
+    pub fn start(self: *ControllerManager, io: std.Io) RunError!void {
         std.debug.assert(self.state == .idle);
 
         self.logger.info("starting controller manager", &.{
@@ -318,7 +323,7 @@ pub const ControllerManager = struct {
     }
 
     /// Start all controllers, then block until `stop()` is called.
-    pub fn run(self: *ControllerManager, io: std.Io) !void {
+    pub fn run(self: *ControllerManager, io: std.Io) RunError!void {
         try self.start(io);
 
         self.logger.info("controller manager blocking, waiting for stop signal", &.{});
@@ -351,8 +356,8 @@ pub const ControllerManager = struct {
         }.check);
     }
 
-    /// Return the error (if any) for the controller at `index`.
-    pub fn getError(self: *ControllerManager, index: usize) ?anyerror {
+    /// Return the informer error (if any) for the controller at `index`.
+    pub fn getError(self: *ControllerManager, index: usize) ?InformerError {
         return self.controllers.items[index].getError();
     }
 
@@ -369,7 +374,7 @@ const MockState = struct {
     canceled: bool = false,
     joined: bool = false,
     synced: bool = false,
-    err: ?anyerror = null,
+    err: ?InformerError = null,
     fail_start: bool = false,
     stop_order: ?usize = null,
     cancel_order: ?usize = null,
@@ -382,9 +387,9 @@ const MockState = struct {
 
 fn makeMockRunnable(state: *MockState) Runnable {
     const Impl = struct {
-        fn start(ptr: *anyopaque, _: std.Io) anyerror!void {
+        fn start(ptr: *anyopaque, _: std.Io) RunError!void {
             const s: *MockState = @ptrCast(@alignCast(ptr));
-            if (s.fail_start) return error.MockStartFailed;
+            if (s.fail_start) return error.OutOfMemory;
             s.started = true;
         }
         fn cancel(ptr: *anyopaque, _: std.Io) void {
@@ -414,7 +419,7 @@ fn makeMockRunnable(state: *MockState) Runnable {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             return s.synced;
         }
-        fn getError(ptr: *anyopaque) ?anyerror {
+        fn getError(ptr: *anyopaque) ?InformerError {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             return s.err;
         }
@@ -495,7 +500,7 @@ test "start rolls back on failure" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Assert
-    try testing.expectError(error.MockStartFailed, mgr.start(std.testing.io));
+    try testing.expectError(error.OutOfMemory, mgr.start(std.testing.io));
 
     // First controller was started then rolled back.
     try testing.expect(s1.started);
@@ -568,13 +573,13 @@ test "getError returns per-controller errors" {
     defer mgr.deinit();
 
     // Act
-    var s1 = MockState{ .err = error.SomeError };
+    var s1 = MockState{ .err = error.ReflectorFailed };
     var s2 = MockState{};
     try mgr.add(makeMockRunnable(&s1));
     try mgr.add(makeMockRunnable(&s2));
 
     // Assert
-    try testing.expectEqual(error.SomeError, mgr.getError(0).?);
+    try testing.expectEqual(error.ReflectorFailed, mgr.getError(0).?);
     try testing.expect(mgr.getError(1) == null);
 }
 
@@ -774,7 +779,7 @@ test "start rollback with shutdown_timeout" {
     try mgr.add(makeMockRunnable(&s2));
 
     // Act / Assert
-    try testing.expectError(error.MockStartFailed, mgr.start(std.testing.io));
+    try testing.expectError(error.OutOfMemory, mgr.start(std.testing.io));
     try testing.expect(s1.canceled);
 
     // Unblock so the background join thread can finish during deinit.
@@ -797,7 +802,7 @@ test "start rollback cancels all before joining" {
     try mgr.add(makeMockRunnable(&s3));
 
     // Act
-    try testing.expectError(error.MockStartFailed, mgr.start(std.testing.io));
+    try testing.expectError(error.OutOfMemory, mgr.start(std.testing.io));
 
     // Assert
     // All cancels (orders 0,1) happened before any joins (orders 0,1)

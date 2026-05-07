@@ -20,6 +20,9 @@ const logging_mod = @import("../util/logging.zig");
 const Logger = logging_mod.Logger;
 const LogField = logging_mod.Field;
 
+/// Errors that `Informer.run` can return.
+pub const InformerError = error{ReflectorFailed};
+
 /// Type-erased event handler for Informer callbacks.
 ///
 /// Use `EventHandler(T).fromFns(...)` to create a handler from plain function pointers,
@@ -202,7 +205,7 @@ pub fn Informer(comptime T: type) type {
 
         /// Run the informer loop. Blocks until `stop()` is called or
         /// the client shuts down.
-        pub fn run(self: *Self, io: std.Io) !void {
+        pub fn run(self: *Self, io: std.Io) InformerError!void {
             self.running.store(true, .release);
             self.logger.info("informer starting", &.{
                 LogField.string("resource", meta.resource),

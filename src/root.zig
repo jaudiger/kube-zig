@@ -119,6 +119,8 @@ const reconciler_mod = @import("controller/reconciler.zig");
 pub const Reconciler = reconciler_mod.Reconciler;
 pub const ReconcileResult = reconciler_mod.Result;
 pub const ReconcileFn = reconciler_mod.ReconcileFn;
+pub const ReconcileOutcome = reconciler_mod.ReconcileOutcome;
+pub const RunError = reconciler_mod.RunError;
 
 const controller_mod = @import("controller/controller.zig");
 pub const Controller = controller_mod.Controller;
@@ -129,6 +131,7 @@ pub const mapper = @import("controller/mapper.zig");
 const controller_manager_mod = @import("controller/manager.zig");
 pub const ControllerManager = controller_manager_mod.ControllerManager;
 pub const Runnable = controller_manager_mod.Runnable;
+pub const InformerError = controller_manager_mod.InformerError;
 
 const leader_election_mod = @import("features/leader_election.zig");
 pub const LeaderElector = leader_election_mod.LeaderElector;

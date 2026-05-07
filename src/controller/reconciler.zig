@@ -19,6 +19,9 @@ const ReconcilerMetrics = metrics_mod.ReconcilerMetrics;
 const QueueMetrics = metrics_mod.QueueMetrics;
 const testing = std.testing;
 
+/// Errors that `Reconciler.start` and `Controller.start` can return.
+pub const RunError = std.Thread.SpawnError || error{OutOfMemory};
+
 /// Result returned by a reconcile callback to indicate what action the
 /// Reconciler should take on the processed key.
 ///
@@ -31,13 +34,19 @@ pub const Result = struct {
     requeue_after_ns: u64 = 0,
 };
 
+/// Outcome of a single reconcile invocation.
+pub const ReconcileOutcome = union(enum) {
+    result: Result,
+    user_error: anyerror,
+};
+
 /// Type-erased reconcile callback.
 ///
 /// Use `fromTypedCtx` to create one from a typed context pointer and a typed
 /// function, or `fromFn` for a context-free function.
 pub const ReconcileFn = struct {
     ctx: ?*anyopaque,
-    call: *const fn (ctx: ?*anyopaque, key: ObjectKey, reconcile_ctx: Context) anyerror!Result,
+    call: *const fn (ctx: ?*anyopaque, key: ObjectKey, reconcile_ctx: Context) ReconcileOutcome,
 
     /// Create a `ReconcileFn` from a typed context pointer and a typed callback.
     pub fn fromTypedCtx(
@@ -46,9 +55,12 @@ pub const ReconcileFn = struct {
         comptime func: *const fn (c: *Ctx, key: ObjectKey, reconcile_ctx: Context) anyerror!Result,
     ) ReconcileFn {
         const Wrapper = struct {
-            fn call(raw: ?*anyopaque, key: ObjectKey, reconcile_ctx: Context) anyerror!Result {
+            fn call(raw: ?*anyopaque, key: ObjectKey, reconcile_ctx: Context) ReconcileOutcome {
                 const typed: *Ctx = @ptrCast(@alignCast(raw.?));
-                return func(typed, key, reconcile_ctx);
+                const r = func(typed, key, reconcile_ctx) catch |err| {
+                    return .{ .user_error = err };
+                };
+                return .{ .result = r };
             }
         };
         return .{
@@ -62,8 +74,11 @@ pub const ReconcileFn = struct {
         comptime func: *const fn (key: ObjectKey, reconcile_ctx: Context) anyerror!Result,
     ) ReconcileFn {
         const Wrapper = struct {
-            fn call(_: ?*anyopaque, key: ObjectKey, reconcile_ctx: Context) anyerror!Result {
-                return func(key, reconcile_ctx);
+            fn call(_: ?*anyopaque, key: ObjectKey, reconcile_ctx: Context) ReconcileOutcome {
+                const r = func(key, reconcile_ctx) catch |err| {
+                    return .{ .user_error = err };
+                };
+                return .{ .result = r };
             }
         };
         return .{
@@ -72,7 +87,7 @@ pub const ReconcileFn = struct {
         };
     }
 
-    fn invoke(self: ReconcileFn, key: ObjectKey, reconcile_ctx: Context) anyerror!Result {
+    fn invoke(self: ReconcileFn, key: ObjectKey, reconcile_ctx: Context) ReconcileOutcome {
         return self.call(self.ctx, key, reconcile_ctx);
     }
 };
@@ -126,14 +141,17 @@ pub const Reconciler = struct {
         };
     }
 
-    /// Release the worker thread list. Must not be called while workers are running.
-    pub fn deinit(self: *Reconciler) void {
-        std.debug.assert(!self.started);
+    /// Release the worker thread list. If workers are still running, cancels and joins them.
+    pub fn deinit(self: *Reconciler, io: std.Io) void {
+        if (self.started) {
+            self.cancel(io);
+            self.join();
+        }
         self.workers.deinit(self.allocator);
     }
 
     /// Spawn `max_concurrent_reconciles` worker threads.
-    pub fn start(self: *Reconciler, io: std.Io) !void {
+    pub fn start(self: *Reconciler, io: std.Io) RunError!void {
         std.debug.assert(!self.started);
         self.started = true;
 
@@ -186,8 +204,6 @@ pub const Reconciler = struct {
                 continue;
             } orelse return; // null = shutdown
 
-            // Default to .backoff so that panics/early-returns still
-            // trigger rate-limited requeue rather than losing the key.
             var done_action: WorkQueue.DoneAction = .backoff;
             defer self.queue.done(io, key, done_action);
 
@@ -208,7 +224,7 @@ pub const Reconciler = struct {
             else
                 self.base_context;
 
-            const reconcile_ok = self.reconcile_fn.invoke(key, reconcile_ctx);
+            const outcome = self.reconcile_fn.invoke(key, reconcile_ctx);
 
             // Record duration for both success and error.
             const dur_ns_i: i96 = reconcile_start.untilNow(io).raw.nanoseconds;
@@ -219,35 +235,38 @@ pub const Reconciler = struct {
                 self.queue_metrics.work_duration.observe(dur_s);
             }
 
-            if (reconcile_ok) |result| {
-                if (result.requeue_after_ns > 0) {
-                    self.logger.debug("requeue_after", &.{
+            switch (outcome) {
+                .result => |result| {
+                    if (result.requeue_after_ns > 0) {
+                        self.logger.debug("requeue_after", &.{
+                            LogField.string("namespace", key.namespace),
+                            LogField.string("name", key.name),
+                            LogField.uint("delay_ms", result.requeue_after_ns / std.time.ns_per_ms),
+                        });
+                        done_action = .{ .requeue_after = result.requeue_after_ns };
+                    } else if (result.requeue) {
+                        self.logger.debug("requeue", &.{
+                            LogField.string("namespace", key.namespace),
+                            LogField.string("name", key.name),
+                        });
+                        done_action = .backoff;
+                    } else {
+                        self.logger.debug("reconcile success", &.{
+                            LogField.string("namespace", key.namespace),
+                            LogField.string("name", key.name),
+                        });
+                        done_action = .success;
+                    }
+                },
+                .user_error => |err| {
+                    self.logger.warn("reconcile error", &.{
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
-                        LogField.uint("delay_ms", result.requeue_after_ns / std.time.ns_per_ms),
+                        LogField.string("error", @errorName(err)),
                     });
-                    done_action = .{ .requeue_after = result.requeue_after_ns };
-                } else if (result.requeue) {
-                    self.logger.debug("requeue", &.{
-                        LogField.string("namespace", key.namespace),
-                        LogField.string("name", key.name),
-                    });
+                    self.metrics.reconcile_errors_total.inc();
                     done_action = .backoff;
-                } else {
-                    self.logger.debug("reconcile success", &.{
-                        LogField.string("namespace", key.namespace),
-                        LogField.string("name", key.name),
-                    });
-                    done_action = .success;
-                }
-            } else |err| {
-                self.logger.warn("reconcile error", &.{
-                    LogField.string("namespace", key.namespace),
-                    LogField.string("name", key.name),
-                    LogField.string("error", @errorName(err)),
-                });
-                self.metrics.reconcile_errors_total.inc();
-                done_action = .backoff;
+                },
             }
         }
     }
@@ -255,7 +274,7 @@ pub const Reconciler = struct {
 
 test "Reconciler: single reconcile success" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
@@ -273,7 +292,7 @@ test "Reconciler: single reconcile success" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -294,7 +313,7 @@ test "Reconciler: single reconcile success" {
 
 test "Reconciler: error triggers rate-limited requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1, // tiny backoff for testing
@@ -321,7 +340,7 @@ test "Reconciler: error triggers rate-limited requeue" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -342,7 +361,7 @@ test "Reconciler: error triggers rate-limited requeue" {
 
 test "Reconciler: requeue triggers rate-limited requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -369,7 +388,7 @@ test "Reconciler: requeue triggers rate-limited requeue" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -390,7 +409,7 @@ test "Reconciler: requeue triggers rate-limited requeue" {
 
 test "Reconciler: requeue_after_ns triggers delayed requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
@@ -409,7 +428,7 @@ test "Reconciler: requeue_after_ns triggers delayed requeue" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -430,7 +449,7 @@ test "Reconciler: requeue_after_ns triggers delayed requeue" {
 
 test "Reconciler: multiple workers process concurrently" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer q.deinit(std.testing.io);
 
     var processed_count = std.atomic.Value(u32).init(0);
@@ -449,7 +468,7 @@ test "Reconciler: multiple workers process concurrently" {
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
         .max_concurrent_reconciles = 4,
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "a" }, .{});
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "b" }, .{});
@@ -467,7 +486,7 @@ test "Reconciler: multiple workers process concurrently" {
 
 test "Reconciler: stop unblocks idle workers" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer q.deinit(std.testing.io);
 
     const Ctx = struct {
@@ -480,7 +499,7 @@ test "Reconciler: stop unblocks idle workers" {
         .reconcile_fn = ReconcileFn.fromFn(Ctx.reconcile),
         .max_concurrent_reconciles = 2,
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     // Act
     // Start with an empty queue so workers immediately block on get().
@@ -494,7 +513,7 @@ test "Reconciler: stop unblocks idle workers" {
 
 test "Reconciler: run works single-threaded" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer q.deinit(std.testing.io);
 
     var count = std.atomic.Value(u32).init(0);
@@ -512,7 +531,7 @@ test "Reconciler: run works single-threaded" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -533,7 +552,7 @@ test "Reconciler: run works single-threaded" {
 
 test "Reconciler: ReconcileFn.fromFn works" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer q.deinit(std.testing.io);
 
     var invoked = std.atomic.Value(u32).init(0);
@@ -552,7 +571,7 @@ test "Reconciler: ReconcileFn.fromFn works" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromFn(Helper.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -574,7 +593,7 @@ test "Reconciler: ReconcileFn.fromFn works" {
 test "Reconciler: start joins all threads on partial failure" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -590,7 +609,7 @@ test "Reconciler: start joins all threads on partial failure" {
         .reconcile_fn = ReconcileFn.fromFn(Ctx.reconcile),
         .max_concurrent_reconciles = 3,
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     // Pre-allocate 2 slots; the third append triggers growth which OOMs.
     try r.workers.ensureTotalCapacityPrecise(fa.allocator(), 2);
@@ -608,7 +627,7 @@ test "Reconciler: start joins all threads on partial failure" {
 
 test "Reconciler: persistent error keeps requeuing until shutdown" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -634,7 +653,7 @@ test "Reconciler: persistent error keeps requeuing until shutdown" {
     var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
         .reconcile_fn = ReconcileFn.fromTypedCtx(Ctx, &ctx, Ctx.reconcile),
     });
-    defer r.deinit();
+    defer r.deinit(std.testing.io);
 
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
 
@@ -651,4 +670,57 @@ test "Reconciler: persistent error keeps requeuing until shutdown" {
 
     // Assert
     try testing.expect(count.load(.seq_cst) >= 2);
+}
+
+test "Reconciler: deinit after start cancels and joins without panic" {
+    // Arrange
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var r = Reconciler.init(testing.allocator, &q, Context.background(), .{
+        .reconcile_fn = ReconcileFn.fromFn(struct {
+            fn reconcile(_: ObjectKey, _: Context) anyerror!Result {
+                return .{};
+            }
+        }.reconcile),
+    });
+    try r.start(std.testing.io);
+
+    // Act / Assert: deinit while started must not panic.
+    r.deinit(std.testing.io);
+    q.deinit(std.testing.io);
+}
+
+test "ReconcileFn: user error is boxed as user_error outcome" {
+    // Arrange
+    const fn_with_error = ReconcileFn.fromFn(struct {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!Result {
+            return error.SomethingCustom;
+        }
+    }.reconcile);
+
+    // Act
+    const outcome = fn_with_error.invoke(.{ .namespace = "ns", .name = "x" }, Context.background());
+
+    // Assert
+    switch (outcome) {
+        .user_error => |err| try testing.expectEqual(error.SomethingCustom, err),
+        .result => return error.ExpectedUserError,
+    }
+}
+
+test "ReconcileFn: successful result is boxed as result outcome" {
+    // Arrange
+    const fn_success = ReconcileFn.fromFn(struct {
+        fn reconcile(_: ObjectKey, _: Context) anyerror!Result {
+            return .{ .requeue = true };
+        }
+    }.reconcile);
+
+    // Act
+    const outcome = fn_success.invoke(.{ .namespace = "ns", .name = "x" }, Context.background());
+
+    // Assert
+    switch (outcome) {
+        .result => |r| try testing.expect(r.requeue),
+        .user_error => return error.ExpectedResult,
+    }
 }

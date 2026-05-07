@@ -22,6 +22,8 @@ const WorkQueue = work_queue_mod.WorkQueue;
 const reconciler_mod = @import("reconciler.zig");
 const Reconciler = reconciler_mod.Reconciler;
 const ReconcileFn = reconciler_mod.ReconcileFn;
+const RunError = reconciler_mod.RunError;
+const InformerError = informer_mod.InformerError;
 const RetryPolicy = @import("../util/retry.zig").RetryPolicy;
 const RateLimiter = @import("../util/rate_limit.zig").RateLimiter;
 const metrics_mod = @import("../util/metrics.zig");
@@ -39,7 +41,7 @@ pub const SecondaryInformer = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        run: *const fn (ptr: *anyopaque, io: std.Io) anyerror!void,
+        run: *const fn (ptr: *anyopaque, io: std.Io) InformerError!void,
         cancel: *const fn (ptr: *anyopaque, io: std.Io) void,
         has_synced: *const fn (ptr: *anyopaque, io: std.Io) bool,
         deinit_fn: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, io: std.Io) void,
@@ -159,16 +161,14 @@ pub fn Controller(comptime T: type) type {
 
             // Heap-allocate WorkQueue for pointer stability.
             const queue = try allocator.create(WorkQueue);
-            errdefer {
-                queue.deinit(io);
-                allocator.destroy(queue);
-            }
-            queue.* = WorkQueue.init(allocator, io, .{
+            errdefer allocator.destroy(queue);
+            queue.* = try WorkQueue.init(allocator, io, .{
                 .retry_policy = opts.retry_policy,
                 .overall_rate_limit = opts.overall_rate_limit,
                 .metrics = queue_m,
                 .logger = logger,
             });
+            errdefer queue.deinit(io);
 
             // Wire informer to queue via event handler.
             try informer.addEventHandler(queue.eventHandler(T));
@@ -199,6 +199,8 @@ pub fn Controller(comptime T: type) type {
 
         /// Release all resources including secondary informers, queue, and store.
         pub fn deinit(self: *Self, io: std.Io) void {
+            self.queue.shutdown(io);
+
             // Deinit secondary informers (via vtable).
             for (self.secondary_informers.items) |si| {
                 si.vtable.deinit_fn(si.ptr, self.allocator, io);
@@ -206,7 +208,7 @@ pub fn Controller(comptime T: type) type {
             self.secondary_informers.deinit(self.allocator);
             self.secondary_threads.deinit(self.allocator);
 
-            self.reconciler.deinit();
+            self.reconciler.deinit(io);
             self.queue.deinit(io);
             self.allocator.destroy(self.queue);
             self.informer.deinit(io);
@@ -322,7 +324,7 @@ pub fn Controller(comptime T: type) type {
 
             // Build the type-erased vtable for this Informer(S).
             const Impl = struct {
-                fn run(ptr: *anyopaque, vt_io: std.Io) anyerror!void {
+                fn run(ptr: *anyopaque, vt_io: std.Io) InformerError!void {
                     const inf: *InformerS = @ptrCast(@alignCast(ptr));
                     return inf.run(vt_io);
                 }
@@ -336,9 +338,7 @@ pub fn Controller(comptime T: type) type {
                 }
                 fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator, vt_io: std.Io) void {
                     const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    // Free the mapping context. The handler holds a pointer to it,
-                    // but we're tearing down, so that's fine.
-                    // The mapping ctx is stored as the first handler's ctx pointer.
+                    // Mapping ctx is stored as the first handler's ctx pointer.
                     if (inf.handlers.items.len > 0) {
                         if (inf.handlers.items[0].ctx) |ctx_ptr| {
                             const ctx: *MappingCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -366,7 +366,7 @@ pub fn Controller(comptime T: type) type {
         /// Spawn N reconciler worker threads, 1 primary informer thread,
         /// and 1 thread per secondary informer.
         /// Returns immediately; call `stop()` to shut down.
-        pub fn start(self: *Self, io: std.Io) !void {
+        pub fn start(self: *Self, io: std.Io) RunError!void {
             self.logger.info("controller starting", &.{
                 LogField.string("resource", T.resource_meta.resource),
                 LogField.uint("workers", self.reconciler.max_concurrent_reconciles),
@@ -487,23 +487,23 @@ pub fn Controller(comptime T: type) type {
         /// If any informer thread exited with an error, returns that error.
         /// Prefers the primary informer error; falls back to the first
         /// secondary informer error.
-        pub fn getInformerError(self: *Self) ?anyerror {
+        pub fn getInformerError(self: *Self) ?InformerError {
             return self.getPrimaryInformerError() orelse self.getSecondaryInformerError();
         }
 
         /// If the primary informer thread exited with an error, returns it.
-        pub fn getPrimaryInformerError(self: *Self) ?anyerror {
+        pub fn getPrimaryInformerError(self: *Self) ?InformerError {
             const code = self.informer_error.load(.acquire);
             if (code == 0) return null;
-            return @errorFromInt(code);
+            return @errorCast(@as(anyerror, @errorFromInt(code)));
         }
 
         /// If a secondary informer thread exited with an error, returns
         /// the first such error.
-        pub fn getSecondaryInformerError(self: *Self) ?anyerror {
+        pub fn getSecondaryInformerError(self: *Self) ?InformerError {
             const code = self.secondary_informer_error.load(.acquire);
             if (code == 0) return null;
-            return @errorFromInt(code);
+            return @errorCast(@as(anyerror, @errorFromInt(code)));
         }
 
         fn joinSecondaryStartup(self: *Self, join_reconciler: bool) void {
@@ -683,19 +683,19 @@ test "Controller: getInformerError prefers primary over secondary" {
     var secondary = std.atomic.Value(u16).init(0);
 
     // Act: simulate primary error
-    primary.store(@intFromError(error.ConnectionRefused), .release);
+    primary.store(@intFromError(error.ReflectorFailed), .release);
 
     // Assert: getInformerError-style logic returns primary.
     const primary_code = primary.load(.acquire);
     const secondary_code = secondary.load(.acquire);
-    const result: ?anyerror = if (primary_code != 0)
-        @errorFromInt(primary_code)
+    const result: ?InformerError = if (primary_code != 0)
+        @errorCast(@as(anyerror, @errorFromInt(primary_code)))
     else if (secondary_code != 0)
-        @errorFromInt(secondary_code)
+        @errorCast(@as(anyerror, @errorFromInt(secondary_code)))
     else
         null;
 
-    try testing.expectEqual(error.ConnectionRefused, result.?);
+    try testing.expectEqual(error.ReflectorFailed, result.?);
 
     // Verify the field types match the controller struct.
     try testing.expect(@TypeOf(primary) == @TypeOf(@as(ControllerType, undefined).informer_error));
@@ -708,30 +708,30 @@ test "Controller: getInformerError falls back to secondary when no primary error
     var secondary = std.atomic.Value(u16).init(0);
 
     // Act: simulate only secondary error
-    secondary.store(@intFromError(error.ConnectionRefused), .release);
+    secondary.store(@intFromError(error.ReflectorFailed), .release);
 
     // Assert: falls back to secondary.
     const primary_code = primary.load(.acquire);
     const secondary_code = secondary.load(.acquire);
-    const result: ?anyerror = if (primary_code != 0)
-        @errorFromInt(primary_code)
+    const result: ?InformerError = if (primary_code != 0)
+        @errorCast(@as(anyerror, @errorFromInt(primary_code)))
     else if (secondary_code != 0)
-        @errorFromInt(secondary_code)
+        @errorCast(@as(anyerror, @errorFromInt(secondary_code)))
     else
         null;
 
-    try testing.expectEqual(error.ConnectionRefused, result.?);
+    try testing.expectEqual(error.ReflectorFailed, result.?);
 }
 
 test "Controller: secondary error cmpxchg preserves first error" {
     // Arrange
     var secondary = std.atomic.Value(u16).init(0);
-    const first_err = @intFromError(error.ConnectionRefused);
-    const second_err = @intFromError(error.OutOfMemory);
+    const first_err = @intFromError(error.ReflectorFailed);
+    const other_code: u16 = first_err +% 1;
 
-    // Act: two concurrent stores via cmpxchg (first wins).
+    // Act: two stores via cmpxchg; only the first against zero succeeds.
     _ = secondary.cmpxchgStrong(0, first_err, .release, .monotonic);
-    _ = secondary.cmpxchgStrong(0, second_err, .release, .monotonic);
+    _ = secondary.cmpxchgStrong(0, other_code, .release, .monotonic);
 
     // Assert: first error is preserved.
     try testing.expectEqual(first_err, secondary.load(.acquire));
@@ -741,14 +741,15 @@ test "Controller: primary and secondary errors are independent" {
     // Arrange
     var primary = std.atomic.Value(u16).init(0);
     var secondary = std.atomic.Value(u16).init(0);
+    const err_code = @intFromError(error.ReflectorFailed);
 
-    // Act: store different errors in each.
-    primary.store(@intFromError(error.ConnectionRefused), .release);
-    _ = secondary.cmpxchgStrong(0, @intFromError(error.OutOfMemory), .release, .monotonic);
+    // Act: store into each field.
+    primary.store(err_code, .release);
+    _ = secondary.cmpxchgStrong(0, err_code, .release, .monotonic);
 
-    // Assert: each field holds its own error.
-    try testing.expectEqual(@intFromError(error.ConnectionRefused), primary.load(.acquire));
-    try testing.expectEqual(@intFromError(error.OutOfMemory), secondary.load(.acquire));
+    // Assert: both fields hold the expected code independently.
+    try testing.expectEqual(err_code, primary.load(.acquire));
+    try testing.expectEqual(err_code, secondary.load(.acquire));
 }
 
 test "Controller: init returns OutOfMemory without leaking" {

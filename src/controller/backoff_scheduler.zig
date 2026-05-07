@@ -7,6 +7,7 @@ const ObjectKey = object_key_mod.ObjectKey;
 const ObjectKeyContext = object_key_mod.ObjectKeyContext;
 const RetryPolicy = @import("../util/retry.zig").RetryPolicy;
 const time_util = @import("../util/time.zig");
+const MonotonicEpoch = time_util.MonotonicEpoch;
 const rate_limit_mod = @import("../util/rate_limit.zig");
 const RateLimiter = rate_limit_mod.RateLimiter;
 const testing = std.testing;
@@ -28,7 +29,7 @@ pub const BackoffScheduler = struct {
     max_size: usize,
     retry_policy: RetryPolicy,
     overall_limiter: ?RateLimiter,
-    epoch: std.Io.Clock.Timestamp,
+    epoch: MonotonicEpoch,
     logger: Logger = Logger.noop,
 
     pub const FailureMap = std.HashMapUnmanaged(
@@ -89,7 +90,7 @@ pub const BackoffScheduler = struct {
     ///
     /// `epoch` is the monotonic time origin used to compute `not_before`
     /// timestamps in the waiting heap.
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, epoch: std.Io.Clock.Timestamp, opts: Options) BackoffScheduler {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, epoch: MonotonicEpoch, opts: Options) BackoffScheduler {
         return .{
             .allocator = allocator,
             .heap = .empty,
@@ -161,7 +162,7 @@ pub const BackoffScheduler = struct {
         const backoff_ns = self.retry_policy.backoffWithJitterNs(io, attempt);
         const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve(io) else 0;
         const delay_ns = @max(backoff_ns, bucket_delay_ns);
-        const now = time_util.monotonicNowNs(io, self.epoch) catch {
+        const now = self.epoch.nowNs(io) catch {
             if (is_new_entry) {
                 freeKey(self.allocator, gop.key_ptr.*);
                 self.failures.removeByPtr(gop.key_ptr);
@@ -212,7 +213,7 @@ pub const BackoffScheduler = struct {
         if (self.heap.count() >= self.max_size) return error.Overflow;
 
         const owned_key = cloneKey(self.allocator, key) catch return error.OutOfMemory;
-        const now = time_util.monotonicNowNs(io, self.epoch) catch {
+        const now = self.epoch.nowNs(io) catch {
             freeKey(self.allocator, owned_key);
             return error.ClockUnavailable;
         };
@@ -264,7 +265,7 @@ pub const BackoffScheduler = struct {
         const backoff_ns = self.retry_policy.backoffWithJitterNs(io, attempt);
         const bucket_delay_ns: u64 = if (self.overall_limiter) |*limiter| limiter.reserve(io) else 0;
         const delay_ns = @max(backoff_ns, bucket_delay_ns);
-        const now = time_util.monotonicNowNs(io, self.epoch) catch {
+        const now = self.epoch.nowNs(io) catch {
             if (is_new_entry) {
                 freeKey(self.allocator, gop.key_ptr.*);
                 self.failures.removeByPtr(gop.key_ptr);
@@ -308,7 +309,7 @@ pub const BackoffScheduler = struct {
 
         if (self.heap.count() >= self.max_size) return .full;
 
-        const now = time_util.monotonicNowNs(io, self.epoch) catch return .clock_unavailable;
+        const now = self.epoch.nowNs(io) catch return .clock_unavailable;
         const not_before = now +| delay_ns;
 
         self.waiting_keys.put(self.allocator, key, {}) catch return .oom;
@@ -386,7 +387,7 @@ pub const BackoffScheduler = struct {
     /// Re-insert an item into the waiting heap with a short retry delay.
     /// Used by WorkQueue.promoteExpiredWaiting on clone OOM.
     pub fn reinsertWithDelay(self: *BackoffScheduler, io: std.Io, item: WaitingItem, delay_ns: u64) void {
-        const now = time_util.monotonicNowNs(io, self.epoch) catch {
+        const now = self.epoch.nowNs(io) catch {
             self.logger.warn("reinsertWithDelay: clock unavailable, item dropped", &.{});
             if (self.failures.fetchRemove(item.key)) |fkv| {
                 freeKey(self.allocator, fkv.key);
@@ -467,7 +468,7 @@ fn makeScheduler(allocator: std.mem.Allocator, opts: struct {
     },
     overall_rate_limit: RateLimiter.Config = RateLimiter.Config.disabled,
 }) BackoffScheduler {
-    const epoch: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+    const epoch = MonotonicEpoch.init(std.testing.io) catch unreachable;
     return BackoffScheduler.init(allocator, std.testing.io, epoch, .{
         .max_size = opts.max_size,
         .retry_policy = opts.retry_policy,
@@ -606,7 +607,7 @@ test "BackoffScheduler: overall limiter max semantics with backoff" {
     // The item should be in the heap but not yet expired.
     try testing.expectEqual(@as(usize, 1), s.count());
     var buf: [1]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
+    const now = try s.epoch.nowNs(std.testing.io);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 0), expired.len);
 }
@@ -627,7 +628,7 @@ test "BackoffScheduler: drainExpired returns expired items in order" {
 
     // Assert
     var buf: [10]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
+    const now = try s.epoch.nowNs(std.testing.io);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 3), expired.len);
     try testing.expectEqualStrings("a", expired[0].key.name);
@@ -654,7 +655,7 @@ test "BackoffScheduler: drainExpired respects batch limit" {
 
     // Assert
     var buf: [2]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
+    const now = try s.epoch.nowNs(std.testing.io);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 2), expired.len);
 
@@ -728,7 +729,7 @@ test "BackoffScheduler: cleanupOrphan removes entry when not in waiting" {
     // Drain the item from waiting so it's no longer in waiting_keys.
     std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, std.testing.io) catch {};
     var buf: [1]BackoffScheduler.WaitingItem = undefined;
-    const now = try time_util.monotonicNowNs(std.testing.io, s.epoch);
+    const now = try s.epoch.nowNs(std.testing.io);
     const expired = s.drainExpired(now, &buf);
     try testing.expectEqual(@as(usize, 1), expired.len);
 

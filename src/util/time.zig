@@ -22,12 +22,25 @@
 const std = @import("std");
 const testing = std.testing;
 
-/// Return nanoseconds elapsed since `epoch` on the monotonic clock.
-pub fn monotonicNowNs(io: std.Io, epoch: std.Io.Clock.Timestamp) error{ClockUnavailable}!u64 {
-    const elapsed_ns = epoch.untilNow(io).raw.nanoseconds;
-    if (elapsed_ns < 0) return error.ClockUnavailable;
-    return @intCast(elapsed_ns);
-}
+/// A monotonic clock origin with validated construction.
+///
+/// `init` verifies that the clock is advancing before returning.
+/// `nowNs` returns nanoseconds elapsed since the captured origin.
+pub const MonotonicEpoch = struct {
+    timestamp: std.Io.Clock.Timestamp,
+
+    pub fn init(io: std.Io) error{NoMonotonicClock}!MonotonicEpoch {
+        const t: std.Io.Clock.Timestamp = .now(io, .awake);
+        if (t.untilNow(io).raw.nanoseconds < 0) return error.NoMonotonicClock;
+        return .{ .timestamp = t };
+    }
+
+    pub fn nowNs(self: MonotonicEpoch, io: std.Io) error{ClockUnavailable}!u64 {
+        const elapsed_ns = self.timestamp.untilNow(io).raw.nanoseconds;
+        if (elapsed_ns < 0) return error.ClockUnavailable;
+        return @intCast(elapsed_ns);
+    }
+};
 
 /// Timestamp precision for RFC 3339 formatting.
 pub const Precision = enum {
@@ -294,4 +307,21 @@ test "parseTimestamp: round-trip with decompose" {
 
     // Assert
     try testing.expectEqual(epoch, parseTimestamp(formatted).?);
+}
+
+test "MonotonicEpoch.init: succeeds on testing io" {
+    // Act / Assert
+    _ = try MonotonicEpoch.init(std.testing.io);
+}
+
+test "MonotonicEpoch.nowNs: returns non-decreasing values" {
+    // Arrange
+    const epoch = try MonotonicEpoch.init(std.testing.io);
+
+    // Act
+    const t1 = try epoch.nowNs(std.testing.io);
+    const t2 = try epoch.nowNs(std.testing.io);
+
+    // Assert
+    try testing.expect(t2 >= t1);
 }

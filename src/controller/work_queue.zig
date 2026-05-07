@@ -17,6 +17,7 @@ const informer_mod = @import("../cache/informer.zig");
 const EventHandler = informer_mod.EventHandler;
 const RetryPolicy = @import("../util/retry.zig").RetryPolicy;
 const time_util = @import("../util/time.zig");
+const MonotonicEpoch = time_util.MonotonicEpoch;
 const RingQueue = @import("../util/ring_queue.zig").RingQueue;
 const QueueMetrics = @import("../util/metrics.zig").QueueMetrics;
 const rate_limit_mod = @import("../util/rate_limit.zig");
@@ -58,7 +59,7 @@ pub const WorkQueue = struct {
     /// rate limiter, and deferred item tracking.
     scheduler: BackoffScheduler,
 
-    epoch: std.Io.Clock.Timestamp,
+    epoch: MonotonicEpoch,
     metrics: QueueMetrics,
     logger: Logger = Logger.noop,
     /// Enqueue timestamps for queue latency measurement.
@@ -149,8 +150,11 @@ pub const WorkQueue = struct {
     };
 
     /// Create a new work queue with the given options.
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, opts: Options) WorkQueue {
-        const epoch: std.Io.Clock.Timestamp = .now(io, .awake);
+    ///
+    /// Returns `error.NoMonotonicClock` when the platform monotonic clock
+    /// fails the initial sanity check.
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, opts: Options) error{NoMonotonicClock}!WorkQueue {
+        const epoch = try MonotonicEpoch.init(io);
         return .{
             .allocator = allocator,
             .queue = .{ .max_capacity = opts.max_queue_size },
@@ -168,22 +172,15 @@ pub const WorkQueue = struct {
 
     /// Release all resources owned by the queue.
     ///
-    /// **Contract:** the caller MUST call `shutdown()` and join all consumer
-    /// threads before calling `deinit()`. Failure to do so causes a panic
-    /// in all build modes: consumers would access freed memory otherwise.
+    /// Calls `shutdown()` internally if not already done. Consumer threads
+    /// must be joined before this call.
     pub fn deinit(self: *WorkQueue, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        // Callers must call shutdown() and join consumer threads before
-        // deinit(). Blocked consumers would access freed memory otherwise.
-        // Use an unconditional check instead of std.debug.assert, which
-        // is elided in ReleaseFast/ReleaseSmall builds.
-        if (!self.shut_down.raw) @panic("WorkQueue.deinit() called without shutdown()");
+        if (!self.shut_down.raw) self.shutdownLocked(io);
 
-        // Free enqueue_times map first because its keys are aliases to keys
-        // in queue/dirty (not independently owned). Releasing the map
-        // storage before freeing those keys avoids dangling references.
+        // Free enqueue_times map first; its keys alias queue/dirty entries.
         self.enqueue_times.deinit(self.allocator);
 
         // Free keys in processing (always disjoint from dirty).
@@ -194,8 +191,6 @@ pub const WorkQueue = struct {
         self.processing.deinit(self.allocator);
 
         // Free keys from queue, removing each from dirty as we go.
-        // If dirty held a different allocation for the same logical key
-        // (e.g. after done() re-queued), free that separately.
         for (0..self.queue.count) |i| {
             const key = self.queue.items[(self.queue.head + i) % self.queue.items.len];
             const removed = self.dirty.fetchRemove(key);
@@ -208,8 +203,7 @@ pub const WorkQueue = struct {
         }
         self.queue.deinit(self.allocator);
 
-        // Free any remaining dirty keys not covered above (e.g. a key
-        // re-added while processing that hasn't been moved to queue yet).
+        // Free any remaining dirty keys not covered above.
         var dirty_it = self.dirty.iterator();
         while (dirty_it.next()) |entry| {
             self.freeKey(entry.key_ptr.*);
@@ -291,7 +285,7 @@ pub const WorkQueue = struct {
 
             // If there are waiting items, sleep until the earliest one expires.
             if (self.scheduler.heap.peek()) |earliest| {
-                const now = time_util.monotonicNowNs(io, self.epoch) catch {
+                const now = self.epoch.nowNs(io) catch {
                     // Clock unavailable: use a short polling interval instead.
                     self.condTimedWait(io, 10 * std.time.ns_per_ms);
                     continue;
@@ -586,7 +580,10 @@ pub const WorkQueue = struct {
     pub fn shutdown(self: *WorkQueue, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
+        self.shutdownLocked(io);
+    }
 
+    fn shutdownLocked(self: *WorkQueue, io: std.Io) void {
         self.shut_down.store(true, .release);
         self.condBroadcast(io);
     }
@@ -739,7 +736,7 @@ pub const WorkQueue = struct {
     /// reduces lock churn at the cost of slightly longer lock hold times.
     fn promoteExpiredWaiting(self: *WorkQueue, io: std.Io) void {
         const batch_limit: usize = 256;
-        const now = time_util.monotonicNowNs(io, self.epoch) catch {
+        const now = self.epoch.nowNs(io) catch {
             self.logger.warn("promoteExpiredWaiting: clock unavailable, skipping promotion cycle", &.{});
             return;
         };
@@ -822,9 +819,17 @@ pub const WorkQueue = struct {
     }
 };
 
+test "WorkQueue: deinit without prior shutdown is safe" {
+    // Arrange
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
+
+    // Act / Assert: deinit must not panic even without explicit shutdown.
+    q.deinit(std.testing.io);
+}
+
 test "WorkQueue: add and get single item" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -842,7 +847,7 @@ test "WorkQueue: add and get single item" {
 
 test "WorkQueue: FIFO ordering" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -869,7 +874,7 @@ test "WorkQueue: FIFO ordering" {
 
 test "WorkQueue: deduplication" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -890,7 +895,7 @@ test "WorkQueue: deduplication" {
 
 test "WorkQueue: done allows re-add" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -912,7 +917,7 @@ test "WorkQueue: done allows re-add" {
 
 test "WorkQueue: add during processing re-queues on done" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -938,7 +943,7 @@ test "WorkQueue: add during processing re-queues on done" {
 
 test "WorkQueue: shutdown causes get to return null" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -953,7 +958,7 @@ test "WorkQueue: shutdown causes get to return null" {
 
 test "WorkQueue: add after shutdown is no-op" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -970,7 +975,7 @@ test "WorkQueue: add after shutdown is no-op" {
 
 test "WorkQueue: isShutdown" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -984,7 +989,7 @@ test "WorkQueue: isShutdown" {
 
 test "WorkQueue: len returns queued count" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1002,7 +1007,7 @@ test "WorkQueue: len returns queued count" {
 
 test "WorkQueue: len excludes processing items" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1022,7 +1027,7 @@ test "WorkQueue: len excludes processing items" {
 
 test "WorkQueue: get blocks until add (multi-threaded)" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1047,7 +1052,7 @@ test "WorkQueue: get blocks until add (multi-threaded)" {
 
 test "WorkQueue: shutdown unblocks waiting get" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1071,7 +1076,7 @@ test "WorkQueue: shutdown unblocks waiting get" {
 
 test "WorkQueue: addRateLimited delays re-enqueue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{ .retry_policy = .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{ .retry_policy = .{
         .max_retries = std.math.maxInt(u32),
         .initial_backoff_ns = 50 * std.time.ns_per_ms,
         .max_backoff_ns = 1 * std.time.ns_per_s,
@@ -1103,7 +1108,7 @@ test "WorkQueue: addRateLimited delays re-enqueue" {
 
 test "WorkQueue: multiple items interleaved processing" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1133,7 +1138,7 @@ test "WorkQueue: multiple items interleaved processing" {
 
 test "WorkQueue: cluster-scoped key (empty namespace)" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1151,7 +1156,7 @@ test "WorkQueue: cluster-scoped key (empty namespace)" {
 
 test "WorkQueue: addAfter with delay" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1177,7 +1182,7 @@ test "WorkQueue: addAfter with delay" {
 
 test "WorkQueue: addAfter with zero delay is immediate" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1199,7 +1204,7 @@ test "WorkQueue: deinit frees dirty keys re-added during processing" {
     // Arrange
     // separate allocation in dirty. If deinit() runs before done(), that
     // allocation must still be freed.
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
 
     // Act
     try q.add(std.testing.io, .{ .namespace = "ns", .name = "pod-1" }, .{});
@@ -1223,7 +1228,7 @@ test "WorkQueue: deinit frees dirty keys re-added during processing" {
 test "WorkQueue: done() OOM on re-queue does not leak" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{});
+    var q = try WorkQueue.init(fa.allocator(), std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1270,7 +1275,7 @@ test "WorkQueue: done() OOM on re-queue does not leak" {
 test "WorkQueue: get() OOM on processing.ensureCapacity preserves key" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{});
+    var q = try WorkQueue.init(fa.allocator(), std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1298,7 +1303,7 @@ test "WorkQueue: get() OOM on processing.ensureCapacity preserves key" {
 test "WorkQueue: add() OOM on queue push resize does not leak" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{});
+    var q = try WorkQueue.init(fa.allocator(), std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1338,7 +1343,7 @@ test "WorkQueue: add() OOM on queue push resize does not leak" {
 test "WorkQueue: addLockedFromWaiting() OOM on dirty.put does not leak" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{
+    var q = try WorkQueue.init(fa.allocator(), std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1384,7 +1389,7 @@ test "WorkQueue: addLockedFromWaiting() OOM on dirty.put does not leak" {
 
 test "WorkQueue: done clears failure entries after successful processing" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1420,7 +1425,7 @@ test "WorkQueue: done clears failure entries after successful processing" {
 
 test "WorkQueue: done preserves failure entries when key is awaiting rate-limited requeue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 50 * std.time.ns_per_ms,
@@ -1462,7 +1467,7 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
     // promoteExpiredWaiting clones it for addLockedFromWaiting, but
     // dirty.put fails, the failures entry must be cleaned up.
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var q = WorkQueue.init(fa.allocator(), std.testing.io, .{
+    var q = try WorkQueue.init(fa.allocator(), std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1511,7 +1516,7 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
 // DoneAction tests
 test "WorkQueue: done(.requeue_after) absorbs dirty flag and delays re-enqueue" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1539,7 +1544,7 @@ test "WorkQueue: done(.requeue_after) absorbs dirty flag and delays re-enqueue" 
 
 test "WorkQueue: done(.requeue_after) with zero delay enqueues immediately" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1561,7 +1566,7 @@ test "WorkQueue: done(.requeue_after) with zero delay enqueues immediately" {
 
 test "WorkQueue: done(.requeue_after) clears failure counter" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1603,7 +1608,7 @@ test "WorkQueue: done(.requeue_after) clears failure counter" {
 
 test "WorkQueue: done(.requeue_after) deduplicates against existing waiting entry" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1634,7 +1639,7 @@ test "WorkQueue: done(.requeue_after) deduplicates against existing waiting entr
 
 test "WorkQueue: done(.backoff) absorbs dirty flag and uses exponential backoff" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 50 * std.time.ns_per_ms,
@@ -1674,7 +1679,7 @@ test "WorkQueue: done(.backoff) absorbs dirty flag and uses exponential backoff"
 
 test "WorkQueue: done(.backoff) increments failure counter across calls" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1717,7 +1722,7 @@ test "WorkQueue: done(.backoff) increments failure counter across calls" {
 
 test "WorkQueue: done(.success) re-enqueues immediately when dirty" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1747,7 +1752,7 @@ test "WorkQueue: add(defer_to_waiting) defers to waiting heap after done(.requeu
     // When defer_to_waiting is true, add() must not bypass a pending
     // requeue_after delay. The dirty flag is set so the key is processed
     // once the waiting entry expires.
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1776,7 +1781,7 @@ test "WorkQueue: add(defer_to_waiting) defers to waiting heap after done(.requeu
 
 test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addAfter" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1798,7 +1803,7 @@ test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addAfter" {
 
 test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addRateLimited" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 50 * std.time.ns_per_ms,
@@ -1828,7 +1833,7 @@ test "WorkQueue: add(defer_to_waiting) defers to waiting heap from addRateLimite
 
 test "WorkQueue: multiple add(defer_to_waiting) calls while key is waiting coalesce" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{});
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{});
     defer {
         q.shutdown(std.testing.io);
         q.deinit(std.testing.io);
@@ -1861,7 +1866,7 @@ test "WorkQueue: multiple add(defer_to_waiting) calls while key is waiting coale
 
 test "WorkQueue: overall limiter adds delay to rate-limited requeues" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1, // near-zero per-key backoff
@@ -1907,7 +1912,7 @@ test "WorkQueue: overall limiter adds delay to rate-limited requeues" {
 
 test "WorkQueue: overall limiter disabled when qps is 0" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
@@ -1946,7 +1951,7 @@ test "WorkQueue: overall limiter defaults are 10 QPS / 100 burst" {
 
 test "WorkQueue: done(.backoff) uses overall limiter" {
     // Arrange
-    var q = WorkQueue.init(testing.allocator, std.testing.io, .{
+    var q = try WorkQueue.init(testing.allocator, std.testing.io, .{
         .retry_policy = .{
             .max_retries = std.math.maxInt(u32),
             .initial_backoff_ns = 1,
