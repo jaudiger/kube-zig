@@ -20,13 +20,14 @@ const DefEntry = struct {
 };
 
 /// Metadata extracted from OpenAPI paths for a Kubernetes resource type.
+/// `list_fqn` is null for POST-only resources that have no list endpoint.
 const GeneratorResourceMeta = struct {
     group: []const u8,
     version: []const u8,
     kind: []const u8,
     resource: []const u8,
     namespaced: bool,
-    list_fqn: []const u8,
+    list_fqn: ?[]const u8,
 };
 
 /// Sort context for sorting a StringArrayHashMap by its string keys.
@@ -221,6 +222,9 @@ fn extractResourceMetas(
         group: []const u8 = "",
         version: []const u8 = "",
         kind: []const u8 = "",
+        // POST-only: populated when there is no GET path but a POST exists.
+        post_body_fqn: ?[]const u8 = null,
+        post_collection_resource: ?[]const u8 = null,
     };
 
     var info_map: std.StringArrayHashMapUnmanaged(PathInfo) = .empty;
@@ -308,6 +312,17 @@ fn extractResourceMetas(
                     }
                 }
             }
+            // Capture POST body ref for POST-only resources (no GET on this path).
+            if (path_obj.get("post")) |pm| {
+                if (getPostBodyRef(pm)) |fqn| {
+                    if (gop.value_ptr.post_body_fqn == null or is_namespaced_path) {
+                        gop.value_ptr.post_body_fqn = fqn;
+                    }
+                }
+                if (gop.value_ptr.post_collection_resource == null or is_namespaced_path) {
+                    gop.value_ptr.post_collection_resource = extractCollectionSegment(path);
+                }
+            }
             if (is_namespaced_path) {
                 gop.value_ptr.namespaced = true;
             }
@@ -316,18 +331,32 @@ fn extractResourceMetas(
 
     // Build the final resource_metas map from matched pairs.
     for (info_map.values()) |info| {
-        const resource_fqn = info.resource_fqn orelse continue;
-        const list_fqn = info.list_fqn orelse continue;
-        const resource_name = info.resource_name orelse continue;
-
-        try resource_metas.put(allocator, resource_fqn, .{
-            .group = info.group,
-            .version = info.version,
-            .kind = info.kind,
-            .resource = resource_name,
-            .namespaced = info.namespaced,
-            .list_fqn = list_fqn,
-        });
+        if (info.resource_fqn) |resource_fqn| {
+            // Regular resource: has an individual GET endpoint. Requires a list FQN.
+            const list_fqn = info.list_fqn orelse continue;
+            const resource_name = info.resource_name orelse continue;
+            try resource_metas.put(allocator, resource_fqn, .{
+                .group = info.group,
+                .version = info.version,
+                .kind = info.kind,
+                .resource = resource_name,
+                .namespaced = info.namespaced,
+                .list_fqn = list_fqn,
+            });
+        } else if (info.post_body_fqn) |post_body_fqn| {
+            // POST-only resource: no individual GET, no list endpoint.
+            // Skip if a list was also found (collection-GET but no resource-GET).
+            if (info.list_fqn != null) continue;
+            const resource_name = info.post_collection_resource orelse continue;
+            try resource_metas.put(allocator, post_body_fqn, .{
+                .group = info.group,
+                .version = info.version,
+                .kind = info.kind,
+                .resource = resource_name,
+                .namespaced = info.namespaced,
+                .list_fqn = null,
+            });
+        }
     }
 }
 
@@ -364,6 +393,30 @@ fn extractResourceSegment(path: []const u8) ?[]const u8 {
     // Find the last / before {name} to get the resource segment.
     const last_slash = std.mem.lastIndexOfScalar(u8, before, '/') orelse return null;
     return before[last_slash + 1 ..];
+}
+
+/// Extract the $ref FQN from a POST method's body parameter schema.
+fn getPostBodyRef(post_method: std.json.Value) ?[]const u8 {
+    const obj = asObject(post_method) orelse return null;
+    const params = asArray(obj.get("parameters") orelse return null) orelse return null;
+    for (params.items) |param| {
+        const param_obj = asObject(param) orelse continue;
+        const in_val = asString(param_obj.get("in") orelse continue) orelse continue;
+        if (!std.mem.eql(u8, in_val, "body")) continue;
+        const schema = asObject(param_obj.get("schema") orelse continue) orelse continue;
+        const ref = schema.get("$ref") orelse continue;
+        return openapi.refToFqn(asString(ref) orelse continue);
+    }
+    return null;
+}
+
+/// Extract the last non-parameter path segment from a collection path.
+/// Returns null if the last segment is a path parameter or empty.
+fn extractCollectionSegment(path: []const u8) ?[]const u8 {
+    const last_slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return null;
+    const segment = path[last_slash + 1 ..];
+    if (segment.len == 0 or segment[0] == '{') return null;
+    return segment;
 }
 
 /// Recursively collect cross-group dependency keys from a schema's $ref fields.
@@ -457,9 +510,13 @@ fn writeStruct(writer: *Writer, fqn: []const u8, schema: std.json.Value, definit
             try writer.print("        .kind = \"{s}\",\n", .{meta.kind});
             try writer.print("        .resource = \"{s}\",\n", .{meta.resource});
             try writer.print("        .namespaced = {},\n", .{meta.namespaced});
-            // Write list_kind as a type reference (same-file, bare name).
+            // list_kind is void for POST-only resources with no list endpoint.
             try writer.writeAll("        .list_kind = ");
-            try openapi.writeStructName(writer, meta.list_fqn);
+            if (meta.list_fqn) |list_fqn| {
+                try openapi.writeStructName(writer, list_fqn);
+            } else {
+                try writer.writeAll("void");
+            }
             try writer.writeAll(",\n");
             try writer.writeAll("    };\n\n");
         }

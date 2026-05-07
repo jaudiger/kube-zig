@@ -149,7 +149,6 @@ pub fn appendPatchQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opt
 /// Append nothing if no options are set.
 pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: LogOptions) !void {
     const has_params = opts.container != null or
-        opts.follow != null or
         opts.tail_lines != null or
         opts.since_seconds != null or
         opts.timestamps != null or
@@ -163,11 +162,6 @@ pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts:
     if (opts.container) |c| {
         try appendParamKey(buf, alloc, &need_amp, "container=");
         try percentEncodeQueryValue(buf, alloc, c);
-    }
-
-    if (opts.follow) |f| {
-        try appendParamKey(buf, alloc, &need_amp, "follow=");
-        try buf.appendSlice(alloc, if (f) "true" else "false");
     }
 
     if (opts.tail_lines) |n| {
@@ -192,6 +186,42 @@ pub fn appendLogQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts:
 
     if (opts.limit_bytes) |n| {
         try appendParamKey(buf, alloc, &need_amp, "limitBytes=");
+        try appendInt(buf, alloc, n);
+    }
+}
+
+/// Append log streaming query parameters to a growing buffer.
+/// Always appends `follow=true` first, then any other log filters from `opts`.
+pub fn appendLogStreamQueryTo(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, opts: LogOptions) !void {
+    try buf.appendSlice(alloc, "?follow=true");
+
+    if (opts.container) |c| {
+        try buf.appendSlice(alloc, "&container=");
+        try percentEncodeQueryValue(buf, alloc, c);
+    }
+
+    if (opts.tail_lines) |n| {
+        try buf.appendSlice(alloc, "&tailLines=");
+        try appendInt(buf, alloc, n);
+    }
+
+    if (opts.since_seconds) |n| {
+        try buf.appendSlice(alloc, "&sinceSeconds=");
+        try appendInt(buf, alloc, n);
+    }
+
+    if (opts.timestamps) |t| {
+        try buf.appendSlice(alloc, "&timestamps=");
+        try buf.appendSlice(alloc, if (t) "true" else "false");
+    }
+
+    if (opts.previous) |p| {
+        try buf.appendSlice(alloc, "&previous=");
+        try buf.appendSlice(alloc, if (p) "true" else "false");
+    }
+
+    if (opts.limit_bytes) |n| {
+        try buf.appendSlice(alloc, "&limitBytes=");
         try appendInt(buf, alloc, n);
     }
 }

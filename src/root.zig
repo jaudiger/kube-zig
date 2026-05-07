@@ -90,6 +90,10 @@ pub const ParsedEvent = watch_mod.ParsedEvent;
 pub const StreamState = client_mod.StreamState;
 pub const StreamResponse = client_mod.StreamResponse;
 
+const log_stream_mod = @import("api/log_stream.zig");
+pub const LogStream = log_stream_mod.LogStream;
+pub const LogStreamOptions = log_stream_mod.LogStreamOptions;
+
 const store_mod = @import("cache/store.zig");
 pub const Store = store_mod.Store;
 pub const ObjectKey = @import("object_key.zig").ObjectKey;

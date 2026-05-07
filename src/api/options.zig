@@ -82,6 +82,20 @@ pub const ListOptions = struct {
     continue_token: ?[]const u8 = null,
     /// Server-side timeout for the list/watch call in seconds.
     timeout_seconds: ?i64 = null,
+
+    /// Errors returned by validate.
+    pub const ValidationError = error{
+        InvalidResourceVersionMatchOptions,
+        IncompatibleContinueAndResourceVersion,
+    };
+
+    pub fn validate(self: ListOptions) ValidationError!void {
+        if (self.resource_version_match != null and self.resource_version == null)
+            return error.InvalidResourceVersionMatchOptions;
+        if (self.continue_token != null and
+            (self.resource_version != null or self.resource_version_match != null))
+            return error.IncompatibleContinueAndResourceVersion;
+    }
 };
 
 /// Options for watch operations.
@@ -135,8 +149,6 @@ pub const DeleteOptions = struct {
 pub const LogOptions = struct {
     /// Name of the container to retrieve logs from (required for multi-container pods).
     container: ?[]const u8 = null,
-    /// Stream logs continuously instead of returning the current snapshot.
-    follow: ?bool = null,
     /// Number of most-recent log lines to return.
     tail_lines: ?i64 = null,
     /// Only return logs newer than this many seconds ago.
@@ -179,4 +191,34 @@ test "PropagationPolicy.toValue: orphan returns Orphan" {
 
     // Assert
     try testing.expectEqualStrings("Orphan", val);
+}
+
+test "ListOptions.validate: empty options are valid" {
+    // Act / Assert
+    try ListOptions.validate(.{});
+}
+
+test "ListOptions.validate: continue_token alone is valid" {
+    // Act / Assert
+    try ListOptions.validate(.{ .continue_token = "tok" });
+}
+
+test "ListOptions.validate: resource_version with resource_version_match is valid" {
+    // Act / Assert
+    try ListOptions.validate(.{ .resource_version = "123", .resource_version_match = .exact });
+}
+
+test "ListOptions.validate: resource_version_match without resource_version returns error" {
+    // Act / Assert
+    try testing.expectError(error.InvalidResourceVersionMatchOptions, ListOptions.validate(.{ .resource_version_match = .exact }));
+}
+
+test "ListOptions.validate: continue_token with resource_version returns error" {
+    // Act / Assert
+    try testing.expectError(error.IncompatibleContinueAndResourceVersion, ListOptions.validate(.{ .continue_token = "tok", .resource_version = "123" }));
+}
+
+test "ListOptions.validate: continue_token with resource_version and resource_version_match returns error" {
+    // Act / Assert
+    try testing.expectError(error.IncompatibleContinueAndResourceVersion, ListOptions.validate(.{ .continue_token = "tok", .resource_version = "123", .resource_version_match = .exact }));
 }

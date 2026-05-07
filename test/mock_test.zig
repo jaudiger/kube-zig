@@ -575,7 +575,7 @@ test "collectAll: single page with no continue token returns all items" {
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 });
+    var result = try expectOk(try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 }));
     defer result.deinit();
 
     // Assert
@@ -606,7 +606,7 @@ test "collectAll: multi-page with continue tokens accumulates items" {
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 1 });
+    var result = try expectOk(try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 1 }));
     defer result.deinit();
 
     // Assert
@@ -631,7 +631,7 @@ test "collectAll: empty continue token treated as end of pagination" {
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 });
+    var result = try expectOk(try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 }));
     defer result.deinit();
 
     // Assert
@@ -657,11 +657,45 @@ test "collectAll: resource_version matches first page" {
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 1 });
+    var result = try expectOk(try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 1 }));
     defer result.deinit();
 
     // Assert
     try testing.expectEqualStrings("500", result.resource_version.?);
+}
+
+test "collectAll: API error is returned as api_error arm with status preserved" {
+    // Arrange
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+
+    try mock.respondWith(.forbidden,
+        \\{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"pods is forbidden","reason":"Forbidden","code":403}
+    );
+
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
+
+    const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
+
+    // Act
+    const api_result = try pods.collectAll(testing.allocator, std.testing.io, .{}, .{ .page_size = 100 });
+
+    // Assert
+    var unwrapped = api_result.unwrap();
+    switch (unwrapped) {
+        .ok => |v| {
+            var mut = v;
+            mut.deinit();
+            return error.ExpectedApiError;
+        },
+        .failure => |*f| {
+            defer f.deinit();
+            try testing.expectEqual(std.http.Status.forbidden, f.status);
+            const status_obj = f.statusObj().?;
+            try testing.expectEqualStrings("pods is forbidden", status_obj.message.?);
+        },
+    }
 }
 
 // ============================================================================

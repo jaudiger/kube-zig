@@ -13,6 +13,7 @@ const deepClone = @import("../util/deep_clone.zig").deepClone;
 const options_mod = @import("options.zig");
 const query = @import("query.zig");
 const watch_mod = @import("watch.zig");
+const log_stream_mod = @import("log_stream.zig");
 const path_mod = @import("path.zig");
 const PathBuilder = path_mod.PathBuilder;
 const testing = std.testing;
@@ -61,6 +62,7 @@ const PatchType = options_mod.PatchType;
 const WatchOptions = options_mod.WatchOptions;
 const LogOptions = options_mod.LogOptions;
 const ApplyOptions = options_mod.ApplyOptions;
+const LogStreamOptions = log_stream_mod.LogStreamOptions;
 
 /// Dynamic (untyped) Kubernetes API for runtime-defined resource types.
 ///
@@ -106,6 +108,7 @@ pub const DynamicApi = struct {
     // CRUD methods
     /// List all resources in the configured namespace, or cluster-wide for cluster-scoped resources.
     pub fn list(self: DynamicApi, io: std.Io, opts: ListOptions) !JsonResult {
+        try opts.validate();
         const path = try self.pathBuilder().listPath(opts);
         defer self.client.allocator.free(path);
         return self.client.get(io, Json, path, self.ctx);
@@ -116,6 +119,7 @@ pub const DynamicApi = struct {
     /// for cluster-scoped resources.
     pub fn listAll(self: DynamicApi, io: std.Io, opts: ListOptions) !JsonResult {
         if (!self.meta.namespaced) return error.NotNamespaced;
+        try opts.validate();
         const path = try self.pathBuilder().listAllPath(opts);
         defer self.client.allocator.free(path);
         return self.client.get(io, Json, path, self.ctx);
@@ -280,6 +284,15 @@ pub const DynamicApi = struct {
         const path = try self.pathBuilder().subresourcePath(name, subresource);
         defer self.client.allocator.free(path);
         return self.client.getRaw(io, path, self.ctx);
+    }
+
+    /// Stream the /log subresource continuously. Return a `LogStream` iterator
+    /// that yields one log line per call to `nextLine()`. The caller must call
+    /// `close()` on the returned stream when done.
+    pub fn streamLogs(self: DynamicApi, io: std.Io, name: []const u8, log_opts: LogOptions, stream_opts: LogStreamOptions) !log_stream_mod.LogStream {
+        const path = try self.pathBuilder().streamLogPath(name, log_opts);
+        defer self.client.allocator.free(path);
+        return log_stream_mod.LogStream.init(self.client, io, self.ctx, path, stream_opts);
     }
 };
 

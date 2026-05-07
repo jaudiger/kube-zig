@@ -987,6 +987,50 @@ pub const Client = struct {
         return stream_resp;
     }
 
+    /// Open a streaming connection for log requests. Returns a `StreamResponse`
+    /// that the caller can use to read newline-delimited plain-text log lines.
+    /// The caller owns the returned `StreamState` and must call `state.deinit()`.
+    pub fn logStream(self: *Client, io: std.Io, path: []const u8, ctx: Context) !StreamResponse {
+        try self.preflight(io, ctx);
+
+        self.metrics.request_total.inc();
+        const request_start: std.Io.Clock.Timestamp = .now(io, .awake);
+
+        const auth_header = try self.auth.getAuthHeader(io, self.auth.shouldForceRefresh());
+        defer if (auth_header) |ah| self.allocator.free(ah);
+
+        var uri_buf: [uri_buf_size]u8 = undefined;
+        const owned = try self.buildUri(path, &uri_buf);
+        defer owned.deinit(self.allocator);
+
+        const stream_resp = self.transport.sendStream(io, .{
+            .method = .GET,
+            .uri = owned.uri,
+            .accept = "text/plain",
+            .auth_header = auth_header,
+            .keep_alive = false,
+            .deadline_ns = ctx.deadline_ns,
+        }, self.allocator) catch |err| {
+            self.recordRequestLatency(io, request_start);
+            self.metrics.request_error_total.inc();
+            if (err == error.HttpUnauthorized) self.auth.markUnauthorized();
+            if (self.circuit_breaker) |*cb| {
+                if (isRetryableStreamTransport(err)) cb.recordFailure(io);
+            }
+            self.updateCircuitBreakerGauge();
+            return err;
+        };
+
+        self.recordRequestLatency(io, request_start);
+        self.logger.trace("log stream opened", &.{
+            LogField.string("path", path),
+        });
+        self.auth.clearUnauthorized();
+        if (self.circuit_breaker) |*cb| cb.recordSuccess(io);
+        self.updateCircuitBreakerGauge();
+        return stream_resp;
+    }
+
     /// Raw response body paired with its allocator.
     /// Returned by `delete()`, `getRaw()`, and other raw methods where the
     /// response may be a resource type or a Kubernetes Status object.

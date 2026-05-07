@@ -23,6 +23,15 @@ pub const AuthorizationV1LabelSelectorAttributes = struct {
 
 /// LocalSubjectAccessReview checks whether or not a user or group can perform an action in a given namespace. Having a namespace scoped resource makes it much easier to grant namespace scoped policy that includes permissions checking.
 pub const AuthorizationV1LocalSubjectAccessReview = struct {
+    pub const resource_meta = .{
+        .group = "authorization.k8s.io",
+        .version = "v1",
+        .kind = "LocalSubjectAccessReview",
+        .resource = "localsubjectaccessreviews",
+        .namespaced = true,
+        .list_kind = void,
+    };
+
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
@@ -87,6 +96,15 @@ pub const AuthorizationV1ResourceRule = struct {
 
 /// SelfSubjectAccessReview checks whether or the current user can perform an action.  Not filling in a spec.namespace means "in all namespaces".  Self is a special case, because users should always be able to check whether they can perform an action
 pub const AuthorizationV1SelfSubjectAccessReview = struct {
+    pub const resource_meta = .{
+        .group = "authorization.k8s.io",
+        .version = "v1",
+        .kind = "SelfSubjectAccessReview",
+        .resource = "selfsubjectaccessreviews",
+        .namespaced = false,
+        .list_kind = void,
+    };
+
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
@@ -109,6 +127,15 @@ pub const AuthorizationV1SelfSubjectAccessReviewSpec = struct {
 
 /// SelfSubjectRulesReview enumerates the set of actions the current user can perform within a namespace. The returned list of actions may be incomplete depending on the server's authorization mode, and any errors experienced during the evaluation. SelfSubjectRulesReview should be used by UIs to show/hide actions, or to quickly let an end user reason about their permissions. It should NOT Be used by external systems to drive authorization decisions as this raises confused deputy, cache lifetime/revocation, and correctness concerns. SubjectAccessReview, and LocalAccessReview are the correct way to defer authorization decisions to the API server.
 pub const AuthorizationV1SelfSubjectRulesReview = struct {
+    pub const resource_meta = .{
+        .group = "authorization.k8s.io",
+        .version = "v1",
+        .kind = "SelfSubjectRulesReview",
+        .resource = "selfsubjectrulesreviews",
+        .namespaced = false,
+        .list_kind = void,
+    };
+
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
@@ -129,6 +156,15 @@ pub const AuthorizationV1SelfSubjectRulesReviewSpec = struct {
 
 /// SubjectAccessReview checks whether or not a user or group can perform an action.
 pub const AuthorizationV1SubjectAccessReview = struct {
+    pub const resource_meta = .{
+        .group = "authorization.k8s.io",
+        .version = "v1",
+        .kind = "SubjectAccessReview",
+        .resource = "subjectaccessreviews",
+        .namespaced = false,
+        .list_kind = void,
+    };
+
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds

@@ -164,6 +164,9 @@ pub const ReflectorOptions = struct {
 pub fn Reflector(comptime T: type) type {
     const meta = T.resource_meta;
     const ListT = meta.list_kind;
+    comptime {
+        if (ListT == void) @compileError("Reflector requires list+watch; '" ++ @typeName(T) ++ "' is a POST-only resource with no list_kind");
+    }
     const ApiT = Api_mod.Api(T);
 
     return struct {

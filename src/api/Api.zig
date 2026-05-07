@@ -10,6 +10,7 @@ const client_mod = @import("../client/Client.zig");
 const Client = client_mod.Client;
 const Context = client_mod.Context;
 const watch_mod = @import("watch.zig");
+const log_stream_mod = @import("log_stream.zig");
 const deepClone = @import("../util/deep_clone.zig").deepClone;
 const options_mod = @import("options.zig");
 const query = @import("query.zig");
@@ -30,6 +31,7 @@ const WriteOptions = options_mod.WriteOptions;
 const ApplyOptions = options_mod.ApplyOptions;
 const DeleteOptions = options_mod.DeleteOptions;
 const LogOptions = options_mod.LogOptions;
+const LogStreamOptions = log_stream_mod.LogStreamOptions;
 
 // Comptime validation
 /// Validate that `T` has a well-formed `resource_meta` declaration at comptime.
@@ -64,10 +66,10 @@ fn validateResourceMeta(comptime T: type) void {
         @compileError("'" ++ type_name ++ ".resource_meta.namespaced' must be bool");
     }
     if (!@hasField(MetaType, "list_kind")) {
-        @compileError("'" ++ type_name ++ ".resource_meta' is missing field 'list_kind' (expected type)");
+        @compileError("'" ++ type_name ++ ".resource_meta' is missing field 'list_kind' (expected type or void)");
     }
     if (@TypeOf(meta.list_kind) != type) {
-        @compileError("'" ++ type_name ++ ".resource_meta.list_kind' must be a type");
+        @compileError("'" ++ type_name ++ ".resource_meta.list_kind' must be a type (use void for POST-only resources)");
     }
 
     // Verify string fields coerce to []const u8 by using them in a comptime context.
@@ -98,6 +100,7 @@ pub fn Api(comptime T: type) type {
     comptime validateResourceMeta(T);
     const meta = T.resource_meta;
     const ListT = meta.list_kind;
+    const has_list = ListT != void;
 
     return struct {
         client: *Client,
@@ -126,6 +129,8 @@ pub fn Api(comptime T: type) type {
 
         /// List all resources in the configured namespace, or cluster-wide for cluster-scoped resources.
         pub fn list(self: @This(), io: std.Io, opts: ThisModule.ListOptions) !TypedResult(std.json.Parsed(ListT)) {
+            if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; only create() and apply() are available for POST-only resources");
+            try opts.validate();
             const path = try self.pathBuilder().listPath(opts);
             defer self.client.allocator.free(path);
             return self.client.get(io, ListT, path, self.ctx);
@@ -135,7 +140,9 @@ pub fn Api(comptime T: type) type {
         /// Only available for namespaced resources; cluster-scoped resources
         /// are already cluster-wide, use `list()` instead.
         pub fn listAll(self: @This(), io: std.Io, opts: ThisModule.ListOptions) !TypedResult(std.json.Parsed(ListT)) {
+            if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; only create() and apply() are available for POST-only resources");
             if (!meta.namespaced) @compileError("listAll is only available for namespaced resources; use list() instead");
+            try opts.validate();
             const path = try self.pathBuilder().listAllPath(opts);
             defer self.client.allocator.free(path);
             return self.client.get(io, ListT, path, self.ctx);
@@ -145,6 +152,7 @@ pub fn Api(comptime T: type) type {
         /// Return a `WatchStream(T)` iterator that yields typed events.
         /// The caller must call `close()` on the returned stream when done.
         pub fn watch(self: @This(), io: std.Io, opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
+            if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; watch is not available for POST-only resources");
             const path = try self.pathBuilder().watchPath(opts);
             // Safe to free path after init: WatchStream.init() calls client.watchStream()
             // which copies the path into a URI via buildUri() and opens the HTTP request
@@ -157,6 +165,7 @@ pub fn Api(comptime T: type) type {
         /// Only available for namespaced resources; cluster-scoped resources
         /// are already cluster-wide, use `watch()` instead.
         pub fn watchAll(self: @This(), io: std.Io, opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
+            if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; watch is not available for POST-only resources");
             if (!meta.namespaced) @compileError("watchAll is only available for namespaced resources; use watch() instead");
             const path = try self.pathBuilder().watchAllPath(opts);
             // Safe to free path after init: see comment in watch() above.
@@ -335,13 +344,23 @@ pub fn Api(comptime T: type) type {
             return self.client.postValueRaw(io, EvictionT, path, &body, self.ctx);
         }
 
-        /// Get the /log subresource. Return an `ApiResult` wrapping a `RawResponse`
-        /// with raw plain text.
+        /// Get the /log subresource snapshot. Return an `ApiResult` wrapping a
+        /// `RawResponse` with the full log body buffered in memory.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
         pub fn getLogs(self: @This(), io: std.Io, name: []const u8, opts: ThisModule.LogOptions) !Client.ApiResult(Client.RawResponse) {
-            const path = try self.pathBuilder().logPath(name, opts);
+            const path = try self.pathBuilder().snapshotLogPath(name, opts);
             defer self.client.allocator.free(path);
             return self.client.getRaw(io, path, self.ctx);
+        }
+
+        /// Stream the /log subresource continuously. Return a `LogStream` iterator
+        /// that yields one log line per call to `nextLine()`. The caller must call
+        /// `close()` on the returned stream when done.
+        /// The Kubernetes API returns 404 for resources that do not support this subresource.
+        pub fn streamLogs(self: @This(), io: std.Io, name: []const u8, log_opts: ThisModule.LogOptions, stream_opts: ThisModule.LogStreamOptions) !log_stream_mod.LogStream {
+            const path = try self.pathBuilder().streamLogPath(name, log_opts);
+            defer self.client.allocator.free(path);
+            return log_stream_mod.LogStream.init(self.client, io, self.ctx, path, stream_opts);
         }
 
         // Pagination helpers
@@ -373,8 +392,9 @@ pub fn Api(comptime T: type) type {
         /// Each item is deep-cloned into an internal arena allocator, so the
         /// returned slice is fully owned and independent of any JSON parse arena.
         ///
-        /// The caller owns the returned `CollectedList` and must call `deinit()`
-        /// to free all cloned items and the items slice.
+        /// On API failure, return an `ApiResult` with the failure arm holding the
+        /// full `ApiFailure` (including body and parsed KubeStatus). The caller
+        /// uses `.unwrap()` and owns the `ApiFailure` via the `.failure` arm.
         ///
         /// Label/field selectors from `opts` are forwarded to every page request.
         /// The `limit` and `continue_token` fields in `opts` are ignored and
@@ -385,7 +405,8 @@ pub fn Api(comptime T: type) type {
             io: std.Io,
             opts: ThisModule.ListOptions,
             pager_opts: PagerOptions,
-        ) !CollectedList {
+        ) !Client.ApiResult(CollectedList) {
+            if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; only create() and apply() are available for POST-only resources");
             return self.collectPages(allocator, io, opts, pager_opts, false);
         }
 
@@ -397,7 +418,8 @@ pub fn Api(comptime T: type) type {
             io: std.Io,
             opts: ThisModule.ListOptions,
             pager_opts: PagerOptions,
-        ) !CollectedList {
+        ) !Client.ApiResult(CollectedList) {
+            if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; only create() and apply() are available for POST-only resources");
             if (!meta.namespaced) @compileError("collectAllAcrossNamespaces is only available for namespaced resources; use collectAll() instead");
             return self.collectPages(allocator, io, opts, pager_opts, true);
         }
@@ -409,7 +431,9 @@ pub fn Api(comptime T: type) type {
             opts: ThisModule.ListOptions,
             pager_opts: PagerOptions,
             comptime use_list_all: bool,
-        ) !CollectedList {
+        ) !Client.ApiResult(CollectedList) {
+            try opts.validate();
+
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
             const arena_alloc = arena.allocator();
@@ -427,12 +451,11 @@ pub fn Api(comptime T: type) type {
                     try self.listAll(io, page_opts)
                 else
                     try self.list(io, page_opts);
-                var unwrapped = api_result.unwrap();
-                const parsed = switch (unwrapped) {
+                const parsed = switch (api_result) {
                     .ok => |p| p,
-                    .failure => |*f| {
-                        defer f.deinit();
-                        return f.statusError();
+                    .api_error => |e| {
+                        arena.deinit();
+                        return .{ .api_error = e };
                     },
                 };
                 defer parsed.deinit();
@@ -465,11 +488,11 @@ pub fn Api(comptime T: type) type {
                 if (next_continue == null) break;
             }
 
-            return .{
+            return .{ .ok = .{
                 .items = collected.items,
                 .resource_version = resource_version,
                 .arena = arena,
-            };
+            } };
         }
     };
 }
@@ -516,12 +539,38 @@ const MockNamedGroupResource = struct {
 };
 const MockNamedGroupResourceList = struct {};
 
+const MockPostOnlyResource = struct {
+    apiVersion: ?[]const u8 = null,
+    kind: ?[]const u8 = null,
+    pub const resource_meta = .{
+        .group = "authorization.k8s.io",
+        .version = "v1",
+        .kind = "SubjectAccessReview",
+        .resource = "subjectaccessreviews",
+        .namespaced = false,
+        .list_kind = void,
+    };
+};
+
 test "Api comptime instantiation" {
     // Act / Assert
     comptime {
         _ = Api(MockNamespacedResource);
         _ = Api(MockClusterResource);
         _ = Api(MockNamedGroupResource);
+        _ = Api(MockPostOnlyResource);
+    }
+}
+
+test "Api POST-only resource: create is available, list_kind is void" {
+    // Act / Assert
+    comptime {
+        const SarApi = Api(MockPostOnlyResource);
+        _ = &SarApi.create;
+        _ = &SarApi.get;
+        _ = &SarApi.delete;
+        if (MockPostOnlyResource.resource_meta.list_kind != void)
+            @compileError("expected list_kind == void for POST-only resource");
     }
 }
 
@@ -569,7 +618,9 @@ test "Api comptime instantiation includes subresource methods" {
         _ = &PodApi.updateStatus;
         _ = &PodApi.patchStatus;
         _ = &PodApi.getLogs;
+        _ = &PodApi.streamLogs;
         _ = LogOptions;
+        _ = LogStreamOptions;
 
         // Act / Assert
         const DeployApi = Api(MockNamedGroupResource);

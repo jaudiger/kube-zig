@@ -243,16 +243,29 @@ pub const PathBuilder = struct {
         return buf.toOwnedSlice(alloc);
     }
 
-    /// Build the path for a pod log request (`/log` subresource).
+    /// Build the path for a pod log snapshot request (`/log` subresource).
     ///
     /// Appends log-specific query parameters when set. The caller owns the
     /// returned slice.
-    pub fn logPath(self: PathBuilder, name: []const u8, opts: LogOptions) ![]const u8 {
+    pub fn snapshotLogPath(self: PathBuilder, name: []const u8, opts: LogOptions) ![]const u8 {
         const alloc = self.allocator;
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(alloc);
         try self.appendSubresourceTo(&buf, alloc, name, "log");
         try query.appendLogQueryTo(&buf, alloc, opts);
+        return buf.toOwnedSlice(alloc);
+    }
+
+    /// Build the path for a pod log streaming request (`/log` subresource with `follow=true`).
+    ///
+    /// Always appends `follow=true` and any other log filters from `opts`.
+    /// The caller owns the returned slice.
+    pub fn streamLogPath(self: PathBuilder, name: []const u8, opts: LogOptions) ![]const u8 {
+        const alloc = self.allocator;
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(alloc);
+        try self.appendSubresourceTo(&buf, alloc, name, "log");
+        try query.appendLogStreamQueryTo(&buf, alloc, opts);
         return buf.toOwnedSlice(alloc);
     }
 };
@@ -1020,37 +1033,37 @@ test "watchAllPath: with field selector" {
     try testing.expectEqualStrings("/api/v1/pods?watch=true&allowWatchBookmarks=true&fieldSelector=status.phase%3DRunning", path);
 }
 
-// logPath tests
-test "logPath: no options" {
+// snapshotLogPath tests
+test "snapshotLogPath: no options" {
     // Arrange
     const pb = namespacedCorePB();
 
     // Act
-    const path = try pb.logPath("my-pod", .{});
+    const path = try pb.snapshotLogPath("my-pod", .{});
     defer testing.allocator.free(path);
 
     // Assert
     try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log", path);
 }
 
-test "logPath: container only" {
+test "snapshotLogPath: container only" {
     // Arrange
     const pb = namespacedCorePB();
 
     // Act
-    const path = try pb.logPath("my-pod", .{ .container = "nginx" });
+    const path = try pb.snapshotLogPath("my-pod", .{ .container = "nginx" });
     defer testing.allocator.free(path);
 
     // Assert
     try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?container=nginx", path);
 }
 
-test "logPath: multiple options" {
+test "snapshotLogPath: multiple options" {
     // Arrange
     const pb = namespacedCorePB();
 
     // Act
-    const path = try pb.logPath("my-pod", .{
+    const path = try pb.snapshotLogPath("my-pod", .{
         .container = "app",
         .tail_lines = 100,
         .timestamps = true,
@@ -1062,14 +1075,13 @@ test "logPath: multiple options" {
     try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?container=app&tailLines=100&timestamps=true&previous=false", path);
 }
 
-test "logPath: all options" {
+test "snapshotLogPath: all options" {
     // Arrange
     const pb = namespacedCorePB();
 
     // Act
-    const path = try pb.logPath("my-pod", .{
+    const path = try pb.snapshotLogPath("my-pod", .{
         .container = "sidecar",
-        .follow = false,
         .tail_lines = 50,
         .since_seconds = 3600,
         .timestamps = true,
@@ -1079,7 +1091,51 @@ test "logPath: all options" {
     defer testing.allocator.free(path);
 
     // Assert
-    try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?container=sidecar&follow=false&tailLines=50&sinceSeconds=3600&timestamps=true&previous=true&limitBytes=1048576", path);
+    try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?container=sidecar&tailLines=50&sinceSeconds=3600&timestamps=true&previous=true&limitBytes=1048576", path);
+}
+
+// streamLogPath tests
+test "streamLogPath: no options always includes follow=true" {
+    // Arrange
+    const pb = namespacedCorePB();
+
+    // Act
+    const path = try pb.streamLogPath("my-pod", .{});
+    defer testing.allocator.free(path);
+
+    // Assert
+    try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?follow=true", path);
+}
+
+test "streamLogPath: with container and tail_lines" {
+    // Arrange
+    const pb = namespacedCorePB();
+
+    // Act
+    const path = try pb.streamLogPath("my-pod", .{ .container = "app", .tail_lines = 50 });
+    defer testing.allocator.free(path);
+
+    // Assert
+    try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?follow=true&container=app&tailLines=50", path);
+}
+
+test "streamLogPath: all options" {
+    // Arrange
+    const pb = namespacedCorePB();
+
+    // Act
+    const path = try pb.streamLogPath("my-pod", .{
+        .container = "sidecar",
+        .tail_lines = 50,
+        .since_seconds = 3600,
+        .timestamps = true,
+        .previous = true,
+        .limit_bytes = 1048576,
+    });
+    defer testing.allocator.free(path);
+
+    // Assert
+    try testing.expectEqualStrings("/api/v1/namespaces/default/pods/my-pod/log?follow=true&container=sidecar&tailLines=50&sinceSeconds=3600&timestamps=true&previous=true&limitBytes=1048576", path);
 }
 
 // Namespace validation tests
