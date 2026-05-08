@@ -192,6 +192,7 @@ pub fn Informer(comptime T: type) type {
             self.handlers.deinit(self.allocator);
             self.reflector.deinit(io);
             self.store.deinit(io);
+            self.cancel.deinit(io);
         }
 
         /// Register an event handler.
@@ -210,7 +211,7 @@ pub fn Informer(comptime T: type) type {
             self.logger.info("informer starting", &.{
                 LogField.string("resource", meta.resource),
             });
-            const ctx = self.parent_ctx.withCancel(&self.cancel);
+            const ctx = self.parent_ctx.withCancel(io, &self.cancel);
             self.reflector.ctx = ctx;
             while (!ctx.isCanceled(io)) {
                 if (self.reflector.state == .failed) return error.ReflectorFailed;

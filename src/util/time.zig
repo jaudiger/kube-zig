@@ -71,6 +71,32 @@ const DateTime = struct {
     seconds: u8,
 };
 
+/// Write a 4-digit year into buf, saturating at 9999.
+fn writeYear4(buf: *[4]u8, year: u16) void {
+    const y: u16 = if (year > 9999) 9999 else year;
+    buf[0] = '0' + @as(u8, @intCast(y / 1000));
+    buf[1] = '0' + @as(u8, @intCast(y / 100 % 10));
+    buf[2] = '0' + @as(u8, @intCast(y / 10 % 10));
+    buf[3] = '0' + @as(u8, @intCast(y % 10));
+}
+
+/// Write a 2-digit decimal value (0..99) into buf.
+fn writeTwoDigit(buf: *[2]u8, value: u8) void {
+    buf[0] = '0' + value / 10;
+    buf[1] = '0' + value % 10;
+}
+
+/// Write a 9-digit nanosecond fraction (0..999_999_999) into buf, zero-padded.
+fn writeNineFrac(buf: *[9]u8, frac: u32) void {
+    var v = frac;
+    var i: usize = 9;
+    while (i > 0) {
+        i -= 1;
+        buf[i] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+}
+
 /// Break epoch seconds into calendar components.
 fn decompose(secs: u64) DateTime {
     const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = secs };
@@ -107,7 +133,8 @@ pub fn writeNow(io: std.Io, comptime precision: Precision, w: anytype) !void {
     switch (precision) {
         .nanos => {
             const nanos_unsigned: u128 = @intCast(@max(0, now_ns));
-            const secs: u64 = std.math.cast(u64, nanos_unsigned / std.time.ns_per_s) orelse return error.Overflow;
+            const secs_u128 = nanos_unsigned / std.time.ns_per_s;
+            const secs: u64 = @intCast(@min(secs_u128, @as(u128, std.math.maxInt(u64))));
             const frac: u32 = @intCast(nanos_unsigned % std.time.ns_per_s);
 
             const dt = decompose(secs);
@@ -130,11 +157,42 @@ pub fn writeNow(io: std.Io, comptime precision: Precision, w: anytype) !void {
 }
 
 /// Format the current UTC time into a fixed-size buffer and return the
-/// written slice.  The buffer size is comptime-derived from the precision.
+/// written slice. Years above 9999 are saturated to 9999.
 pub fn bufNow(io: std.Io, comptime precision: Precision, buf: *[precision.bufLen()]u8) []const u8 {
-    var w: std.Io.Writer = .fixed(buf);
-    writeNow(io, precision, &w) catch unreachable;
-    return w.buffered();
+    const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
+    const now_clamped: u128 = @intCast(@max(0, now_ns));
+    const secs_u128 = now_clamped / std.time.ns_per_s;
+    const secs: u64 = @intCast(@min(secs_u128, @as(u128, std.math.maxInt(u64))));
+    const dt = decompose(secs);
+
+    writeYear4(buf[0..4], dt.year);
+    buf[4] = '-';
+    writeTwoDigit(buf[5..7], dt.month);
+    buf[7] = '-';
+    writeTwoDigit(buf[8..10], dt.day);
+    buf[10] = 'T';
+    writeTwoDigit(buf[11..13], dt.hours);
+    buf[13] = ':';
+    writeTwoDigit(buf[14..16], dt.minutes);
+    buf[16] = ':';
+    writeTwoDigit(buf[17..19], dt.seconds);
+    switch (precision) {
+        .seconds => {
+            buf[19] = 'Z';
+        },
+        .micros => {
+            buf[19] = '.';
+            @memcpy(buf[20..26], "000000");
+            buf[26] = 'Z';
+        },
+        .nanos => {
+            const frac: u32 = @intCast(now_clamped % std.time.ns_per_s);
+            buf[19] = '.';
+            writeNineFrac(buf[20..29], frac);
+            buf[29] = 'Z';
+        },
+    }
+    return buf;
 }
 
 // Parsing
@@ -301,9 +359,9 @@ test "parseTimestamp: round-trip with decompose" {
 
     // Act
     var buf: [Precision.seconds.bufLen()]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+    const formatted = try std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         dt.year, dt.month, dt.day, dt.hours, dt.minutes, dt.seconds,
-    }) catch unreachable;
+    });
 
     // Assert
     try testing.expectEqual(epoch, parseTimestamp(formatted).?);
@@ -324,4 +382,15 @@ test "MonotonicEpoch.nowNs: returns non-decreasing values" {
 
     // Assert
     try testing.expect(t2 >= t1);
+}
+
+test "writeYear4: saturates to 9999 for years above 9999" {
+    // Arrange
+    var buf: [4]u8 = undefined;
+
+    // Act
+    writeYear4(&buf, 10000);
+
+    // Assert
+    try testing.expectEqualStrings("9999", &buf);
 }

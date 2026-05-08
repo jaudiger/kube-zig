@@ -7,51 +7,78 @@
 //!
 //! `CancelSource` owns the cancellation flag. Multiple sources can be
 //! chained via `withCancel` to form a tree where cancelling any ancestor
-//! cancels all descendants.
+//! cancels all descendants: `cancel()` sets the caller's flag and
+//! recursively cascades to every registered child.
 
 const std = @import("std");
 const tracing = @import("tracing.zig");
 pub const SpanContext = tracing.SpanContext;
 
-/// Owns the cancellation flag. Call `cancel()` to propagate to all
-/// contexts derived from this source.
+/// Owns the cancellation flag and its position in the cancellation tree.
 ///
-/// When used with `Context.withCancel()`, the source's `parent` pointer
-/// is set to form a linked list of ancestor sources. `isCanceled()`
-/// walks this chain so that cancellation at any ancestor level is
-/// observed, regardless of depth.
+/// Build a tree by calling `Context.withCancel`. When a source is cancelled
+/// its flag is set and every descendant's flag is also set (cascade).
 ///
-/// A given `CancelSource` should be passed to `withCancel()` at most
-/// once; calling it again would overwrite the `parent` link.
+/// Callers MUST call `deinit` before a source is destroyed.
 pub const CancelSource = struct {
     done: std.atomic.Value(u32),
-    parent: ?*const CancelSource = null,
+
+    mu: std.Io.Mutex,
+    parent: ?*CancelSource = null,
+    first_child: ?*CancelSource = null,
+    next_sibling: ?*CancelSource = null,
 
     pub fn init() CancelSource {
-        return .{ .done = std.atomic.Value(u32).init(0) };
+        return .{
+            .done = std.atomic.Value(u32).init(0),
+            .mu = .init,
+        };
     }
 
-    /// Signal cancellation to all holders of a `Context` derived from
-    /// this source.
-    pub fn cancel(self: *CancelSource, io: std.Io) void {
-        self.done.store(1, .release);
-        io.futexWake(u32, &self.done.raw, std.math.maxInt(u32));
-    }
-
-    /// Returns true if `cancel()` has been called on this source or
-    /// any ancestor in the parent chain.
-    pub fn isCanceled(self: *const CancelSource) bool {
-        if (self.done.load(.acquire) != 0) return true;
-        var ancestor = self.parent;
-        while (ancestor) |cs| {
-            if (cs.done.load(.acquire) != 0) return true;
-            ancestor = cs.parent;
+    /// Detach this source from its parent's child list.
+    ///
+    /// Must be called before the source is destroyed when it was registered
+    /// via `Context.withCancel`. Safe to call on a source with no parent
+    /// (becomes a no-op).
+    pub fn deinit(self: *CancelSource, io: std.Io) void {
+        const p = self.parent orelse return;
+        p.mu.lockUncancelable(io);
+        defer p.mu.unlock(io);
+        var link = &p.first_child;
+        while (link.*) |c| {
+            if (c == self) {
+                link.* = c.next_sibling;
+                self.parent = null;
+                self.next_sibling = null;
+                return;
+            }
+            link = &c.next_sibling;
         }
-        return false;
+        self.parent = null;
+        self.next_sibling = null;
+    }
+
+    /// Signal cancellation to this source and every descendant in the tree.
+    /// Idempotent.
+    pub fn cancel(self: *CancelSource, io: std.Io) void {
+        if (self.done.swap(1, .acq_rel) != 0) return;
+        io.futexWake(u32, &self.done.raw, std.math.maxInt(u32));
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+        var c = self.first_child;
+        while (c) |child| {
+            c = child.next_sibling;
+            child.cancel(io);
+        }
+    }
+
+    /// Returns true if `cancel()` has been called on this source or any ancestor.
+    pub fn isCanceled(self: *const CancelSource) bool {
+        return self.done.load(.acquire) != 0;
     }
 
     /// Obtain a `Context` backed by this source's cancellation flag.
-    pub fn context(self: *const CancelSource) Context {
+    pub fn context(self: *CancelSource) Context {
         return .{
             .cancel = self,
             .deadline_ns = null,
@@ -62,10 +89,10 @@ pub const CancelSource = struct {
 /// A lightweight, pass-by-value cancellation token and deadline carrier.
 ///
 /// `Context` does not own any resources. It borrows a pointer to a
-/// `CancelSource` whose parent chain encodes the full cancellation
-/// ancestry. It is safe to copy and pass around freely.
+/// `CancelSource` whose descendants are managed via `withCancel`. It is
+/// safe to copy and pass around freely.
 pub const Context = struct {
-    cancel: *const CancelSource,
+    cancel: *CancelSource,
     deadline_ns: ?i128 = null,
     span_context: ?SpanContext = null,
 
@@ -125,13 +152,20 @@ pub const Context = struct {
     }
 
     /// Derive a child context that links the given `CancelSource` into
-    /// the cancellation chain. The child is canceled when either the
+    /// the cancellation tree. The child is canceled when either the
     /// new source or any ancestor source is canceled.
     ///
-    /// This sets `child_cancel.parent` to the current context's source,
-    /// forming a linked list that `isCanceled()` walks in full.
-    pub fn withCancel(self: Context, child_cancel: *CancelSource) Context {
-        child_cancel.parent = self.cancel;
+    /// Callers MUST call `child_cancel.deinit(io)` before destroying the
+    /// child source.
+    pub fn withCancel(self: Context, io: std.Io, child_cancel: *CancelSource) Context {
+        const parent_cs = self.cancel;
+        parent_cs.mu.lockUncancelable(io);
+        child_cancel.parent = parent_cs;
+        child_cancel.next_sibling = parent_cs.first_child;
+        parent_cs.first_child = child_cancel;
+        const already_canceled = parent_cs.isCanceled();
+        parent_cs.mu.unlock(io);
+        if (already_canceled) child_cancel.cancel(io);
         return .{
             .cancel = child_cancel,
             .deadline_ns = self.deadline_ns,
@@ -149,7 +183,10 @@ pub const Context = struct {
     }
 };
 
-var background_source = CancelSource{ .done = std.atomic.Value(u32).init(0) };
+var background_source = CancelSource{
+    .done = std.atomic.Value(u32).init(0),
+    .mu = .init,
+};
 
 /// Sleep for up to `ns` nanoseconds, waking early if `ctx` is canceled.
 /// Returns `error.Canceled` if the context was canceled before the full
@@ -175,27 +212,13 @@ pub fn interruptibleSleep(io: std.Io, ctx: Context, ns: u64) error{Canceled}!voi
             wait_ns = @min(wait_ns, until_dl);
         }
 
-        // When ancestor cancel sources exist, we cannot futex-wait on
-        // multiple addresses simultaneously, so cap individual waits at
-        // 1 second and poll the ancestor chain between iterations.
-        if (ctx.cancel.parent != null) {
-            wait_ns = @min(wait_ns, 1 * std.time.ns_per_s);
-        }
-
-        // Wait on the cancel flag as a u32 futex with a timeout.
-        // The awake-clock duration is equivalent to the old timedWait semantics.
         const timeout: std.Io.Timeout = .{ .duration = .{
             .clock = .awake,
             .raw = .{ .nanoseconds = @intCast(wait_ns) },
         } };
-        // futexWaitTimeout returns normally when the wait completes (flag
-        // changed or timeout elapsed), and only errors on cancellation.
         io.futexWaitTimeout(u32, &ctx.cancel.done.raw, 0, timeout) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
         };
-
-        // The futex woke: either the flag changed (cancel) or timeout elapsed.
-        // Loop back to re-check cancellation and remaining time.
     }
 
     // Final check after full sleep.
@@ -343,7 +366,8 @@ test "withCancel: child cancel propagates" {
     // Arrange
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
 
     // Act
     child_cs.cancel(std.testing.io);
@@ -357,7 +381,8 @@ test "withCancel: parent cancel propagates" {
     // Arrange
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
 
     // Act
     parent_cs.cancel(std.testing.io);
@@ -373,7 +398,8 @@ test "withCancel: not canceled when neither source canceled" {
     var child_cs = CancelSource.init();
 
     // Act
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
 
     // Assert
     try std.testing.expect(!merged.isCanceled(std.testing.io));
@@ -384,7 +410,8 @@ test "withCancel: propagates through withDeadline" {
     // Arrange
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
     const now: i128 = std.Io.Clock.real.now(std.testing.io).nanoseconds;
     const with_dl = merged.withDeadline(now + 10 * std.time.ns_per_s);
 
@@ -399,7 +426,8 @@ test "withCancel: propagates through withSpanContext" {
     // Arrange
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
     const sc = SpanContext{
         .trace_id = tracing.TraceId.generate(std.testing.io),
         .span_id = tracing.SpanId.generate(std.testing.io),
@@ -419,7 +447,8 @@ test "withCancel: interruptibleSleep respects child cancel" {
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
     child_cs.cancel(std.testing.io);
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
 
     // Act / Assert
     try std.testing.expectError(error.Canceled, interruptibleSleep(std.testing.io, merged, 10 * std.time.ns_per_s));
@@ -430,7 +459,8 @@ test "withCancel: interruptibleSleep respects parent cancel" {
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
     parent_cs.cancel(std.testing.io);
-    const merged = parent_cs.context().withCancel(&child_cs);
+    const merged = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
 
     // Act / Assert
     try std.testing.expectError(error.Canceled, interruptibleSleep(std.testing.io, merged, 10 * std.time.ns_per_s));
@@ -461,13 +491,42 @@ test "interruptibleSleep: cancel wakes futex immediately" {
     thread.join();
 }
 
+test "interruptibleSleep: parent cancel wakes child sleeper immediately" {
+    // Arrange
+    var parent_cs = CancelSource.init();
+    var child_cs = CancelSource.init();
+    const ctx = parent_cs.context().withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
+
+    const CancelThread = struct {
+        fn run(io: std.Io, source: *CancelSource) void {
+            std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms } }, io) catch {};
+            source.cancel(io);
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, CancelThread.run, .{ std.testing.io, &parent_cs });
+
+    // Act
+    const start: std.Io.Clock.Timestamp = .now(std.testing.io, .awake);
+    const result = interruptibleSleep(std.testing.io, ctx, 60 * std.time.ns_per_s);
+    const elapsed_ns: i96 = start.untilNow(std.testing.io).raw.nanoseconds;
+
+    // Assert
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expect(elapsed_ns < 500 * std.time.ns_per_ms);
+
+    thread.join();
+}
+
 test "withCancel: grandparent cancel propagates through chain" {
     // Arrange
     var grandparent_cs = CancelSource.init();
     var parent_cs = CancelSource.init();
     var child_cs = CancelSource.init();
-    const level1 = grandparent_cs.context().withCancel(&parent_cs);
-    const level2 = level1.withCancel(&child_cs);
+    const level1 = grandparent_cs.context().withCancel(std.testing.io, &parent_cs);
+    defer parent_cs.deinit(std.testing.io);
+    const level2 = level1.withCancel(std.testing.io, &child_cs);
+    defer child_cs.deinit(std.testing.io);
 
     // Act
     grandparent_cs.cancel(std.testing.io);
@@ -482,8 +541,10 @@ test "withCancel: mid-chain cancel propagates to leaf" {
     var root_cs = CancelSource.init();
     var mid_cs = CancelSource.init();
     var leaf_cs = CancelSource.init();
-    const mid_ctx = root_cs.context().withCancel(&mid_cs);
-    const leaf_ctx = mid_ctx.withCancel(&leaf_cs);
+    const mid_ctx = root_cs.context().withCancel(std.testing.io, &mid_cs);
+    defer mid_cs.deinit(std.testing.io);
+    const leaf_ctx = mid_ctx.withCancel(std.testing.io, &leaf_cs);
+    defer leaf_cs.deinit(std.testing.io);
 
     // Act
     mid_cs.cancel(std.testing.io);
@@ -498,8 +559,10 @@ test "withCancel: leaf cancel does not affect ancestors" {
     var root_cs = CancelSource.init();
     var mid_cs = CancelSource.init();
     var leaf_cs = CancelSource.init();
-    const mid_ctx = root_cs.context().withCancel(&mid_cs);
-    _ = mid_ctx.withCancel(&leaf_cs);
+    const mid_ctx = root_cs.context().withCancel(std.testing.io, &mid_cs);
+    defer mid_cs.deinit(std.testing.io);
+    _ = mid_ctx.withCancel(std.testing.io, &leaf_cs);
+    defer leaf_cs.deinit(std.testing.io);
 
     // Act
     leaf_cs.cancel(std.testing.io);
@@ -515,9 +578,12 @@ test "withCancel: depth-4 chain propagates from root" {
     var cs1 = CancelSource.init();
     var cs2 = CancelSource.init();
     var cs3 = CancelSource.init();
-    const ctx1 = cs0.context().withCancel(&cs1);
-    const ctx2 = ctx1.withCancel(&cs2);
-    const ctx3 = ctx2.withCancel(&cs3);
+    const ctx1 = cs0.context().withCancel(std.testing.io, &cs1);
+    defer cs1.deinit(std.testing.io);
+    const ctx2 = ctx1.withCancel(std.testing.io, &cs2);
+    defer cs2.deinit(std.testing.io);
+    const ctx3 = ctx2.withCancel(std.testing.io, &cs3);
+    defer cs3.deinit(std.testing.io);
 
     // Act
     cs0.cancel(std.testing.io);

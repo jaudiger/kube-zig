@@ -2,8 +2,8 @@
 //!
 //! Provides functions to build an `OwnerReference` from a resource's
 //! comptime `resource_meta`, and to check, set, or remove owner references
-//! in a metadata struct's `ownerReferences` field. Set uses upsert semantics
-//! (matching by UID), and remove uses swap-remove without allocating.
+//! in an `ArrayListUnmanaged`. Assign `metadata.ownerReferences = list.items`
+//! to publish the updated slice.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -46,23 +46,20 @@ pub fn ownerReferenceFor(comptime T: type, owner: T) ?OwnerReference {
     };
 }
 
-/// Check whether an owner reference with the given `uid` exists
-/// in `metadata.ownerReferences`. Null-safe.
-pub fn hasOwnerReference(metadata: anytype, uid: []const u8) bool {
-    const refs = metadata.ownerReferences orelse return false;
-    for (refs) |r| {
+/// Check whether an owner reference with the given `uid` exists in `items`.
+/// Pass `metadata.ownerReferences orelse &.{}` or `list.items` directly.
+pub fn hasOwnerReference(items: anytype, uid: []const u8) bool {
+    for (items) |r| {
         if (std.mem.eql(u8, r.uid, uid)) return true;
     }
     return false;
 }
 
-/// Add or replace an owner reference in `metadata.ownerReferences`.
-/// If an entry with the same UID already exists, it is replaced.
-/// Each allocating code path uses a single allocation followed by an
-/// infallible fill. Allocates a new slice via `allocator`.
-pub fn setOwnerReference(metadata: anytype, allocator: Allocator, ref: anytype) !void {
-    const OwnerRefT = OwnerRefElement(@TypeOf(metadata));
-    const new_ref: OwnerRefT = .{
+/// Add or replace an owner reference in `list`. Replaces in-place when the
+/// UID matches an existing entry; otherwise appends.
+pub fn setOwnerReference(list: anytype, allocator: Allocator, ref: anytype) !void {
+    const T = std.meta.Child(std.meta.Child(@TypeOf(list)));
+    const new_ref: T = .{
         .apiVersion = ref.apiVersion,
         .kind = ref.kind,
         .name = ref.name,
@@ -71,69 +68,25 @@ pub fn setOwnerReference(metadata: anytype, allocator: Allocator, ref: anytype) 
         .blockOwnerDeletion = ref.blockOwnerDeletion,
     };
 
-    const existing = metadata.ownerReferences orelse {
-        // Allocate
-        const new = try allocator.alloc(OwnerRefT, 1);
-        errdefer comptime unreachable;
-
-        // Fill
-        new[0] = new_ref;
-        metadata.ownerReferences = new;
-        return;
-    };
-
-    // Check for existing ref by UID; replace in place.
-    for (existing) |*r| {
+    for (list.items) |*r| {
         if (std.mem.eql(u8, r.uid, ref.uid)) {
-            // Replace via mutable pointer cast (underlying memory is mutable).
-            const mutable: *OwnerRefT = @constCast(r);
-            mutable.* = new_ref;
+            r.* = new_ref;
             return;
         }
     }
-
-    // Allocate
-    const new = try allocator.alloc(OwnerRefT, existing.len + 1);
-    errdefer comptime unreachable;
-
-    // Fill
-    @memcpy(new[0..existing.len], existing);
-    new[existing.len] = new_ref;
-    metadata.ownerReferences = new;
+    try list.append(allocator, new_ref);
 }
 
-/// Remove an owner reference by UID from `metadata.ownerReferences`.
-/// Uses swap-remove (order is irrelevant). Does NOT allocate.
-/// Returns `true` if an entry was found and removed.
-pub fn removeOwnerReference(metadata: anytype, uid: []const u8) bool {
-    const refs = metadata.ownerReferences orelse return false;
-    for (refs, 0..) |r, i| {
+/// Remove an owner reference by UID from `list` using swap-remove.
+/// Does NOT allocate. Returns `true` if an entry was found and removed.
+pub fn removeOwnerReference(list: anytype, uid: []const u8) bool {
+    for (list.items, 0..) |r, i| {
         if (std.mem.eql(u8, r.uid, uid)) {
-            const OwnerRefT = OwnerRefElement(@TypeOf(metadata));
-            const mutable: []OwnerRefT = @constCast(refs);
-            const last = refs.len - 1;
-            if (i != last) {
-                mutable[i] = mutable[last];
-            }
-            metadata.ownerReferences = refs[0..last];
+            _ = list.swapRemove(i);
             return true;
         }
     }
     return false;
-}
-
-// Comptime helpers
-/// Extract the element type of `ownerReferences` from a metadata type
-/// (or pointer-to-metadata type). Works with any struct that has
-/// `ownerReferences: ?[]const T`.
-fn OwnerRefElement(comptime MetaPtrT: type) type {
-    const MetaT = switch (@typeInfo(MetaPtrT)) {
-        .pointer => |p| p.child,
-        else => MetaPtrT,
-    };
-    const field_type = @TypeOf(@as(MetaT, undefined).ownerReferences);
-    const opt_child = @typeInfo(field_type).optional.child;
-    return @typeInfo(opt_child).pointer.child;
 }
 
 const test_types = @import("../test_types.zig");
@@ -214,10 +167,9 @@ test "ownerReferenceFor: returns null when uid is null" {
 }
 
 // hasOwnerReference tests
-test "hasOwnerReference: returns false when ownerReferences is null" {
+test "hasOwnerReference: returns false when slice is empty" {
     // Act / Assert
-    const meta = TestMeta{};
-    try testing.expect(!hasOwnerReference(meta, "uid-1"));
+    try testing.expect(!hasOwnerReference(&[_]TestOwnerRef{}, "uid-1"));
 }
 
 test "hasOwnerReference: returns false when uid not present" {
@@ -228,8 +180,7 @@ test "hasOwnerReference: returns false when uid not present" {
         .name = "pod-1",
         .uid = "uid-other",
     }};
-    const meta = TestMeta{ .ownerReferences = &refs };
-    try testing.expect(!hasOwnerReference(meta, "uid-1"));
+    try testing.expect(!hasOwnerReference(&refs, "uid-1"));
 }
 
 test "hasOwnerReference: returns true when uid is present" {
@@ -240,14 +191,14 @@ test "hasOwnerReference: returns true when uid is present" {
         .name = "pod-1",
         .uid = "uid-1",
     }};
-    const meta = TestMeta{ .ownerReferences = &refs };
-    try testing.expect(hasOwnerReference(meta, "uid-1"));
+    try testing.expect(hasOwnerReference(&refs, "uid-1"));
 }
 
 // setOwnerReference tests
-test "setOwnerReference: adds to null ownerReferences" {
-    // Act / Assert
-    var meta = TestMeta{};
+test "setOwnerReference: adds to empty list" {
+    // Arrange
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
     const ref = OwnerReference{
         .apiVersion = "v1",
         .kind = "Pod",
@@ -256,22 +207,26 @@ test "setOwnerReference: adds to null ownerReferences" {
         .controller = true,
         .blockOwnerDeletion = true,
     };
-    try setOwnerReference(&meta, testing.allocator, ref);
-    defer testing.allocator.free(meta.ownerReferences.?);
-    try testing.expectEqual(@as(usize, 1), meta.ownerReferences.?.len);
-    try testing.expectEqualStrings("uid-1", meta.ownerReferences.?[0].uid);
-    try testing.expectEqual(true, meta.ownerReferences.?[0].controller.?);
+
+    // Act
+    try setOwnerReference(&list, testing.allocator, ref);
+
+    // Assert
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqualStrings("uid-1", list.items[0].uid);
+    try testing.expectEqual(true, list.items[0].controller.?);
 }
 
 test "setOwnerReference: appends when uid not present" {
-    // Act / Assert
-    var existing = [_]TestOwnerRef{.{
+    // Arrange
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.append(testing.allocator, .{
         .apiVersion = "v1",
         .kind = "Pod",
         .name = "pod-1",
         .uid = "uid-1",
-    }};
-    var meta = TestMeta{ .ownerReferences = &existing };
+    });
     const ref = OwnerReference{
         .apiVersion = "apps/v1",
         .kind = "Deployment",
@@ -280,22 +235,26 @@ test "setOwnerReference: appends when uid not present" {
         .controller = false,
         .blockOwnerDeletion = false,
     };
-    try setOwnerReference(&meta, testing.allocator, ref);
-    defer testing.allocator.free(meta.ownerReferences.?);
-    try testing.expectEqual(@as(usize, 2), meta.ownerReferences.?.len);
-    try testing.expectEqualStrings("uid-1", meta.ownerReferences.?[0].uid);
-    try testing.expectEqualStrings("uid-2", meta.ownerReferences.?[1].uid);
+
+    // Act
+    try setOwnerReference(&list, testing.allocator, ref);
+
+    // Assert
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+    try testing.expectEqualStrings("uid-1", list.items[0].uid);
+    try testing.expectEqualStrings("uid-2", list.items[1].uid);
 }
 
 test "setOwnerReference: replaces when uid already exists" {
-    // Act / Assert
-    var existing = [_]TestOwnerRef{.{
+    // Arrange
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.append(testing.allocator, .{
         .apiVersion = "v1",
         .kind = "Pod",
         .name = "pod-1",
         .uid = "uid-1",
-    }};
-    var meta = TestMeta{ .ownerReferences = &existing };
+    });
     const ref = OwnerReference{
         .apiVersion = "v1",
         .kind = "Pod",
@@ -304,55 +263,96 @@ test "setOwnerReference: replaces when uid already exists" {
         .controller = true,
         .blockOwnerDeletion = true,
     };
-    try setOwnerReference(&meta, testing.allocator, ref);
-    // No new allocation; in-place replace.
-    try testing.expectEqual(@as(usize, 1), meta.ownerReferences.?.len);
-    try testing.expectEqualStrings("pod-1-updated", meta.ownerReferences.?[0].name);
-    try testing.expectEqual(true, meta.ownerReferences.?[0].controller.?);
+
+    // Act
+    try setOwnerReference(&list, testing.allocator, ref);
+
+    // Assert
+    try testing.expectEqual(@as(usize, 1), list.items.len);
+    try testing.expectEqualStrings("pod-1-updated", list.items[0].name);
+    try testing.expectEqual(true, list.items[0].controller.?);
+}
+
+test "setOwnerReference: grow path frees previous buffer via list" {
+    // Arrange: seed a list so the next append triggers a reallocation.
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.ensureTotalCapacity(testing.allocator, 1);
+    try list.append(testing.allocator, .{
+        .apiVersion = "v1",
+        .kind = "Pod",
+        .name = "a",
+        .uid = "uid-a",
+    });
+
+    // Act: append a second entry with a different UID, forcing a grow.
+    try setOwnerReference(&list, testing.allocator, OwnerReference{
+        .apiVersion = "v1",
+        .kind = "Pod",
+        .name = "b",
+        .uid = "uid-b",
+    });
+
+    // Assert
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+    try testing.expectEqualStrings("uid-a", list.items[0].uid);
+    try testing.expectEqualStrings("uid-b", list.items[1].uid);
 }
 
 // removeOwnerReference tests
-test "removeOwnerReference: returns false when ownerReferences is null" {
+test "removeOwnerReference: returns false when list is empty" {
     // Act / Assert
-    var meta = TestMeta{};
-    try testing.expect(!removeOwnerReference(&meta, "uid-1"));
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try testing.expect(!removeOwnerReference(&list, "uid-1"));
 }
 
 test "removeOwnerReference: returns false when uid not present" {
-    // Act / Assert
-    var refs = [_]TestOwnerRef{.{
+    // Arrange
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.append(testing.allocator, .{
         .apiVersion = "v1",
         .kind = "Pod",
         .name = "pod-1",
         .uid = "uid-other",
-    }};
-    var meta = TestMeta{ .ownerReferences = &refs };
-    try testing.expect(!removeOwnerReference(&meta, "uid-1"));
+    });
+
+    // Act / Assert
+    try testing.expect(!removeOwnerReference(&list, "uid-1"));
 }
 
 test "removeOwnerReference: removes sole entry" {
-    // Act / Assert
-    var refs = [_]TestOwnerRef{.{
+    // Arrange
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.append(testing.allocator, .{
         .apiVersion = "v1",
         .kind = "Pod",
         .name = "pod-1",
         .uid = "uid-1",
-    }};
-    var meta = TestMeta{ .ownerReferences = &refs };
-    try testing.expect(removeOwnerReference(&meta, "uid-1"));
-    try testing.expectEqual(@as(usize, 0), meta.ownerReferences.?.len);
+    });
+
+    // Act / Assert
+    try testing.expect(removeOwnerReference(&list, "uid-1"));
+    try testing.expectEqual(@as(usize, 0), list.items.len);
 }
 
 test "removeOwnerReference: swap-removes from multiple" {
-    // Act / Assert
-    var refs = [_]TestOwnerRef{
+    // Arrange
+    var list: std.ArrayListUnmanaged(TestOwnerRef) = .empty;
+    defer list.deinit(testing.allocator);
+    try list.appendSlice(testing.allocator, &.{
         .{ .apiVersion = "v1", .kind = "Pod", .name = "a", .uid = "uid-a" },
         .{ .apiVersion = "v1", .kind = "Pod", .name = "target", .uid = "uid-target" },
         .{ .apiVersion = "v1", .kind = "Pod", .name = "c", .uid = "uid-c" },
-    };
-    var meta = TestMeta{ .ownerReferences = &refs };
-    try testing.expect(removeOwnerReference(&meta, "uid-target"));
-    try testing.expectEqual(@as(usize, 2), meta.ownerReferences.?.len);
-    try testing.expectEqualStrings("uid-a", meta.ownerReferences.?[0].uid);
-    try testing.expectEqualStrings("uid-c", meta.ownerReferences.?[1].uid);
+    });
+
+    // Act
+    try testing.expect(removeOwnerReference(&list, "uid-target"));
+
+    // Assert: 2 entries remain; swap-remove brings uid-c into slot 1.
+    try testing.expectEqual(@as(usize, 2), list.items.len);
+    try testing.expectEqualStrings("uid-a", list.items[0].uid);
+    try testing.expectEqualStrings("uid-c", list.items[1].uid);
 }

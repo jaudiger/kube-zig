@@ -859,6 +859,7 @@ pub const Client = struct {
         self.auth.deinit();
         self.allocator.free(self.base_url);
         self.transport.deinit(io);
+        self.shutdown_source.deinit(io);
     }
 
     /// Return an owned snapshot of the current API Priority and Fairness flow-control state.
@@ -1098,7 +1099,7 @@ pub const Client = struct {
     }
 
     /// Return a root `Context` backed by this client's shutdown source.
-    pub fn context(self: *const Client) Context {
+    pub fn context(self: *Client) Context {
         return self.shutdown_source.context();
     }
 
