@@ -139,6 +139,12 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, output_dir: []const u8
         }
         try writer.writeByte('\n');
 
+        // Emit ByteString helper if any definition in this group uses byte-format fields.
+        if (groupUsesByteString(entries.items)) {
+            try writeByteStringType(writer);
+            try writer.writeByte('\n');
+        }
+
         // Write all structs in this group.
         for (entries.items, 0..) |def_entry, i| {
             const meta = resource_metas.get(def_entry.fqn);
@@ -566,12 +572,33 @@ fn writeStruct(writer: *Writer, fqn: []const u8, schema: std.json.Value, definit
             const format = if (obj.get("format")) |f| (asString(f) orelse "") else "";
             if (std.mem.eql(u8, format, "int-or-string")) {
                 try writeIntOrStringUnion(writer);
+            } else if (std.mem.eql(u8, format, "byte")) {
+                try writer.writeAll(" = ByteString;\n");
             } else {
                 // Covers Quantity, Time, MicroTime, etc.
                 try writer.writeAll(" = []const u8;\n");
             }
+        } else if (std.mem.eql(u8, type_str, "object")) {
+            if (obj.get("additionalProperties")) |ap| {
+                switch (ap) {
+                    .bool => |b| {
+                        if (b) {
+                            try writer.writeAll(" = json.ArrayHashMap(json.Value);\n");
+                        } else {
+                            try writer.writeAll(" = std.json.Value;\n");
+                        }
+                    },
+                    else => {
+                        try writer.writeAll(" = json.ArrayHashMap(");
+                        try writeType(writer, ap, definitions, current_group_key);
+                        try writer.writeAll(");\n");
+                    },
+                }
+            } else {
+                // No additionalProperties: OpenAPI default is an open object.
+                try writer.writeAll(" = json.ArrayHashMap(json.Value);\n");
+            }
         } else {
-            // "object" without properties (FieldsV1, Patch, RawExtension, marker types, etc.)
             try writer.writeAll(" = std.json.Value;\n");
         }
     } else {
@@ -601,6 +628,14 @@ fn writeType(writer: *Writer, schema: std.json.Value, definitions: std.json.Obje
     };
 
     if (std.mem.eql(u8, type_str, "string")) {
+        if (obj.get("format")) |fmt| {
+            if (asString(fmt)) |fmt_str| {
+                if (std.mem.eql(u8, fmt_str, "byte")) {
+                    try writer.writeAll("ByteString");
+                    return;
+                }
+            }
+        }
         try writer.writeAll("[]const u8");
         return;
     }
@@ -639,17 +674,102 @@ fn writeType(writer: *Writer, schema: std.json.Value, definitions: std.json.Obje
     }
 
     if (std.mem.eql(u8, type_str, "object")) {
-        if (obj.get("additionalProperties")) |additional| {
-            // Typed map: json.ArrayHashMap(ValueType)
-            try writer.writeAll("json.ArrayHashMap(");
-            try writeType(writer, additional, definitions, current_group_key);
-            try writer.writeAll(")");
+        if (obj.get("additionalProperties")) |ap| {
+            switch (ap) {
+                .bool => |b| {
+                    if (b) {
+                        try writer.writeAll("json.ArrayHashMap(json.Value)");
+                    } else {
+                        try writer.writeAll("json.Value");
+                    }
+                },
+                else => {
+                    try writer.writeAll("json.ArrayHashMap(");
+                    try writeType(writer, ap, definitions, current_group_key);
+                    try writer.writeAll(")");
+                },
+            }
             return;
+        }
+        // No additionalProperties: OpenAPI default is an open object.
+        try writer.writeAll("json.ArrayHashMap(json.Value)");
+        return;
+    }
+
+    try writer.writeAll("json.Value");
+}
+
+/// Emit the ByteString helper type (top-level, once per file).
+fn writeByteStringType(writer: *Writer) !void {
+    try writer.writeAll(
+        \\pub const ByteString = struct {
+        \\    base64: []const u8,
+        \\
+        \\    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        \\        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+        \\            inline .string, .allocated_string => |s| return .{ .base64 = s },
+        \\            else => return error.UnexpectedToken,
+        \\        }
+        \\    }
+        \\
+        \\    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        \\        try jw.write(self.base64);
+        \\    }
+        \\
+        \\    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        \\        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        \\        const buf = try allocator.alloc(u8, size);
+        \\        errdefer allocator.free(buf);
+        \\        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        \\        return buf;
+        \\    }
+        \\};
+        \\
+    );
+}
+
+fn schemaUsesByteString(schema: std.json.Value) bool {
+    const obj = asObject(schema) orelse return false;
+
+    if (obj.get("type")) |t| {
+        if (asString(t)) |ts| {
+            if (std.mem.eql(u8, ts, "string")) {
+                if (obj.get("format")) |f| {
+                    if (asString(f)) |fs| {
+                        if (std.mem.eql(u8, fs, "byte")) return true;
+                    }
+                }
+            }
         }
     }
 
-    // "object" without additionalProperties is opaque; use json.Value.
-    try writer.writeAll("json.Value");
+    if (obj.get("properties")) |props_val| {
+        if (asObject(props_val)) |props| {
+            for (props.values()) |v| {
+                if (schemaUsesByteString(v)) return true;
+            }
+        }
+    }
+
+    if (obj.get("items")) |items| {
+        if (schemaUsesByteString(items)) return true;
+    }
+
+    if (obj.get("additionalProperties")) |ap| {
+        switch (ap) {
+            .object => if (schemaUsesByteString(ap)) return true,
+            else => {},
+        }
+    }
+
+    return false;
+}
+
+fn groupUsesByteString(entries: []const DefEntry) bool {
+    for (entries) |e| {
+        if (schemaUsesByteString(e.schema)) return true;
+    }
+    return false;
 }
 
 /// Emit a tagged union for Kubernetes IntOrString with custom JSON support.
@@ -1120,10 +1240,32 @@ test "writeType: object with additionalProperties string" {
     try testing.expectEqualStrings("json.ArrayHashMap([]const u8)", writer.buffered());
 }
 
-test "writeType: bare object" {
+test "writeType: open object emits ArrayHashMap" {
+    // Arrange
+    const bare = try json_helpers.parseJson(testing.allocator,
+        \\{"type":"object"}
+    );
+    defer bare.deinit();
+    const with_true = try json_helpers.parseJson(testing.allocator,
+        \\{"type":"object","additionalProperties":true}
+    );
+    defer with_true.deinit();
+    var buf: [256]u8 = undefined;
+
+    // Act / Assert
+    var w1 = Writer.fixed(&buf);
+    try writeType(&w1, bare.value, @as(std.json.ObjectMap, .empty), "core_v1");
+    try testing.expectEqualStrings("json.ArrayHashMap(json.Value)", w1.buffered());
+
+    var w2 = Writer.fixed(&buf);
+    try writeType(&w2, with_true.value, @as(std.json.ObjectMap, .empty), "core_v1");
+    try testing.expectEqualStrings("json.ArrayHashMap(json.Value)", w2.buffered());
+}
+
+test "writeType: additionalProperties false emits json.Value" {
     // Arrange
     const parsed = try json_helpers.parseJson(testing.allocator,
-        \\{"type":"object"}
+        \\{"type":"object","additionalProperties":false}
     );
     defer parsed.deinit();
     var buf: [256]u8 = undefined;
@@ -1134,6 +1276,22 @@ test "writeType: bare object" {
 
     // Assert
     try testing.expectEqualStrings("json.Value", writer.buffered());
+}
+
+test "writeType: string with byte format emits ByteString" {
+    // Arrange
+    const parsed = try json_helpers.parseJson(testing.allocator,
+        \\{"type":"string","format":"byte"}
+    );
+    defer parsed.deinit();
+    var buf: [256]u8 = undefined;
+    var writer = Writer.fixed(&buf);
+
+    // Act
+    try writeType(&writer, parsed.value, @as(std.json.ObjectMap, .empty), "core_v1");
+
+    // Assert
+    try testing.expectEqualStrings("ByteString", writer.buffered());
 }
 
 test "writeType: empty schema" {

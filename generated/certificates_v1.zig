@@ -5,6 +5,29 @@ const std = @import("std");
 const json = std.json;
 const meta_v1 = @import("meta_v1.zig");
 
+pub const ByteString = struct {
+    base64: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+            inline .string, .allocated_string => |s| return .{ .base64 = s },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.write(self.base64);
+    }
+
+    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        return buf;
+    }
+};
+
 /// CertificateSigningRequest objects provide a mechanism to obtain x509 certificates by submitting a certificate signing request, and having it asynchronously approved and issued.
 pub const CertificatesV1CertificateSigningRequest = struct {
     pub const resource_meta = .{
@@ -63,7 +86,7 @@ pub const CertificatesV1CertificateSigningRequestSpec = struct {
     /// groups contains group membership of the user that created the CertificateSigningRequest. Populated by the API server on creation and immutable.
     groups: ?[]const []const u8 = null,
     /// request contains an x509 certificate signing request encoded in a "CERTIFICATE REQUEST" PEM block. When serialized as JSON or YAML, the data is additionally base64-encoded.
-    request: []const u8,
+    request: ByteString,
     /// signerName indicates the requested signer, and is a qualified name.
     signerName: []const u8,
     /// uid contains the uid of the user that created the CertificateSigningRequest. Populated by the API server on creation and immutable.
@@ -77,7 +100,7 @@ pub const CertificatesV1CertificateSigningRequestSpec = struct {
 /// CertificateSigningRequestStatus contains conditions used to indicate approved/denied/failed status of the request, and the issued certificate.
 pub const CertificatesV1CertificateSigningRequestStatus = struct {
     /// certificate is populated with an issued certificate by the signer after an Approved condition is present. This field is set via the /status subresource. Once populated, this field is immutable.
-    certificate: ?[]const u8 = null,
+    certificate: ?ByteString = null,
     /// conditions applied to the request. Known conditions are "Approved", "Denied", and "Failed".
     conditions: ?[]const CertificatesV1CertificateSigningRequestCondition = null,
 };

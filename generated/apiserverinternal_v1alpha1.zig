@@ -69,7 +69,7 @@ pub const ApiserverinternalV1alpha1StorageVersionList = struct {
 };
 
 /// StorageVersionSpec is an empty spec.
-pub const ApiserverinternalV1alpha1StorageVersionSpec = std.json.Value;
+pub const ApiserverinternalV1alpha1StorageVersionSpec = json.ArrayHashMap(json.Value);
 
 /// API server instances report the versions they can decode and the version they encode objects to when persisting objects in the backend.
 pub const ApiserverinternalV1alpha1StorageVersionStatus = struct {

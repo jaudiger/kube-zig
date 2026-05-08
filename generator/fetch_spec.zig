@@ -18,27 +18,38 @@ pub fn main(init: std.process.Init) !void {
     const output_path = args_it.next() orelse
         std.process.fatal("Usage: fetch-spec <k8s-version> <output-path>\n", .{});
 
-    // Resolve "latest" to an actual tag via the GitHub API.
+    const sidecar_path = try std.fmt.allocPrint(allocator, "{s}.version", .{output_path});
+
+    const token: ?[]const u8 = init.environ_map.get("GITHUB_TOKEN");
+
+    // Resolve "latest" to a concrete tag via the GitHub API.
     const version = if (std.mem.eql(u8, raw_version, "latest"))
-        resolveLatestVersion(allocator, io) catch |err| {
+        resolveLatestVersion(allocator, io, token) catch |err| {
             std.process.fatal("Failed to resolve latest version: {}\n", .{err});
         }
     else
         raw_version;
 
+    // Skip the download when the sidecar already records this version.
+    const cached = std.Io.Dir.cwd().readFileAlloc(io, sidecar_path, allocator, .limited(256)) catch null;
+    if (cached) |cv| {
+        if (std.mem.eql(u8, std.mem.trim(u8, cv, " \t\n\r"), version)) {
+            std.debug.print("Spec for Kubernetes {s} is up to date, skipping download.\n", .{version});
+            return;
+        }
+    }
+
     std.debug.print("Downloading Kubernetes {s} OpenAPI spec...\n", .{version});
 
     // Construct the raw GitHub URL for the spec file.
-    const url = std.fmt.allocPrint(
+    const url = try std.fmt.allocPrint(
         allocator,
         "https://raw.githubusercontent.com/kubernetes/kubernetes/{s}/api/openapi-spec/swagger.json",
         .{version},
-    ) catch |err| {
-        std.process.fatal("Failed to format URL: {}\n", .{err});
-    };
+    );
 
     // Download the spec.
-    const body = fetch(allocator, io, url) catch |err| {
+    const body = fetch(allocator, io, url, token) catch |err| {
         std.process.fatal("Failed to download spec from {s}: {}\n", .{ url, err });
     };
 
@@ -57,14 +68,26 @@ pub fn main(init: std.process.Init) !void {
         std.process.fatal("Failed to write {s}: {}\n", .{ output_path, err });
     };
 
+    std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = sidecar_path,
+        .data = version,
+    }) catch |err| {
+        std.debug.print("Warning: failed to write version sidecar {s}: {}\n", .{ sidecar_path, err });
+    };
+
     std.debug.print("Wrote {d} bytes to {s}\n", .{ body.len, output_path });
 }
 
 /// Queries the GitHub API to resolve the latest Kubernetes release tag.
-fn resolveLatestVersion(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+fn resolveLatestVersion(allocator: std.mem.Allocator, io: std.Io, token: ?[]const u8) ![]const u8 {
     std.debug.print("Resolving latest Kubernetes version...\n", .{});
 
-    const body = try fetch(allocator, io, "https://api.github.com/repos/kubernetes/kubernetes/releases/latest");
+    const body = try fetch(
+        allocator,
+        io,
+        "https://api.github.com/repos/kubernetes/kubernetes/releases/latest",
+        token,
+    );
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
@@ -88,13 +111,25 @@ fn resolveLatestVersion(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
 }
 
 /// Performs an HTTP GET request and returns the (decompressed) response body.
-fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8) ![]const u8 {
+/// Always sends User-Agent; sends Authorization: Bearer when token is non-null.
+fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, token: ?[]const u8) ![]const u8 {
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
     const uri = try std.Uri.parse(url);
 
-    var req = try client.request(.GET, uri, .{});
+    const auth_value: []const u8 = if (token) |t|
+        try std.fmt.allocPrint(allocator, "Bearer {s}", .{t})
+    else
+        "";
+
+    const headers: [2]std.http.Header = .{
+        .{ .name = "User-Agent", .value = "kube-zig-codegen" },
+        .{ .name = "Authorization", .value = auth_value },
+    };
+    const extra_headers: []const std.http.Header = if (token != null) &headers else headers[0..1];
+
+    var req = try client.request(.GET, uri, .{ .extra_headers = extra_headers });
     defer req.deinit();
 
     try req.sendBodiless();

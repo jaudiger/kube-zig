@@ -7,6 +7,29 @@ const api_resource = @import("api_resource.zig");
 const meta_v1 = @import("meta_v1.zig");
 const util_intstr = @import("util_intstr.zig");
 
+pub const ByteString = struct {
+    base64: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+            inline .string, .allocated_string => |s| return .{ .base64 = s },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.write(self.base64);
+    }
+
+    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        return buf;
+    }
+};
+
 /// Represents a Persistent Disk resource in AWS.
 pub const CoreV1AWSElasticBlockStoreVolumeSource = struct {
     /// fsType is the filesystem type of the volume that you want to mount. Tip: Ensure that the filesystem type is supported by the host operating system. Examples: "ext4", "xfs", "ntfs". Implicitly inferred to be "ext4" if unspecified. More info: https://kubernetes.io/docs/concepts/storage/volumes#awselasticblockstore
@@ -285,7 +308,7 @@ pub const CoreV1ConfigMap = struct {
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// BinaryData contains the binary data. Each key must consist of alphanumeric characters, '-', '_' or '.'. BinaryData can contain byte sequences that are not in the UTF-8 range. The keys stored in BinaryData must not overlap with the ones in the Data field, this is enforced during validation process. Using this field will require 1.10+ apiserver and kubelet.
-    binaryData: ?json.ArrayHashMap([]const u8) = null,
+    binaryData: ?json.ArrayHashMap(ByteString) = null,
     /// Data contains the configuration data. Each key must consist of alphanumeric characters, '-', '_' or '.'. Values with non-UTF-8 byte sequences must use the BinaryData field. The keys stored in Data must not overlap with the keys in the BinaryData field, this is enforced during validation process.
     data: ?json.ArrayHashMap([]const u8) = null,
     /// Immutable, if set to true, ensures that data stored in the ConfigMap cannot be updated (only object metadata can be modified). If not set to true, the field can be modified at any time. Defaulted to nil.
@@ -2503,7 +2526,7 @@ pub const CoreV1Secret = struct {
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// Data contains the secret data. Each key must consist of alphanumeric characters, '-', '_' or '.'. The serialized form of the secret data is a base64 encoded string, representing the arbitrary (possibly non-string) data value here. Described in https://tools.ietf.org/html/rfc4648#section-4
-    data: ?json.ArrayHashMap([]const u8) = null,
+    data: ?json.ArrayHashMap(ByteString) = null,
     /// Immutable, if set to true, ensures that data stored in the Secret cannot be updated (only object metadata can be modified). If not set to true, the field can be modified at any time. Defaulted to nil.
     immutable: ?bool = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds

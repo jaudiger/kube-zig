@@ -56,11 +56,12 @@ pub fn main(init: std.process.Init) !void {
     var file_writer = output_file.writer(io, &write_buf);
     const writer = &file_writer.interface;
 
-    // Track whether we need IntOrString and whether any CRD was written.
+    // Track which helpers are needed and whether any CRD was written.
     var needs_int_or_string = false;
+    var needs_byte_string = false;
     var first_crd = true;
 
-    // First pass: check if any CRD uses IntOrString.
+    // First pass: check which helper types are needed across all CRDs.
     for (crd_files) |crd_path| {
         const crd_data = std.Io.Dir.cwd().readFileAlloc(io, crd_path, allocator, .limited(16 * 1024 * 1024)) catch |err| {
             std.process.fatal("Failed to read {s}: {}\n", .{ crd_path, err });
@@ -70,10 +71,13 @@ pub fn main(init: std.process.Init) !void {
             std.process.fatal("JSON parse error in {s}: {}\n", .{ crd_path, err });
         };
 
-        if (crd_emitter.crdUsesIntOrString(parsed.value)) {
+        if (!needs_int_or_string and crd_emitter.crdUsesIntOrString(parsed.value)) {
             needs_int_or_string = true;
-            break;
         }
+        if (!needs_byte_string and crd_emitter.crdUsesByteString(parsed.value)) {
+            needs_byte_string = true;
+        }
+        if (needs_int_or_string and needs_byte_string) break;
     }
 
     // Process each CRD file.
@@ -101,7 +105,10 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    // Write IntOrString union if needed.
+    // Write helper types that were referenced by generated code.
+    if (needs_byte_string) {
+        try crd_emitter.writeByteStringType(writer);
+    }
     if (needs_int_or_string) {
         try crd_emitter.writeIntOrStringUnion(writer);
     }

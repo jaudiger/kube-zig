@@ -126,7 +126,7 @@ pub const MetaV1FieldSelectorRequirement = struct {
 };
 
 /// FieldsV1 stores a set of fields in a data structure like a Trie, in JSON format.
-pub const MetaV1FieldsV1 = std.json.Value;
+pub const MetaV1FieldsV1 = json.ArrayHashMap(json.Value);
 
 /// GroupResource specifies a Group and a Resource, but does not force a version.  This is useful for identifying concepts during lookup stages without having partially valid types
 pub const MetaV1GroupResource = struct {
@@ -244,7 +244,7 @@ pub const MetaV1OwnerReference = struct {
 };
 
 /// Patch is provided to give a concrete name and type to the Kubernetes PATCH request body.
-pub const MetaV1Patch = std.json.Value;
+pub const MetaV1Patch = json.ArrayHashMap(json.Value);
 
 /// Preconditions must be fulfilled before an operation (update, delete, etc.) is carried out.
 pub const MetaV1Preconditions = struct {

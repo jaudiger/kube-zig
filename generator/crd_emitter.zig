@@ -17,6 +17,8 @@ const writeFieldDocComment = emit_helpers.writeFieldDocComment;
 /// Metadata extracted from a CRD for a single version of a custom resource.
 pub const CrdMeta = struct {
     group: []const u8,
+    /// CamelCase prefix derived from group, e.g. "StableExampleCom".
+    group_prefix: []u8,
     version: []const u8,
     kind: []const u8,
     plural: []const u8,
@@ -24,9 +26,11 @@ pub const CrdMeta = struct {
     schema: ?std.json.Value,
 };
 
-/// Extract per-version CRD metadata into the caller-provided buffer.
+/// Extract per-version CRD metadata into a caller-owned slice.
 /// Returns null when the CRD is malformed or has no served versions.
-pub fn extractCrdMeta(crd: std.json.Value, buf: []CrdMeta) ?[]const CrdMeta {
+/// The returned slice and each CrdMeta.group_prefix are allocated via `allocator`;
+/// free them with deinitCrdMetaSlice when done.
+pub fn extractCrdMeta(allocator: std.mem.Allocator, crd: std.json.Value) !?[]CrdMeta {
     const root = asObject(crd) orelse return null;
     const spec = asObject(root.get("spec") orelse return null) orelse return null;
 
@@ -40,34 +44,56 @@ pub fn extractCrdMeta(crd: std.json.Value, buf: []CrdMeta) ?[]const CrdMeta {
 
     const versions_arr = asArray(spec.get("versions") orelse return null) orelse return null;
 
-    var i: usize = 0;
+    var metas: std.ArrayList(CrdMeta) = .empty;
+    errdefer {
+        for (metas.items) |m| allocator.free(m.group_prefix);
+        metas.deinit(allocator);
+    }
+
+    const group_prefix = try openapi.sanitizeGroupIdent(allocator, group);
+    errdefer allocator.free(group_prefix);
+    var prefix_consumed = false;
+
     for (versions_arr.items) |v| {
         const ver_obj = asObject(v) orelse continue;
         const served = asBool(ver_obj.get("served") orelse continue) orelse continue;
         if (!served) continue;
-        if (i >= buf.len) break;
 
         const version = asString(ver_obj.get("name") orelse continue) orelse continue;
 
-        // Extract schema: .schema.openAPIV3Schema
         const schema: ?std.json.Value = blk: {
             const schema_obj = asObject(ver_obj.get("schema") orelse break :blk null) orelse break :blk null;
             break :blk schema_obj.get("openAPIV3Schema");
         };
 
-        buf[i] = .{
+        const entry_prefix: []u8 = if (!prefix_consumed) blk: {
+            prefix_consumed = true;
+            break :blk group_prefix;
+        } else try allocator.dupe(u8, group_prefix);
+
+        try metas.append(allocator, .{
             .group = group,
+            .group_prefix = entry_prefix,
             .version = version,
             .kind = kind,
             .plural = plural,
             .namespaced = namespaced,
             .schema = schema,
-        };
-        i += 1;
+        });
     }
 
-    if (i == 0) return null;
-    return buf[0..i];
+    if (!prefix_consumed) allocator.free(group_prefix);
+    if (metas.items.len == 0) {
+        metas.deinit(allocator);
+        return null;
+    }
+    return try metas.toOwnedSlice(allocator);
+}
+
+/// Free a slice returned by extractCrdMeta.
+pub fn deinitCrdMetaSlice(allocator: std.mem.Allocator, metas: []CrdMeta) void {
+    for (metas) |m| allocator.free(m.group_prefix);
+    allocator.free(metas);
 }
 
 /// Context passed through recursive struct generation to collect nested structs.
@@ -91,8 +117,6 @@ const GenContext = struct {
     }
 
     fn deinit(self: *GenContext) void {
-        // The nested items' names and seen_names keys share the same allocations,
-        // so only free via seen_names to avoid double-free.
         self.nested.deinit(self.allocator);
         for (self.seen_names.keys()) |key| {
             self.allocator.free(key);
@@ -105,7 +129,7 @@ const GenContext = struct {
         const gop = try self.seen_names.getOrPut(self.allocator, duped);
         if (gop.found_existing) {
             self.allocator.free(duped);
-            return; // Already queued
+            return;
         }
         try self.nested.append(self.allocator, .{
             .name = duped,
@@ -116,18 +140,16 @@ const GenContext = struct {
 };
 
 /// Generate all types for a single CRD JSON into the writer.
-/// If multi_version is true, version suffixes are added to type names.
 pub fn generateCrd(
     allocator: std.mem.Allocator,
     writer: *Writer,
     crd: std.json.Value,
     types_import: []const u8,
 ) !void {
-    var meta_buf: [16]CrdMeta = undefined;
-    const metas = extractCrdMeta(crd, &meta_buf) orelse return error.InvalidCrd;
+    const metas = try extractCrdMeta(allocator, crd) orelse return error.InvalidCrd;
+    defer deinitCrdMetaSlice(allocator, metas);
     const multi_version = metas.len > 1;
 
-    // Write CRD source comment.
     const root = asObject(crd) orelse return error.InvalidCrd;
     const metadata_obj = asObject(root.get("metadata") orelse return error.InvalidCrd) orelse return error.InvalidCrd;
     const crd_name = asString(metadata_obj.get("name") orelse return error.InvalidCrd) orelse return error.InvalidCrd;
@@ -143,14 +165,22 @@ pub fn generateCrd(
 }
 
 /// Build the type name for a CRD version.
-/// If multi_version, appends a capitalized version suffix (e.g., "CronTabV1").
-fn buildTypeName(buf: []u8, kind: []const u8, version: []const u8, multi_version: bool) []const u8 {
-    var w = Writer.fixed(buf);
-    openapi.writeCapitalized(&w, kind) catch return "";
+/// Prefixes with the sanitized group; appends a capitalized version suffix when multi_version.
+fn buildTypeName(
+    allocator: std.mem.Allocator,
+    group_prefix: []const u8,
+    kind: []const u8,
+    version: []const u8,
+    multi_version: bool,
+) ![]u8 {
+    var buf: [2048]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try w.writeAll(group_prefix);
+    try openapi.writeCapitalized(&w, kind);
     if (multi_version) {
-        openapi.writeCapitalized(&w, version) catch return "";
+        try openapi.writeCapitalized(&w, version);
     }
-    return w.buffered();
+    return allocator.dupe(u8, w.buffered());
 }
 
 /// Generate types for a single version of a CRD.
@@ -160,15 +190,11 @@ fn generateVersion(
     meta: CrdMeta,
     multi_version: bool,
 ) !void {
-    var name_buf: [512]u8 = undefined;
-    const type_name = buildTypeName(&name_buf, meta.kind, meta.version, multi_version);
-    var list_name_buf: [512]u8 = undefined;
-    const list_type_name = blk: {
-        var w = Writer.fixed(&list_name_buf);
-        try w.writeAll(type_name);
-        try w.writeAll("List");
-        break :blk w.buffered();
-    };
+    const type_name = try buildTypeName(allocator, meta.group_prefix, meta.kind, meta.version, multi_version);
+    defer allocator.free(type_name);
+
+    const list_type_name = try std.fmt.allocPrint(allocator, "{s}List", .{type_name});
+    defer allocator.free(list_type_name);
 
     // Write list type.
     try writer.print("/// List of {s} resources.\n", .{type_name});
@@ -183,7 +209,6 @@ fn generateVersion(
     try writer.print("/// {s} custom resource ({s}/{s}).\n", .{ type_name, meta.group, meta.version });
     try writer.print("pub const {s} = struct {{\n", .{type_name});
 
-    // Write resource_meta.
     try writer.writeAll("    pub const resource_meta = .{\n");
     try writer.print("        .group = \"{s}\",\n", .{meta.group});
     try writer.print("        .version = \"{s}\",\n", .{meta.version});
@@ -197,16 +222,13 @@ fn generateVersion(
     try writer.print("        .list_kind = {s},\n", .{list_type_name});
     try writer.writeAll("    };\n\n");
 
-    // Always emit apiVersion, kind, metadata.
     try writer.writeAll("    apiVersion: ?[]const u8 = null,\n");
     try writer.writeAll("    kind: ?[]const u8 = null,\n");
     try writer.writeAll("    metadata: ?types.MetaV1ObjectMeta = null,\n");
 
-    // Collect nested structs as we write the root fields.
     var ctx = GenContext.init(allocator);
     defer ctx.deinit();
 
-    // Write fields from schema properties (excluding apiVersion, kind, metadata).
     if (meta.schema) |schema_val| {
         const schema_obj = asObject(schema_val) orelse null;
         if (schema_obj) |so| {
@@ -218,7 +240,6 @@ fn generateVersion(
             }
         }
     } else {
-        // No schema: add catch-all spec field.
         try writer.writeAll("    spec: ?json.Value = null,\n");
     }
 
@@ -240,16 +261,26 @@ fn generateVersion(
             continue;
         };
 
-        // Handle allOf: merge properties from all sub-schemas.
+        // Handle allOf: merge properties from all sub-schemas before emitting.
         if (nested_obj.get("allOf")) |all_of_val| {
             if (asArray(all_of_val)) |all_of_arr| {
+                var merged: std.json.ObjectMap = .empty;
+                defer merged.deinit(ctx.allocator);
+
                 for (all_of_arr.items) |sub_schema| {
                     const sub_obj = asObject(sub_schema) orelse continue;
                     if (sub_obj.get("properties")) |props_val| {
                         if (asObject(props_val)) |props| {
-                            try writeFieldsFromProperties(writer, props, nested.name, &ctx);
+                            var it = props.iterator();
+                            while (it.next()) |entry| {
+                                try merged.put(ctx.allocator, entry.key_ptr.*, entry.value_ptr.*);
+                            }
                         }
                     }
+                }
+
+                if (merged.count() > 0) {
+                    try writeFieldsFromProperties(writer, merged, nested.name, &ctx);
                 }
             }
         } else if (nested_obj.get("properties")) |props_val| {
@@ -263,8 +294,6 @@ fn generateVersion(
 }
 
 /// Write struct fields from an OpenAPI properties map.
-/// When skip_standard_fields is true, skips apiVersion, kind, metadata
-/// (these are handled separately on the root type).
 fn writeFieldsFromProperties(
     writer: *Writer,
     props: std.json.ObjectMap,
@@ -290,7 +319,6 @@ fn writeFieldsFromPropertiesInner(
     ctx: *GenContext,
     skip_standard_fields: bool,
 ) !void {
-    // Sort properties for deterministic output.
     const keys = props.keys();
     const sorted_indices = try ctx.allocator.alloc(usize, keys.len);
     defer ctx.allocator.free(sorted_indices);
@@ -308,7 +336,6 @@ fn writeFieldsFromPropertiesInner(
         const field_name = keys[idx];
         const prop_schema = values[idx];
 
-        // Skip standard K8s fields on the root type (they are emitted separately).
         if (skip_standard_fields and
             (std.mem.eql(u8, field_name, "apiVersion") or
                 std.mem.eql(u8, field_name, "kind") or
@@ -317,7 +344,6 @@ fn writeFieldsFromPropertiesInner(
             continue;
         }
         {
-            // Write field doc comment.
             if (asObject(prop_schema)) |prop_obj| {
                 if (prop_obj.get("description")) |desc| {
                     if (asString(desc)) |s| try writeFieldDocComment(writer, s);
@@ -334,20 +360,18 @@ fn writeFieldsFromPropertiesInner(
 }
 
 /// Write a Zig type expression for an OpenAPI v3 schema.
-/// For nested objects, creates a named sub-struct and registers it in the context.
 pub fn writeSchemaType(
     writer: *Writer,
     schema: std.json.Value,
     parent_name: []const u8,
     field_name: []const u8,
     ctx: *GenContext,
-) !void {
+) anyerror!void {
     const obj = asObject(schema) orelse {
         try writer.writeAll("json.Value");
         return;
     };
 
-    // x-kubernetes-preserve-unknown-fields: emit json.Value
     if (obj.get("x-kubernetes-preserve-unknown-fields")) |v| {
         if (asBool(v)) |b| {
             if (b) {
@@ -357,7 +381,6 @@ pub fn writeSchemaType(
         }
     }
 
-    // x-kubernetes-int-or-string: emit IntOrString
     if (obj.get("x-kubernetes-int-or-string")) |v| {
         if (asBool(v)) |b| {
             if (b) {
@@ -367,40 +390,31 @@ pub fn writeSchemaType(
         }
     }
 
-    // oneOf / anyOf: fall back to json.Value
     if (obj.get("oneOf") != null or obj.get("anyOf") != null) {
         try writer.writeAll("json.Value");
         return;
     }
 
-    // allOf: merge all schemas' properties into a single struct
     if (obj.get("allOf")) |all_of_val| {
         if (asArray(all_of_val)) |_| {
-            // Build a merged struct name
             var nested_name_buf: [1024]u8 = undefined;
             var nw = Writer.fixed(&nested_name_buf);
             try nw.writeAll(parent_name);
             try openapi.writeCapitalized(&nw, field_name);
             const nested_name = nw.buffered();
 
-            // Register the allOf schema as a nested struct.
-            // When emitting the nested struct, we merge all allOf sub-schemas' properties.
             try ctx.addNested(nested_name, schema, null);
             try writer.writeAll(nested_name);
             return;
         }
     }
 
-    // $ref: emit json.Value (CRD schemas shouldn't have $ref, but handle gracefully)
     if (obj.get("$ref") != null) {
         try writer.writeAll("json.Value");
         return;
     }
 
-    // Determine the type.
     const type_str: ?[]const u8 = if (obj.get("type")) |t| asString(t) else null;
-
-    // If items is present but no type, treat as array.
     const effective_type: ?[]const u8 = if (type_str) |t| t else if (obj.get("items") != null) "array" else null;
 
     const et = effective_type orelse {
@@ -409,11 +423,14 @@ pub fn writeSchemaType(
     };
 
     if (std.mem.eql(u8, et, "string")) {
-        // Check format for special handling.
         if (obj.get("format")) |fmt| {
             if (asString(fmt)) |fmt_str| {
                 if (std.mem.eql(u8, fmt_str, "int-or-string")) {
                     try writeIntOrStringType(writer);
+                    return;
+                }
+                if (std.mem.eql(u8, fmt_str, "byte")) {
+                    try writer.writeAll("ByteString");
                     return;
                 }
             }
@@ -468,43 +485,61 @@ pub fn writeSchemaType(
     }
 
     if (std.mem.eql(u8, et, "object")) {
-        // Object with additionalProperties: emit map type.
-        if (obj.get("additionalProperties")) |additional| {
-            try writer.writeAll("json.ArrayHashMap(");
-            try writeSchemaType(writer, additional, parent_name, field_name, ctx);
-            try writer.writeAll(")");
-            return;
-        }
-
-        // Object with properties: emit named nested struct.
-        if (obj.get("properties") != null) {
-            var nested_name_buf: [1024]u8 = undefined;
-            var nw = Writer.fixed(&nested_name_buf);
-            try nw.writeAll(parent_name);
-            try openapi.writeCapitalized(&nw, field_name);
-            const nested_name = nw.buffered();
-
-            // Get description.
-            const desc: ?[]const u8 = if (obj.get("description")) |d| asString(d) else null;
-            try ctx.addNested(nested_name, schema, desc);
-            try writer.writeAll(nested_name);
-            return;
-        }
-
-        // Object with neither: opaque json.Value.
-        try writer.writeAll("json.Value");
+        try writeObjectSchemaType(writer, obj, parent_name, field_name, ctx);
         return;
     }
 
-    // Unknown type.
     try writer.writeAll("json.Value");
 }
 
-/// Write the IntOrString type inline reference.
+/// Map an OpenAPI object schema to a Zig type based on additionalProperties.
+/// false: json.Value; schema value: json.ArrayHashMap of that type;
+/// true or absent with no properties: json.ArrayHashMap(json.Value);
+/// with properties: named nested struct.
+fn writeObjectSchemaType(
+    writer: *Writer,
+    obj: std.json.ObjectMap,
+    parent_name: []const u8,
+    field_name: []const u8,
+    ctx: *GenContext,
+) !void {
+    if (obj.get("additionalProperties")) |ap| {
+        switch (ap) {
+            .bool => |b| {
+                if (!b) {
+                    try writer.writeAll("json.Value");
+                    return;
+                }
+                try writer.writeAll("json.ArrayHashMap(json.Value)");
+                return;
+            },
+            else => {
+                try writer.writeAll("json.ArrayHashMap(");
+                try writeSchemaType(writer, ap, parent_name, field_name, ctx);
+                try writer.writeAll(")");
+                return;
+            },
+        }
+    }
+
+    if (obj.get("properties") != null) {
+        var nested_name_buf: [1024]u8 = undefined;
+        var nw = Writer.fixed(&nested_name_buf);
+        try nw.writeAll(parent_name);
+        try openapi.writeCapitalized(&nw, field_name);
+        const nested_name = nw.buffered();
+
+        const desc: ?[]const u8 = if (obj.get("description")) |d| asString(d) else null;
+        try ctx.addNested(nested_name, .{ .object = obj }, desc);
+        try writer.writeAll(nested_name);
+        return;
+    }
+
+    // No additionalProperties and no properties: open object per OpenAPI default.
+    try writer.writeAll("json.ArrayHashMap(json.Value)");
+}
+
 fn writeIntOrStringType(writer: *Writer) !void {
-    // Emit a struct with custom JSON parsing, same pattern as the existing generator.
-    // We use a dedicated top-level type name to avoid duplication.
-    // For CRDs, we inline the union definition.
     try writer.writeAll("IntOrString");
 }
 
@@ -546,9 +581,45 @@ pub fn writeIntOrStringUnion(writer: *Writer) !void {
     );
 }
 
+/// Write the ByteString type definition (top-level, once per file).
+pub fn writeByteStringType(writer: *Writer) !void {
+    try writer.writeAll(
+        \\pub const ByteString = struct {
+        \\    /// Raw base64-encoded bytes as they appear in JSON.
+        \\    base64: []const u8,
+        \\
+        \\    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        \\        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+        \\            inline .string, .allocated_string => |s| return .{ .base64 = s },
+        \\            else => return error.UnexpectedToken,
+        \\        }
+        \\    }
+        \\
+        \\    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        \\        try jw.write(self.base64);
+        \\    }
+        \\
+        \\    /// Decode from base64. Caller owns the returned slice.
+        \\    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        \\        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        \\        const buf = try allocator.alloc(u8, size);
+        \\        errdefer allocator.free(buf);
+        \\        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        \\        return buf;
+        \\    }
+        \\};
+        \\
+    );
+}
+
 /// Check if any schema in the CRD uses IntOrString.
 pub fn crdUsesIntOrString(crd: std.json.Value) bool {
     return schemaUsesIntOrString(crd);
+}
+
+/// Check if any schema in the CRD uses byte-format fields.
+pub fn crdUsesByteString(crd: std.json.Value) bool {
+    return schemaUsesByteString(crd);
 }
 
 fn schemaUsesIntOrString(val: std.json.Value) bool {
@@ -590,7 +661,6 @@ fn schemaUsesIntOrString(val: std.json.Value) bool {
         }
     }
 
-    // Recurse into all object values to handle arbitrary nesting (e.g., CRD spec.versions[].schema).
     for (obj.values()) |child| {
         switch (child) {
             .object => {
@@ -599,6 +669,62 @@ fn schemaUsesIntOrString(val: std.json.Value) bool {
             .array => |arr| {
                 for (arr.items) |item| {
                     if (schemaUsesIntOrString(item)) return true;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return false;
+}
+
+fn schemaUsesByteString(val: std.json.Value) bool {
+    const obj = asObject(val) orelse return false;
+
+    if (obj.get("type")) |t| {
+        if (asString(t)) |ts| {
+            if (std.mem.eql(u8, ts, "string")) {
+                if (obj.get("format")) |f| {
+                    if (asString(f)) |fs| {
+                        if (std.mem.eql(u8, fs, "byte")) return true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (obj.get("properties")) |props_val| {
+        if (asObject(props_val)) |props| {
+            for (props.values()) |v| {
+                if (schemaUsesByteString(v)) return true;
+            }
+        }
+    }
+
+    if (obj.get("items")) |items| {
+        if (schemaUsesByteString(items)) return true;
+    }
+
+    if (obj.get("additionalProperties")) |additional| {
+        if (schemaUsesByteString(additional)) return true;
+    }
+
+    if (obj.get("allOf")) |all_of_val| {
+        if (asArray(all_of_val)) |arr| {
+            for (arr.items) |item| {
+                if (schemaUsesByteString(item)) return true;
+            }
+        }
+    }
+
+    for (obj.values()) |child| {
+        switch (child) {
+            .object => {
+                if (schemaUsesByteString(child)) return true;
+            },
+            .array => |arr| {
+                for (arr.items) |item| {
+                    if (schemaUsesByteString(item)) return true;
                 }
             },
             else => {},
@@ -640,11 +766,15 @@ test "extractCrdMeta: extracts metadata from valid CRD" {
     const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
     defer parsed.deinit();
 
-    // Act / Assert
-    var meta_buf: [16]CrdMeta = undefined;
-    const metas = extractCrdMeta(parsed.value, &meta_buf).?;
+    // Act
+    const metas_opt = try extractCrdMeta(testing.allocator, parsed.value);
+    defer if (metas_opt) |m| deinitCrdMetaSlice(testing.allocator, m);
+
+    // Assert
+    const metas = metas_opt.?;
     try testing.expectEqual(@as(usize, 1), metas.len);
     try testing.expectEqualStrings("stable.example.com", metas[0].group);
+    try testing.expectEqualStrings("StableExampleCom", metas[0].group_prefix);
     try testing.expectEqualStrings("v1", metas[0].version);
     try testing.expectEqualStrings("CronTab", metas[0].kind);
     try testing.expectEqualStrings("crontabs", metas[0].plural);
@@ -667,10 +797,12 @@ test "extractCrdMeta: cluster-scoped CRD sets namespaced to false" {
     const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
     defer parsed.deinit();
 
-    // Act / Assert
-    var meta_buf: [16]CrdMeta = undefined;
-    const metas = extractCrdMeta(parsed.value, &meta_buf).?;
-    try testing.expect(!metas[0].namespaced);
+    // Act
+    const metas_opt = try extractCrdMeta(testing.allocator, parsed.value);
+    defer if (metas_opt) |m| deinitCrdMetaSlice(testing.allocator, m);
+
+    // Assert
+    try testing.expect(!metas_opt.?[0].namespaced);
 }
 
 test "extractCrdMeta: multiple served versions" {
@@ -692,20 +824,83 @@ test "extractCrdMeta: multiple served versions" {
     const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
     defer parsed.deinit();
 
-    // Act / Assert
-    var meta_buf: [16]CrdMeta = undefined;
-    const metas = extractCrdMeta(parsed.value, &meta_buf).?;
+    // Act
+    const metas_opt = try extractCrdMeta(testing.allocator, parsed.value);
+    defer if (metas_opt) |m| deinitCrdMetaSlice(testing.allocator, m);
+
+    // Assert
+    const metas = metas_opt.?;
     try testing.expectEqual(@as(usize, 2), metas.len);
     try testing.expectEqualStrings("v1", metas[0].version);
     try testing.expectEqualStrings("v1beta1", metas[1].version);
 }
 
+test "extractCrdMeta: more than 16 versions are all extracted" {
+    // Arrange: build a CRD JSON with 20 served versions.
+    var buf: [4096]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try w.writeAll(
+        \\{"spec":{"group":"example.com","scope":"Namespaced",
+        \\"names":{"kind":"Many","plural":"manys"},
+        \\"versions":[
+    );
+    for (0..20) |i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print(
+            \\{{"name":"v{d}","served":true,"storage":false,"schema":{{"openAPIV3Schema":{{"type":"object"}}}}}}
+        , .{i + 1});
+    }
+    try w.writeAll("]}}");
+    const crd_json = w.buffered();
+
+    const parsed = try json_helpers.parseJson(testing.allocator, crd_json);
+    defer parsed.deinit();
+
+    // Act
+    const metas_opt = try extractCrdMeta(testing.allocator, parsed.value);
+    defer if (metas_opt) |m| deinitCrdMetaSlice(testing.allocator, m);
+
+    // Assert
+    try testing.expectEqual(@as(usize, 20), metas_opt.?.len);
+}
+
 test "extractCrdMeta: returns null for invalid JSON" {
-    // Act / Assert
+    // Act
     const parsed = try json_helpers.parseJson(testing.allocator, "{}");
     defer parsed.deinit();
-    var meta_buf: [16]CrdMeta = undefined;
-    try testing.expect(extractCrdMeta(parsed.value, &meta_buf) == null);
+
+    // Act / Assert
+    const result = try extractCrdMeta(testing.allocator, parsed.value);
+    try testing.expect(result == null);
+}
+
+// ---- buildTypeName tests ----
+
+test "buildTypeName: single version includes group prefix but omits version suffix" {
+    // Act
+    const name = try buildTypeName(testing.allocator, "StableExampleCom", "CronTab", "v1", false);
+    defer testing.allocator.free(name);
+
+    // Assert
+    try testing.expectEqualStrings("StableExampleComCronTab", name);
+}
+
+test "buildTypeName: multi version includes group prefix and version suffix" {
+    // Act
+    const name = try buildTypeName(testing.allocator, "StableExampleCom", "CronTab", "v1", true);
+    defer testing.allocator.free(name);
+
+    // Assert
+    try testing.expectEqualStrings("StableExampleComCronTabV1", name);
+}
+
+test "buildTypeName: multi version with beta suffix" {
+    // Act
+    const name = try buildTypeName(testing.allocator, "ExampleCom", "CronTab", "v1beta1", true);
+    defer testing.allocator.free(name);
+
+    // Assert
+    try testing.expectEqualStrings("ExampleComCronTabV1beta1", name);
 }
 
 // ---- writeSchemaType tests ----
@@ -870,6 +1065,46 @@ test "writeSchemaType: object with additionalProperties string" {
     try testing.expectEqualStrings("json.ArrayHashMap([]const u8)", writer.buffered());
 }
 
+test "writeSchemaType: open object emits ArrayHashMap" {
+    // Arrange
+    const with_true = try json_helpers.parseJson(testing.allocator,
+        \\{"type":"object","additionalProperties":true}
+    );
+    defer with_true.deinit();
+    const bare = try json_helpers.parseJson(testing.allocator,
+        \\{"type":"object"}
+    );
+    defer bare.deinit();
+    var buf: [256]u8 = undefined;
+    var ctx = GenContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Act / Assert
+    var w1 = Writer.fixed(&buf);
+    try writeSchemaType(&w1, with_true.value, "Test", "field", &ctx);
+    try testing.expectEqualStrings("json.ArrayHashMap(json.Value)", w1.buffered());
+
+    var w2 = Writer.fixed(&buf);
+    try writeSchemaType(&w2, bare.value, "Test", "field", &ctx);
+    try testing.expectEqualStrings("json.ArrayHashMap(json.Value)", w2.buffered());
+}
+
+test "writeSchemaType: additionalProperties false produces json.Value" {
+    // Arrange
+    const parsed = try json_helpers.parseJson(testing.allocator,
+        \\{"type":"object","additionalProperties":false}
+    );
+    defer parsed.deinit();
+    var buf: [256]u8 = undefined;
+    var writer = Writer.fixed(&buf);
+    var ctx = GenContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Act / Assert
+    try writeSchemaType(&writer, parsed.value, "Test", "field", &ctx);
+    try testing.expectEqualStrings("json.Value", writer.buffered());
+}
+
 test "writeSchemaType: object with properties creates nested struct" {
     // Arrange
     const parsed = try json_helpers.parseJson(testing.allocator,
@@ -888,10 +1123,10 @@ test "writeSchemaType: object with properties creates nested struct" {
     try testing.expectEqualStrings("CronTabSpec", ctx.nested.items[0].name);
 }
 
-test "writeSchemaType: bare object without properties" {
+test "writeSchemaType: format byte emits ByteString" {
     // Arrange
     const parsed = try json_helpers.parseJson(testing.allocator,
-        \\{"type":"object"}
+        \\{"type":"string","format":"byte"}
     );
     defer parsed.deinit();
     var buf: [256]u8 = undefined;
@@ -900,8 +1135,8 @@ test "writeSchemaType: bare object without properties" {
     defer ctx.deinit();
 
     // Act / Assert
-    try writeSchemaType(&writer, parsed.value, "Test", "field", &ctx);
-    try testing.expectEqualStrings("json.Value", writer.buffered());
+    try writeSchemaType(&writer, parsed.value, "Test", "caBundle", &ctx);
+    try testing.expectEqualStrings("ByteString", writer.buffered());
 }
 
 test "writeSchemaType: x-kubernetes-preserve-unknown-fields" {
@@ -1058,29 +1293,6 @@ test "writeDocComment: multiline takes first line only" {
     try testing.expectEqualStrings("/// First.\n", writer.buffered());
 }
 
-// ---- buildTypeName tests ----
-
-test "buildTypeName: single version omits version suffix" {
-    // Act / Assert
-    var buf: [256]u8 = undefined;
-    const name = buildTypeName(&buf, "CronTab", "v1", false);
-    try testing.expectEqualStrings("CronTab", name);
-}
-
-test "buildTypeName: multi version includes version suffix" {
-    // Act / Assert
-    var buf: [256]u8 = undefined;
-    const name = buildTypeName(&buf, "CronTab", "v1", true);
-    try testing.expectEqualStrings("CronTabV1", name);
-}
-
-test "buildTypeName: multi version with beta" {
-    // Act / Assert
-    var buf: [256]u8 = undefined;
-    const name = buildTypeName(&buf, "CronTab", "v1beta1", true);
-    try testing.expectEqualStrings("CronTabV1beta1", name);
-}
-
 // ---- crdUsesIntOrString tests ----
 
 test "crdUsesIntOrString: detects x-kubernetes-int-or-string" {
@@ -1099,4 +1311,24 @@ test "crdUsesIntOrString: false when not used" {
     );
     defer parsed.deinit();
     try testing.expect(!crdUsesIntOrString(parsed.value));
+}
+
+// ---- crdUsesByteString tests ----
+
+test "crdUsesByteString: detects byte format field" {
+    // Act / Assert
+    const parsed = try json_helpers.parseJson(testing.allocator,
+        \\{"spec":{"versions":[{"schema":{"openAPIV3Schema":{"type":"object","properties":{"cert":{"type":"string","format":"byte"}}}}}]}}
+    );
+    defer parsed.deinit();
+    try testing.expect(crdUsesByteString(parsed.value));
+}
+
+test "crdUsesByteString: false when no byte format" {
+    // Act / Assert
+    const parsed = try json_helpers.parseJson(testing.allocator,
+        \\{"spec":{"versions":[{"schema":{"openAPIV3Schema":{"type":"object","properties":{"name":{"type":"string"}}}}}]}}
+    );
+    defer parsed.deinit();
+    try testing.expect(!crdUsesByteString(parsed.value));
 }

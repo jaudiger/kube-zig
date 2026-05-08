@@ -5,6 +5,29 @@ const std = @import("std");
 const json = std.json;
 const meta_v1 = @import("meta_v1.zig");
 
+pub const ByteString = struct {
+    base64: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+            inline .string, .allocated_string => |s| return .{ .base64 = s },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.write(self.base64);
+    }
+
+    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        return buf;
+    }
+};
+
 /// ClusterTrustBundle is a cluster-scoped container for X.509 trust anchors (root certificates).
 pub const CertificatesV1beta1ClusterTrustBundle = struct {
     pub const resource_meta = .{
@@ -90,13 +113,13 @@ pub const CertificatesV1beta1PodCertificateRequestSpec = struct {
     /// nodeUID is the UID of the node the pod is assigned to.
     nodeUID: []const u8,
     /// pkixPublicKey is the PKIX-serialized public key the signer will issue the certificate to.
-    pkixPublicKey: []const u8,
+    pkixPublicKey: ByteString,
     /// podName is the name of the pod into which the certificate will be mounted.
     podName: []const u8,
     /// podUID is the UID of the pod into which the certificate will be mounted.
     podUID: []const u8,
     /// proofOfPossession proves that the requesting kubelet holds the private key corresponding to pkixPublicKey.
-    proofOfPossession: []const u8,
+    proofOfPossession: ByteString,
     /// serviceAccountName is the name of the service account the pod is running as.
     serviceAccountName: []const u8,
     /// serviceAccountUID is the UID of the service account the pod is running as.

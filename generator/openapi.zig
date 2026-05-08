@@ -159,6 +159,7 @@ const zig_keywords = std.StaticStringMap(void).initComptime(.{
     .{ "inline", {} },
     .{ "linksection", {} },
     .{ "noalias", {} },
+    .{ "noinline", {} },
     .{ "nosuspend", {} },
     .{ "null", {} },
     .{ "opaque", {} },
@@ -187,17 +188,46 @@ pub fn isZigKeyword(name: []const u8) bool {
     return zig_keywords.has(name);
 }
 
-/// Check if a field name starts with '$' or contains '-' (needs quoting).
-/// Note: "type" is a Zig keyword but does not need quoting in struct field
-/// position; zig fmt will strip the quoting.
+/// Check if a field name requires @"..." quoting in Zig source.
 pub fn needsQuoting(name: []const u8) bool {
     if (name.len == 0) return true;
     if (isZigKeyword(name) and !std.mem.eql(u8, name, "type")) return true;
-    if (name[0] == '$' or name[0] == '-') return true;
-    for (name) |c| {
-        if (c == '-' or c == '.' or c == '/') return true;
+    const first = name[0];
+    if (!std.ascii.isAlphabetic(first) and first != '_') return true;
+    for (name[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return true;
     }
     return false;
+}
+
+/// Converts a CRD group name into a CamelCase identifier prefix.
+/// Splits on '.', '-', '_'; capitalizes the first character of each segment;
+/// drops non-alphanumeric non-separator characters. Prepends 'G' when the
+/// result is empty or starts with a digit.
+pub fn sanitizeGroupIdent(allocator: std.mem.Allocator, group: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
+
+    var capitalize_next = true;
+    for (group) |c| {
+        if (c == '.' or c == '-' or c == '_') {
+            capitalize_next = true;
+            continue;
+        }
+        if (!std.ascii.isAlphanumeric(c)) continue;
+        if (capitalize_next) {
+            try result.append(allocator, std.ascii.toUpper(c));
+            capitalize_next = false;
+        } else {
+            try result.append(allocator, c);
+        }
+    }
+
+    if (result.items.len == 0 or std.ascii.isDigit(result.items[0])) {
+        try result.insert(allocator, 0, 'G');
+    }
+
+    return result.toOwnedSlice(allocator);
 }
 
 // getNameSegments tests
@@ -751,6 +781,7 @@ test "needsQuoting: Zig keywords except type need quoting" {
     try testing.expect(needsQuoting("fn"));
     try testing.expect(needsQuoting("defer"));
     try testing.expect(needsQuoting("error"));
+    try testing.expect(needsQuoting("noinline"));
 }
 
 test "needsQuoting: type keyword does not need quoting" {
@@ -758,10 +789,11 @@ test "needsQuoting: type keyword does not need quoting" {
     try testing.expect(!needsQuoting("type"));
 }
 
-test "needsQuoting: dollar sign prefix needs quoting" {
+test "needsQuoting: non-alpha prefix needs quoting" {
     // Act / Assert
     try testing.expect(needsQuoting("$ref"));
     try testing.expect(needsQuoting("$"));
+    try testing.expect(needsQuoting("1abc"));
 }
 
 test "needsQuoting: dash prefix needs quoting" {
@@ -770,10 +802,12 @@ test "needsQuoting: dash prefix needs quoting" {
     try testing.expect(needsQuoting("-"));
 }
 
-test "needsQuoting: embedded dash needs quoting" {
+test "needsQuoting: non-identifier characters need quoting" {
     // Act / Assert
     try testing.expect(needsQuoting("x-k8s"));
     try testing.expect(needsQuoting("some-field"));
+    try testing.expect(needsQuoting("with space"));
+    try testing.expect(needsQuoting("caf\xc3\xa9"));
 }
 
 test "needsQuoting: embedded dot needs quoting" {
@@ -806,5 +840,30 @@ test "needsQuoting: single normal character does not need quoting" {
     // Act / Assert
     try testing.expect(!needsQuoting("a"));
     try testing.expect(!needsQuoting("Z"));
-    try testing.expect(!needsQuoting("0"));
+    try testing.expect(!needsQuoting("_"));
+}
+
+// sanitizeGroupIdent tests
+test "sanitizeGroupIdent: dotted and hyphenated groups become CamelCase" {
+    // Act
+    const a = try sanitizeGroupIdent(testing.allocator, "stable.example.com");
+    defer testing.allocator.free(a);
+    const b = try sanitizeGroupIdent(testing.allocator, "my-crd-group.io");
+    defer testing.allocator.free(b);
+
+    // Assert
+    try testing.expectEqualStrings("StableExampleCom", a);
+    try testing.expectEqualStrings("MyCrdGroupIo", b);
+}
+
+test "sanitizeGroupIdent: empty or digit-prefix gets G prepended" {
+    // Act
+    const a = try sanitizeGroupIdent(testing.allocator, "");
+    defer testing.allocator.free(a);
+    const b = try sanitizeGroupIdent(testing.allocator, "1bad.group");
+    defer testing.allocator.free(b);
+
+    // Assert
+    try testing.expectEqualStrings("G", a);
+    try testing.expectEqualStrings("G1badGroup", b);
 }

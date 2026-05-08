@@ -5,6 +5,29 @@ const std = @import("std");
 const json = std.json;
 const meta_v1 = @import("meta_v1.zig");
 
+pub const ByteString = struct {
+    base64: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+            inline .string, .allocated_string => |s| return .{ .base64 = s },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.write(self.base64);
+    }
+
+    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        return buf;
+    }
+};
+
 /// CustomResourceColumnDefinition specifies a column for server side printing.
 pub const ApiextensionsV1CustomResourceColumnDefinition = struct {
     /// description is a human readable description of this column.
@@ -157,7 +180,7 @@ pub const ApiextensionsV1CustomResourceSubresourceScale = struct {
 };
 
 /// CustomResourceSubresourceStatus defines how to serve the status subresource for CustomResources. Status is represented by the `.status` JSON path inside of a CustomResource. When set, * exposes a /status subresource for the custom resource * PUT requests to the /status subresource take a custom resource object, and ignore changes to anything except the status stanza * PUT/POST/PATCH requests to the custom resource ignore changes to the status stanza
-pub const ApiextensionsV1CustomResourceSubresourceStatus = std.json.Value;
+pub const ApiextensionsV1CustomResourceSubresourceStatus = json.ArrayHashMap(json.Value);
 
 /// CustomResourceSubresources defines the status and scale subresources for CustomResources.
 pub const ApiextensionsV1CustomResourceSubresources = struct {
@@ -285,7 +308,7 @@ pub const ApiextensionsV1ValidationRule = struct {
 /// WebhookClientConfig contains the information to make a TLS connection with the webhook.
 pub const ApiextensionsV1WebhookClientConfig = struct {
     /// caBundle is a PEM encoded CA bundle which will be used to validate the webhook's server certificate. If unspecified, system trust roots on the apiserver are used.
-    caBundle: ?[]const u8 = null,
+    caBundle: ?ByteString = null,
     /// service is a reference to the service for this webhook. Either service or url must be specified.
     service: ?ApiextensionsV1ServiceReference = null,
     /// url gives the location of the webhook, in standard URL form (`scheme://host:port/path`). Exactly one of `url` or `service` must be specified.

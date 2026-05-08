@@ -6,7 +6,7 @@ const json = std.json;
 const meta_v1 = @import("meta_v1.zig");
 
 /// BasicSchedulingPolicy indicates that standard Kubernetes scheduling behavior should be used.
-pub const SchedulingV1alpha1BasicSchedulingPolicy = std.json.Value;
+pub const SchedulingV1alpha1BasicSchedulingPolicy = json.ArrayHashMap(json.Value);
 
 /// GangSchedulingPolicy defines the parameters for gang scheduling.
 pub const SchedulingV1alpha1GangSchedulingPolicy = struct {

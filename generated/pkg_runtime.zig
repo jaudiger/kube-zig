@@ -5,4 +5,4 @@ const std = @import("std");
 const json = std.json;
 
 /// RawExtension is used to hold extensions in external versions.
-pub const PkgRuntimeRawExtension = std.json.Value;
+pub const PkgRuntimeRawExtension = json.ArrayHashMap(json.Value);

@@ -5,6 +5,29 @@ const std = @import("std");
 const json = std.json;
 const meta_v1 = @import("meta_v1.zig");
 
+pub const ByteString = struct {
+    base64: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+            inline .string, .allocated_string => |s| return .{ .base64 = s },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.write(self.base64);
+    }
+
+    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        return buf;
+    }
+};
+
 /// AuditAnnotation describes how to produce an audit annotation for an API request.
 pub const AdmissionregistrationV1AuditAnnotation = struct {
     /// key specifies the audit annotation key. The audit annotation keys of a ValidatingAdmissionPolicy must be unique. The key must be a qualified name ([A-Za-z0-9][-A-Za-z0-9_.]*) no more than 63 bytes in length.
@@ -362,7 +385,7 @@ pub const AdmissionregistrationV1Variable = struct {
 /// WebhookClientConfig contains the information to make a TLS connection with the webhook
 pub const AdmissionregistrationV1WebhookClientConfig = struct {
     /// `caBundle` is a PEM encoded CA bundle which will be used to validate the webhook's server certificate. If unspecified, system trust roots on the apiserver are used.
-    caBundle: ?[]const u8 = null,
+    caBundle: ?ByteString = null,
     /// `service` is a reference to the service for this webhook. Either `service` or `url` must be specified.
     service: ?AdmissionregistrationV1ServiceReference = null,
     /// `url` gives the location of the webhook, in standard URL form (`scheme://host:port/path`). Exactly one of `url` or `service` must be specified.

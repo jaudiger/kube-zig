@@ -5,6 +5,29 @@ const std = @import("std");
 const json = std.json;
 const meta_v1 = @import("meta_v1.zig");
 
+pub const ByteString = struct {
+    base64: []const u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: json.ParseOptions) !@This() {
+        switch (try source.nextAlloc(allocator, options.allocate orelse .alloc_if_needed)) {
+            inline .string, .allocated_string => |s| return .{ .base64 = s },
+            else => return error.UnexpectedToken,
+        }
+    }
+
+    pub fn jsonStringify(self: @This(), jw: anytype) !void {
+        try jw.write(self.base64);
+    }
+
+    pub fn decode(self: @This(), allocator: std.mem.Allocator) ![]u8 {
+        const size = std.base64.standard.Decoder.calcSizeForSlice(self.base64) catch return error.InvalidBase64;
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        std.base64.standard.Decoder.decode(buf, self.base64) catch return error.InvalidBase64;
+        return buf;
+    }
+};
+
 /// APIService represents a server for a particular GroupVersion. Name must be "version.group".
 pub const ApiregistrationV1APIService = struct {
     pub const resource_meta = .{
@@ -57,7 +80,7 @@ pub const ApiregistrationV1APIServiceList = struct {
 /// APIServiceSpec contains information for locating and communicating with a server. Only https is supported, though you are able to disable certificate verification.
 pub const ApiregistrationV1APIServiceSpec = struct {
     /// CABundle is a PEM encoded CA bundle which will be used to validate an API server's serving certificate. If unspecified, system trust roots on the apiserver are used.
-    caBundle: ?[]const u8 = null,
+    caBundle: ?ByteString = null,
     /// Group is the API group name this server hosts
     group: ?[]const u8 = null,
     /// GroupPriorityMinimum is the priority this group should have at least. Higher priority means that the group is preferred by clients over lower priority ones. Note that other versions of this group might specify even higher GroupPriorityMinimum values such that the whole group gets a higher priority. The primary sort is based on GroupPriorityMinimum, ordered highest number to lowest (20 before 10). The secondary sort is based on the alphabetical comparison of the name of the object.  (v1.bar before v1.foo) We'd recommend something like: *.k8s.io (except extensions) at 18000 and PaaSes (OpenShift, Deis) are recommended to be in the 2000s
