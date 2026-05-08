@@ -1,18 +1,33 @@
-//! Fire-and-forget Kubernetes Event recorder.
+//! Asynchronous Kubernetes Event recorder.
 //!
-//! Wraps `Api(CoreV1Event).create()` to emit core/v1 Event objects. Errors
-//! during event creation are logged and silently discarded so that events
-//! never block a controller's reconcile loop. Event names are deterministic
-//! hashes of the involved object reference and reason string.
+//! Wraps `Api(CoreV1Event).create()` to emit core/v1 Event objects from a
+//! dedicated background worker thread so that callers (e.g. a reconcile loop)
+//! are never blocked by slow apiserver responses. Events are enqueued via
+//! `event()`, which is non-blocking and returns immediately. The worker
+//! thread drains the queue and issues the HTTP POST. Errors during event
+//! creation are logged and silently discarded.
+//!
+//! Lifecycle: `init` -> `start` -> `event` (any number of times) -> `stop` /
+//! (`cancel` + `join`) -> `deinit`. The recorder can be registered with a
+//! `ControllerManager` via `runnable()` so that `mgr.stop` drives the
+//! lifecycle automatically.
+//!
+//! Event names are deterministic hashes of the involved object reference and
+//! reason string, so repeated events for the same object/reason produce the
+//! same Kubernetes Event name and can be counted by the apiserver.
 
 const std = @import("std");
 const client_mod = @import("../client/Client.zig");
 const Client = client_mod.Client;
-const Context = client_mod.Context;
 const Api_mod = @import("../api/Api.zig");
+const manager_mod = @import("../controller/manager.zig");
+const Runnable = manager_mod.Runnable;
+const RunError = manager_mod.RunError;
 const logging_mod = @import("../util/logging.zig");
+const Logger = logging_mod.Logger;
 const LogField = logging_mod.Field;
 const time_mod = @import("../util/time.zig");
+const RingQueue = @import("../util/ring_queue.zig").RingQueue;
 const types = @import("types");
 const testing = std.testing;
 
@@ -30,48 +45,139 @@ pub const EventType = enum {
     }
 };
 
-/// Fire-and-forget Kubernetes Event recorder.
+/// A single event pending delivery to the apiserver.
 ///
-/// Creates core/v1 Event objects via `Api(CoreV1Event).create()`.
-/// Errors are silently discarded so events never block the controller's
-/// reconcile loop.
+/// All string fields are owned by the arena; deinit frees everything at once.
+const QueuedEvent = struct {
+    arena: std.heap.ArenaAllocator,
+    ref: CoreV1ObjectReference,
+    namespace: ?[]const u8,
+    event_type: EventType,
+    reason: []const u8,
+    message: []const u8,
+    /// RFC 3339 timestamp captured at the moment event() was called.
+    timestamp: []const u8,
+
+    fn deinit(self: *QueuedEvent) void {
+        self.arena.deinit();
+    }
+};
+
+/// Asynchronous Kubernetes Event recorder backed by a worker thread.
 ///
-/// Thread-safe by immutability: all fields are set at init and never mutated.
+/// `event()` is non-blocking: it deep-copies the arguments into a per-record
+/// arena, enqueues the record, and returns. A background thread drains the
+/// queue and issues the HTTP POST. On overflow the event is dropped and a
+/// warning is logged; the caller is never stalled.
 ///
-/// ```zig
-/// const recorder = EventRecorder.init(&client, "my-controller", "my-controller-pod-abc");
-/// recorder.event(
-///     .{ .apiVersion = "v1", .kind = "Pod", .name = "my-pod", .namespace = "default", .uid = "abc-123" },
-///     "default",
-///     .normal,
-///     "SuccessfulCreate",
-///     "Created pod my-pod",
-/// );
-/// ```
+/// Thread-safe: all public methods may be called from any thread after
+/// `start()` has returned.
 pub const EventRecorder = struct {
+    allocator: std.mem.Allocator,
     client: *Client,
     /// Source component name (appears in `source.component` and `reportingComponent`).
     component: []const u8,
-    /// Reporting instance identity (e.g. pod name, appears in `reportingInstance`).
+    /// Reporting instance identity (appears in `reportingInstance`).
     instance: []const u8,
+    logger: Logger,
 
-    /// Create an EventRecorder. No allocations; all fields are borrowed.
-    pub fn init(client: *Client, component: []const u8, instance: []const u8) EventRecorder {
+    mutex: std.Io.Mutex,
+    /// Wakeup epoch: producers bump this and futexWake; worker futexWaits on it.
+    cond_epoch: std.atomic.Value(u32),
+    shut_down: std.atomic.Value(bool),
+    state: std.atomic.Value(State),
+
+    queue: RingQueue(QueuedEvent),
+    worker_thread: ?std.Thread,
+
+    /// Events dropped due to queue overflow or OOM since the recorder started.
+    dropped_total: std.atomic.Value(u64),
+
+    pub const State = enum(u8) { idle, running, stopped };
+
+    pub const Options = struct {
+        /// Maximum number of events that can be queued at once.
+        /// Events beyond this limit are dropped with a warning log.
+        max_queue_size: usize = 1024,
+        logger: Logger = Logger.noop,
+    };
+
+    /// Create a recorder in `idle` state. No thread is spawned.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        client: *Client,
+        component: []const u8,
+        instance: []const u8,
+        opts: Options,
+    ) EventRecorder {
         return .{
+            .allocator = allocator,
             .client = client,
             .component = component,
             .instance = instance,
+            .logger = opts.logger.withScope("event_recorder"),
+            .mutex = .init,
+            .cond_epoch = std.atomic.Value(u32).init(0),
+            .shut_down = std.atomic.Value(bool).init(false),
+            .state = std.atomic.Value(State).init(.idle),
+            .queue = .{ .max_capacity = opts.max_queue_size },
+            .worker_thread = null,
+            .dropped_total = std.atomic.Value(u64).init(0),
         };
     }
 
-    /// Record a Kubernetes Event (fire-and-forget).
+    /// Release owned memory. The recorder must not be in `running` state.
+    pub fn deinit(self: *EventRecorder) void {
+        std.debug.assert(self.state.load(.acquire) != .running);
+        while (self.queue.pop()) |item| {
+            var mutable = item;
+            mutable.deinit();
+        }
+        self.queue.deinit(self.allocator);
+    }
+
+    /// Spawn the worker thread. Transitions from `idle` to `running`.
+    pub fn start(self: *EventRecorder, io: std.Io) RunError!void {
+        std.debug.assert(self.state.load(.acquire) == .idle);
+        self.state.store(.running, .release);
+        self.worker_thread = try std.Thread.spawn(.{}, run, .{ self, io });
+    }
+
+    /// Signal the worker to drain remaining events and exit (non-blocking).
+    pub fn cancel(self: *EventRecorder, io: std.Io) void {
+        self.shut_down.store(true, .release);
+        _ = self.cond_epoch.fetchAdd(1, .release);
+        io.futexWake(u32, &self.cond_epoch.raw, std.math.maxInt(u32));
+    }
+
+    /// Wait for the worker thread to exit.
+    pub fn join(self: *EventRecorder) void {
+        if (self.worker_thread) |t| {
+            t.join();
+            self.worker_thread = null;
+        }
+        self.state.store(.stopped, .release);
+    }
+
+    /// Cancel and join: signal shutdown and wait for the worker to finish.
+    pub fn stop(self: *EventRecorder, io: std.Io) void {
+        self.cancel(io);
+        self.join();
+    }
+
+    /// Return a `Runnable` that plugs this recorder into a `ControllerManager`.
+    pub fn runnable(self: *EventRecorder) Runnable {
+        return Runnable.fromTyped(EventRecorder, self);
+    }
+
+    /// Enqueue a Kubernetes Event (non-blocking, fire-and-forget).
     ///
-    /// `ref` identifies the involved object. `namespace` is the namespace
-    /// in which to create the Event. When `null`, the namespace is derived
-    /// from `ref.namespace`, falling back to `"default"`.
-    /// Errors are silently discarded.
+    /// Deep-copies all string arguments into a per-record arena and pushes
+    /// the record onto the internal queue. Returns immediately. Drops the
+    /// event (with a warning log) if the queue is full, OOM occurs, or the
+    /// recorder has been shut down.
     pub fn event(
-        self: EventRecorder,
+        self: *EventRecorder,
         io: std.Io,
         ref: CoreV1ObjectReference,
         namespace: ?[]const u8,
@@ -79,17 +185,160 @@ pub const EventRecorder = struct {
         reason: []const u8,
         message: []const u8,
     ) void {
-        self.client.logger.debug("recording event", &.{
+        self.logger.debug("recording event", &.{
             LogField.string("kind", ref.kind orelse ""),
             LogField.string("namespace", ref.namespace orelse ""),
             LogField.string("name", ref.name orelse ""),
             LogField.string("reason", reason),
         });
-        self.eventInner(io, ref, namespace, event_type, reason, message) catch |err| {
-            self.client.logger.warn("event creation failed", &.{
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        const a = arena.allocator();
+
+        // Deep-copy all borrowed slices into the arena.
+        const ref_copy = dupeRef(a, ref) catch {
+            arena.deinit();
+            self.recordDrop("OOM copying ref");
+            return;
+        };
+        const ns_copy: ?[]const u8 = if (namespace) |ns| a.dupe(u8, ns) catch {
+            arena.deinit();
+            self.recordDrop("OOM copying namespace");
+            return;
+        } else null;
+        const reason_copy = a.dupe(u8, reason) catch {
+            arena.deinit();
+            self.recordDrop("OOM copying reason");
+            return;
+        };
+        const message_copy = a.dupe(u8, message) catch {
+            arena.deinit();
+            self.recordDrop("OOM copying message");
+            return;
+        };
+        var ts_buf: [time_mod.Precision.micros.bufLen()]u8 = undefined;
+        const ts_slice = time_mod.bufNow(io, .micros, &ts_buf);
+        const ts_copy = a.dupe(u8, ts_slice) catch {
+            arena.deinit();
+            self.recordDrop("OOM copying timestamp");
+            return;
+        };
+
+        const record = QueuedEvent{
+            .arena = arena,
+            .ref = ref_copy,
+            .namespace = ns_copy,
+            .event_type = event_type,
+            .reason = reason_copy,
+            .message = message_copy,
+            .timestamp = ts_copy,
+        };
+
+        self.pushRecord(io, record);
+    }
+
+    fn pushRecord(self: *EventRecorder, io: std.Io, record: QueuedEvent) void {
+        const ok: bool = blk: {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.shut_down.raw) {
+                self.recordDrop("recorder shut down");
+                break :blk false;
+            }
+            self.queue.push(self.allocator, record) catch {
+                self.recordDrop("queue full");
+                break :blk false;
+            };
+            break :blk true;
+        };
+        if (ok) {
+            _ = self.cond_epoch.fetchAdd(1, .release);
+            io.futexWake(u32, &self.cond_epoch.raw, 1);
+        } else {
+            var mutable = record;
+            mutable.deinit();
+        }
+    }
+
+    fn recordDrop(self: *EventRecorder, reason: []const u8) void {
+        _ = self.dropped_total.fetchAdd(1, .monotonic);
+        self.logger.warn("event dropped", &.{LogField.string("reason", reason)});
+    }
+
+    fn run(self: *EventRecorder, io: std.Io) void {
+        while (true) {
+            self.mutex.lockUncancelable(io);
+
+            // Wait for work or shutdown signal.
+            while (self.queue.count == 0 and !self.shut_down.raw) {
+                const observed = self.cond_epoch.load(.acquire);
+                self.mutex.unlock(io);
+                io.futexWaitUncancelable(u32, &self.cond_epoch.raw, observed);
+                self.mutex.lockUncancelable(io);
+            }
+
+            if (self.queue.count == 0) {
+                self.mutex.unlock(io);
+                return;
+            }
+
+            const item = self.queue.pop().?;
+            self.mutex.unlock(io);
+
+            var mutable = item;
+            self.dispatch(io, mutable);
+            mutable.deinit();
+        }
+    }
+
+    fn dispatch(self: *EventRecorder, io: std.Io, item: QueuedEvent) void {
+        const CoreV1Event = types.CoreV1Event;
+        const EventApi = Api_mod.Api(CoreV1Event);
+
+        const effective_ns = resolveNamespace(item.namespace, item.ref);
+
+        var name_buf: [253]u8 = undefined;
+        const event_name = generateEventName(&name_buf, item.ref, item.reason);
+
+        const ev = CoreV1Event{
+            .apiVersion = "v1",
+            .kind = "Event",
+            .metadata = .{
+                .name = event_name,
+                .namespace = effective_ns,
+            },
+            .involvedObject = item.ref,
+            .reason = item.reason,
+            .message = item.message,
+            .type = item.event_type.toValue(),
+            .firstTimestamp = item.timestamp,
+            .lastTimestamp = item.timestamp,
+            .count = 1,
+            .source = .{ .component = self.component },
+            .reportingComponent = self.component,
+            .reportingInstance = self.instance,
+        };
+
+        const api = EventApi.init(self.client, self.client.context(), effective_ns);
+        const result = api.create(io, ev, .{}) catch |err| {
+            self.logger.warn("event creation failed", &.{
                 LogField.string("error", @errorName(err)),
             });
+            return;
         };
+
+        var unwrapped = result.unwrap();
+        switch (unwrapped) {
+            .ok => |parsed| parsed.deinit(),
+            .failure => |*f| {
+                defer f.deinit();
+                const status_msg = if (f.statusObj()) |s| (s.message orelse "") else "";
+                self.logger.warn("event creation api error", &.{
+                    LogField.string("status", @tagName(f.status)),
+                    LogField.string("message", status_msg),
+                });
+            },
+        }
     }
 
     /// Resolve the effective namespace for the Event object.
@@ -103,64 +352,26 @@ pub const EventRecorder = struct {
         }
         return "default";
     }
-
-    fn eventInner(
-        self: EventRecorder,
-        io: std.Io,
-        ref: CoreV1ObjectReference,
-        namespace: ?[]const u8,
-        event_type: EventType,
-        reason: []const u8,
-        message: []const u8,
-    ) !void {
-        const CoreV1Event = types.CoreV1Event;
-        const EventApi = Api_mod.Api(CoreV1Event);
-
-        const effective_ns = resolveNamespace(namespace, ref);
-
-        var ts_buf: [27]u8 = undefined;
-        const now_str = time_mod.bufNow(io, .micros, &ts_buf);
-
-        var name_buf: [253]u8 = undefined;
-        const event_name = generateEventName(&name_buf, ref, reason);
-
-        const ev = CoreV1Event{
-            .apiVersion = "v1",
-            .kind = "Event",
-            .metadata = .{
-                .name = event_name,
-                .namespace = effective_ns,
-            },
-            .involvedObject = ref,
-            .reason = reason,
-            .message = message,
-            .type = event_type.toValue(),
-            .firstTimestamp = now_str,
-            .lastTimestamp = now_str,
-            .count = 1,
-            .source = .{ .component = self.component },
-            .reportingComponent = self.component,
-            .reportingInstance = self.instance,
-        };
-
-        const api = EventApi.init(self.client, self.client.context(), effective_ns);
-        const result = try api.create(io, ev, .{});
-        var unwrapped = result.unwrap();
-        switch (unwrapped) {
-            .ok => |parsed| parsed.deinit(),
-            .failure => |*f| {
-                defer f.deinit();
-                const status_msg = if (f.statusObj()) |s| (s.message orelse "") else "";
-                self.client.logger.warn("event creation api error", &.{
-                    LogField.string("status", @tagName(f.status)),
-                    LogField.string("message", status_msg),
-                });
-            },
-        }
-    }
 };
 
 const CoreV1ObjectReference = types.CoreV1ObjectReference;
+
+fn dupeOptStr(allocator: std.mem.Allocator, s: ?[]const u8) error{OutOfMemory}!?[]const u8 {
+    const v = s orelse return null;
+    return try allocator.dupe(u8, v);
+}
+
+fn dupeRef(allocator: std.mem.Allocator, ref: CoreV1ObjectReference) error{OutOfMemory}!CoreV1ObjectReference {
+    return .{
+        .apiVersion = try dupeOptStr(allocator, ref.apiVersion),
+        .fieldPath = try dupeOptStr(allocator, ref.fieldPath),
+        .kind = try dupeOptStr(allocator, ref.kind),
+        .name = try dupeOptStr(allocator, ref.name),
+        .namespace = try dupeOptStr(allocator, ref.namespace),
+        .resourceVersion = try dupeOptStr(allocator, ref.resourceVersion),
+        .uid = try dupeOptStr(allocator, ref.uid),
+    };
+}
 
 /// Generate a deterministic event name: `{obj_name}.{8_hex_digits}`.
 ///
@@ -294,4 +505,73 @@ test "generateEventName: truncates names longer than 244 chars" {
     for (name[245..]) |c| {
         try testing.expect(std.ascii.isHex(c));
     }
+}
+
+test "EventRecorder: overflow drops events and increments counter" {
+    // Arrange
+    const io = std.testing.io;
+    const mock_mod = @import("../client/mock.zig");
+    var mock = mock_mod.MockTransport.init(testing.allocator);
+    defer mock.deinit();
+
+    var client = try mock.client(io);
+    defer client.deinit(io);
+
+    const ref = CoreV1ObjectReference{
+        .apiVersion = "v1",
+        .kind = "Pod",
+        .name = "my-pod",
+        .namespace = "default",
+        .uid = "abc-123",
+    };
+
+    var recorder = EventRecorder.init(testing.allocator, &client, "test", "test-pod", .{
+        .max_queue_size = 2,
+    });
+    defer recorder.deinit();
+
+    // Act
+    for (0..5) |_| {
+        recorder.event(io, ref, null, .normal, "TestReason", "test message");
+    }
+
+    // Assert: at least 3 of the 5 events were dropped.
+    try testing.expect(recorder.dropped_total.load(.acquire) >= 3);
+}
+
+test "EventRecorder: end-to-end via mock transport" {
+    // Arrange
+    const io = std.testing.io;
+    const mock_mod = @import("../client/mock.zig");
+    var mock = mock_mod.MockTransport.init(testing.allocator);
+    defer mock.deinit();
+
+    try mock.respondWith(.created, "{\"apiVersion\":\"v1\",\"kind\":\"Event\",\"metadata\":{\"name\":\"my-pod.00000000\",\"namespace\":\"default\"}}");
+
+    var client = try mock.client(io);
+    defer client.deinit(io);
+
+    const ref = CoreV1ObjectReference{
+        .apiVersion = "v1",
+        .kind = "Pod",
+        .name = "my-pod",
+        .namespace = "default",
+        .uid = "abc-123",
+    };
+
+    var recorder = EventRecorder.init(testing.allocator, &client, "ctrl", "ctrl-pod-1", .{});
+    defer recorder.deinit();
+
+    // Act
+    try recorder.start(io);
+    recorder.event(io, ref, null, .normal, "Created", "created pod");
+
+    std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, io) catch {};
+    recorder.stop(io);
+
+    // Assert: exactly one POST to the events endpoint was issued.
+    try testing.expectEqual(1, mock.requests.items.len);
+    try testing.expectEqual(std.http.Method.POST, mock.requests.items[0].method);
+    try testing.expect(std.mem.startsWith(u8, mock.requests.items[0].path, "/api/v1/namespaces/default/events"));
+    try testing.expectEqual(0, recorder.dropped_total.load(.acquire));
 }

@@ -201,7 +201,7 @@ const ReconcileCtx = struct {
     io: std.Io,
     client: *kube_zig.Client,
     store: kube_zig.Store(EphemeralEnv).View,
-    recorder: kube_zig.EventRecorder,
+    recorder: *kube_zig.EventRecorder,
     logger: kube_zig.Logger,
 
     fn reconcile(self: *ReconcileCtx, key: kube_zig.ObjectKey, ctx: kube_zig.Context) anyerror!kube_zig.ReconcileResult {
@@ -679,13 +679,18 @@ pub fn main(init: std.process.Init) !void {
     var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = logger });
     defer client.deinit(io);
 
+    var recorder = kube_zig.EventRecorder.init(allocator, &client, "ephemeral-env-controller", "ephemeral-env-controller", .{
+        .logger = logger,
+    });
+    defer recorder.deinit();
+
     // Create the controller (cluster-scoped, namespace = null).
     var reconcile_ctx = ReconcileCtx{
         .allocator = allocator,
         .io = io,
         .client = &client,
         .store = undefined, // Set after controller init.
-        .recorder = kube_zig.EventRecorder.init(&client, "ephemeral-env-controller", "ephemeral-env-controller"),
+        .recorder = &recorder,
         .logger = logger.withScope("ephemeral-env"),
     };
 
@@ -703,9 +708,10 @@ pub fn main(init: std.process.Init) !void {
         .map_fn = namespaceMapper,
     });
 
-    // Create ControllerManager and add the controller.
+    // Create ControllerManager and add the controller and event recorder.
     var mgr = kube_zig.ControllerManager.init(allocator, .{ .logger = logger, .client = &client });
     defer mgr.deinit();
+    try mgr.add(recorder.runnable());
     try mgr.add(kube_zig.Runnable.fromController(EphemeralEnv, &ctrl));
 
     // Create ProbeServer with readiness + liveness checks.

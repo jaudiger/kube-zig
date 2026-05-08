@@ -37,6 +37,44 @@ pub const Runnable = struct {
         get_error: *const fn (ptr: *anyopaque) ?InformerError,
     };
 
+    /// Create a `Runnable` from any type that implements `start(io)`, `cancel(io)`,
+    /// and `join()`. `hasSynced` always returns true; `getError` always returns null.
+    ///
+    /// The caller must ensure that the pointed-to object outlives the `Runnable`.
+    pub fn fromTyped(comptime T: type, ptr: *T) Runnable {
+        const Impl = struct {
+            fn start(p: *anyopaque, io: std.Io) RunError!void {
+                const self: *T = @ptrCast(@alignCast(p));
+                return self.start(io);
+            }
+            fn cancel(p: *anyopaque, io: std.Io) void {
+                const self: *T = @ptrCast(@alignCast(p));
+                self.cancel(io);
+            }
+            fn join(p: *anyopaque) void {
+                const self: *T = @ptrCast(@alignCast(p));
+                self.join();
+            }
+            fn hasSynced(_: *anyopaque, _: std.Io) bool {
+                return true;
+            }
+            fn getError(_: *anyopaque) ?InformerError {
+                return null;
+            }
+        };
+
+        return .{
+            .ptr = @ptrCast(ptr),
+            .vtable = &.{
+                .start = Impl.start,
+                .cancel = Impl.cancel,
+                .join = Impl.join,
+                .has_synced = Impl.hasSynced,
+                .get_error = Impl.getError,
+            },
+        };
+    }
+
     /// Create a `Runnable` from a pointer to `Controller(T)`.
     ///
     /// The caller must ensure that the pointed-to controller outlives the
