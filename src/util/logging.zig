@@ -10,6 +10,8 @@ const std = @import("std");
 const time_mod = @import("time.zig");
 const testing = std.testing;
 
+const Writer = std.Io.Writer;
+
 /// Log severity level.
 pub const Level = enum(u8) {
     trace = 0,
@@ -268,7 +270,7 @@ pub const JsonStdoutLogger = struct {
 
 /// Write a single JSON log line to the given writer. Shared between
 /// JsonStdoutLogger and the test writer logger.
-fn writeJsonLine(io: std.Io, w: anytype, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
+fn writeJsonLine(io: std.Io, w: *Writer, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
     try w.writeAll("{\"ts\":\"");
     try time_mod.writeNow(io, .nanos, w);
     try w.writeByte('"');
@@ -301,7 +303,7 @@ fn writeJsonLine(io: std.Io, w: anytype, level: Level, scope: []const u8, messag
 }
 
 /// Write a JSON-escaped string (with surrounding quotes) to the writer.
-fn writeJsonString(w: anytype, s: []const u8) !void {
+fn writeJsonString(w: *Writer, s: []const u8) !void {
     try w.writeByte('"');
     for (s) |c| {
         switch (c) {
@@ -367,7 +369,7 @@ pub const TextStdoutLogger = struct {
 
 /// Write a text string with newlines and control characters escaped.
 /// Keeps printable characters as-is for human readability.
-fn writeEscapedText(w: anytype, s: []const u8) !void {
+fn writeEscapedText(w: *Writer, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '\n' => try w.writeAll("\\n"),
@@ -385,7 +387,7 @@ fn writeEscapedText(w: anytype, s: []const u8) !void {
 }
 
 /// Write a single plain-text log line to the given writer.
-fn writeTextLine(io: std.Io, w: anytype, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
+fn writeTextLine(io: std.Io, w: *Writer, level: Level, scope: []const u8, message: []const u8, fields: []const Field) !void {
     try time_mod.writeNow(io, .nanos, w);
     try w.writeByte(' ');
     try w.writeAll(level.asTextUpper());

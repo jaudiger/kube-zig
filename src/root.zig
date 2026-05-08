@@ -165,38 +165,9 @@ pub const default_conflict_policy = @import("util/retry_conflict.zig").default_c
 pub const RateLimiter = @import("util/rate_limit.zig").RateLimiter;
 pub const CircuitBreaker = @import("util/circuit_breaker.zig").CircuitBreaker;
 
-const metrics_mod = @import("util/metrics.zig");
-pub const Counter = metrics_mod.Counter;
-pub const Gauge = metrics_mod.Gauge;
-pub const Histogram = metrics_mod.Histogram;
-pub const MetricsProvider = metrics_mod.MetricsProvider;
-pub const ClientMetrics = metrics_mod.ClientMetrics;
-pub const QueueMetrics = metrics_mod.QueueMetrics;
-pub const ReconcilerMetrics = metrics_mod.ReconcilerMetrics;
-pub const InformerMetrics = metrics_mod.InformerMetrics;
-pub const LeaderMetrics = metrics_mod.LeaderMetrics;
-
-const logging_mod = @import("util/logging.zig");
-pub const Logger = logging_mod.Logger;
-pub const LogLevel = logging_mod.Level;
-pub const LogField = logging_mod.Field;
-pub const LogFieldValue = logging_mod.FieldValue;
-pub const WithFieldsLogger = logging_mod.WithFieldsLogger;
-pub const JsonStdoutLogger = logging_mod.JsonStdoutLogger;
-pub const TextStdoutLogger = logging_mod.TextStdoutLogger;
-
-const tracing_mod = @import("util/tracing.zig");
-pub const TracerProvider = tracing_mod.TracerProvider;
-pub const TraceId = tracing_mod.TraceId;
-pub const SpanId = tracing_mod.SpanId;
-pub const SpanContext = tracing_mod.SpanContext;
-pub const SpanKind = tracing_mod.SpanKind;
-pub const SpanStatus = tracing_mod.SpanStatus;
-pub const Span = tracing_mod.Span;
-pub const Attribute = tracing_mod.Attribute;
-pub const SpanAttributeValue = tracing_mod.SpanAttributeValue;
-pub const formatTraceparent = tracing_mod.formatTraceparent;
-pub const parseTraceparent = tracing_mod.parseTraceparent;
+pub const metrics = @import("util/metrics.zig");
+pub const log = @import("util/logging.zig");
+pub const trace = @import("util/tracing.zig");
 
 pub const metadata = @import("util/metadata.zig");
 pub const managed_fields = @import("util/managed_fields.zig");

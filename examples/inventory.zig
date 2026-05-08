@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = debug_allocator.allocator();
 
     const config = kube_zig.ProxyConfig.init(init.environ_map);
-    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
+    var text_logger = kube_zig.log.TextStdoutLogger.init(io, .info);
 
     const logger = text_logger.logger();
     var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = logger });
@@ -108,11 +108,11 @@ fn queryAndCollect(
     namespace: []const u8,
     allocator: std.mem.Allocator,
     entry: *ResourceEntry,
-    logger: kube_zig.Logger,
+    logger: kube_zig.log.Logger,
 ) void {
     const api = kube_zig.Api(T).init(client, client.context(), namespace);
     const result = api.list(io, .{}) catch |err| {
-        logger.err("failed to list resources", &.{ kube_zig.LogField.string("kind", entry.kind), kube_zig.LogField.err("error", err) });
+        logger.err("failed to list resources", &.{ kube_zig.log.Field.string("kind", entry.kind), kube_zig.log.Field.err("error", err) });
         entry.failed = true;
         return;
     };
@@ -123,9 +123,9 @@ fn queryAndCollect(
             defer f.deinit();
             const status_msg = if (f.statusObj()) |s| (s.message orelse "") else "";
             logger.err("api error listing resources", &.{
-                kube_zig.LogField.string("kind", entry.kind),
-                kube_zig.LogField.err("error", f.statusError()),
-                kube_zig.LogField.string("message", status_msg),
+                kube_zig.log.Field.string("kind", entry.kind),
+                kube_zig.log.Field.err("error", f.statusError()),
+                kube_zig.log.Field.string("message", status_msg),
             });
             entry.failed = true;
             return;

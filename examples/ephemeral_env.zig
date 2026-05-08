@@ -108,7 +108,7 @@ const std = @import("std");
 const kube_zig = @import("kube-zig");
 const k8s = kube_zig.types;
 
-const LogField = kube_zig.LogField;
+const LogField = kube_zig.log.Field;
 
 const finalizer_name = "platform.example.com/cleanup";
 const field_manager = "ephemeral-env-controller";
@@ -202,7 +202,7 @@ const ReconcileCtx = struct {
     client: *kube_zig.Client,
     store: kube_zig.Store(EphemeralEnv).View,
     recorder: *kube_zig.EventRecorder,
-    logger: kube_zig.Logger,
+    logger: kube_zig.log.Logger,
 
     fn reconcile(self: *ReconcileCtx, key: kube_zig.ObjectKey, ctx: kube_zig.Context) anyerror!kube_zig.ReconcileResult {
         _ = ctx;
@@ -550,7 +550,7 @@ const ReconcileCtx = struct {
 fn updatePhase(
     allocator: std.mem.Allocator,
     io: std.Io,
-    logger: kube_zig.Logger,
+    logger: kube_zig.log.Logger,
     api: EphemeralEnvApi,
     env_name: []const u8,
     phase: []const u8,
@@ -653,7 +653,7 @@ const ShutdownCtx = struct {
     io: std.Io,
     mgr: *kube_zig.ControllerManager,
     probes: *kube_zig.ProbeServer,
-    logger: kube_zig.Logger,
+    logger: kube_zig.log.Logger,
 
     fn shutdown(self: *ShutdownCtx) void {
         self.logger.info("signal received, shutting down", &.{});
@@ -673,7 +673,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Client init via ProxyConfig with structured JSON logging.
     const config = kube_zig.ProxyConfig.init(init.environ_map);
-    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
+    var text_logger = kube_zig.log.TextStdoutLogger.init(io, .info);
     const logger = text_logger.logger();
 
     var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = logger });

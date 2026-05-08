@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = debug_allocator.allocator();
 
     const config = kube_zig.ProxyConfig.init(init.environ_map);
-    var text_logger = kube_zig.TextStdoutLogger.init(io, .info);
+    var text_logger = kube_zig.log.TextStdoutLogger.init(io, .info);
 
     var client = try kube_zig.Client.init(allocator, io, config.base_url, .{ .logger = text_logger.logger() });
     defer client.deinit(io);

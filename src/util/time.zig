@@ -22,6 +22,8 @@
 const std = @import("std");
 const testing = std.testing;
 
+const Writer = std.Io.Writer;
+
 /// A monotonic clock origin with validated construction.
 ///
 /// `init` verifies that the clock is advancing before returning.
@@ -116,7 +118,7 @@ fn decompose(secs: u64) DateTime {
 }
 
 /// Write the date-time prefix (`YYYY-MM-DDThh:mm:ss`) shared by all precisions.
-fn writeDateTime(w: anytype, dt: DateTime) !void {
+fn writeDateTime(w: *Writer, dt: DateTime) !void {
     try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
         dt.year, dt.month, dt.day, dt.hours, dt.minutes, dt.seconds,
     });
@@ -128,7 +130,7 @@ fn writeDateTime(w: anytype, dt: DateTime) !void {
 /// - `.seconds`: `YYYY-MM-DDThh:mm:ssZ`
 /// - `.micros`:  `YYYY-MM-DDThh:mm:ss.000000Z`
 /// - `.nanos`:   `YYYY-MM-DDThh:mm:ss.nnnnnnnnnZ`
-pub fn writeNow(io: std.Io, comptime precision: Precision, w: anytype) !void {
+pub fn writeNow(io: std.Io, comptime precision: Precision, w: *Writer) !void {
     const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
     switch (precision) {
         .nanos => {
