@@ -729,7 +729,7 @@ pub fn main(init: std.process.Init) !void {
         .logger = logger.withScope("ephemeral-env"),
     };
 
-    const sig_handle = try kube_zig.signal.setupShutdown(io, &.{
+    var sig_handle = try kube_zig.signal.setupShutdown(allocator, io, &.{
         kube_zig.signal.ShutdownCallback.fromTypedCtx(ShutdownCtx, &shutdown_ctx, ShutdownCtx.shutdown),
     });
 
@@ -750,6 +750,6 @@ pub fn main(init: std.process.Init) !void {
     try mgr.run(io);
 
     // Join signal thread and cleanup.
-    sig_handle.thread.join();
+    sig_handle.deinit(allocator);
     logger.withScope("ephemeral-env").info("controller shut down cleanly", &.{});
 }

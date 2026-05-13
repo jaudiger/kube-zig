@@ -122,33 +122,44 @@ pub const ShutdownCallback = struct {
     }
 };
 
-/// Handle returned by `setupShutdown`. Holds the signal handler and
-/// the background thread that waits for signals.
+/// Handle returned by `setupShutdown`. Owns the signal-wait thread and
+/// the duplicated callback slice.
 pub const ShutdownHandle = struct {
     handler: SignalHandler,
     thread: std.Thread,
+    callbacks: []const ShutdownCallback,
+
+    /// Join the signal thread and free the owned callback slice.
+    pub fn deinit(self: *ShutdownHandle, allocator: std.mem.Allocator) void {
+        self.thread.join();
+        allocator.free(self.callbacks);
+    }
 };
 
 /// Register signal handlers and spawn a background thread that waits for
 /// SIGTERM/SIGINT, then invokes all provided callbacks in order.
 ///
-/// Returns a `ShutdownHandle` whose `thread` field should be joined during
-/// cleanup.
-///
 /// Usage:
 /// ```zig
-/// const handle = try signal.setupShutdown(io, &.{
+/// var handle = try signal.setupShutdown(allocator, io, &.{
 ///     signal.ShutdownCallback.fromTypedCtx(
 ///         Client, &client, Client.shutdown,
 ///     ),
 /// });
+/// defer handle.deinit(allocator);
 /// // ... run application ...
-/// handle.thread.join();
 /// ```
-pub fn setupShutdown(io: std.Io, callbacks: []const ShutdownCallback) !ShutdownHandle {
+pub fn setupShutdown(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    callbacks: []const ShutdownCallback,
+) !ShutdownHandle {
+    const owned = try allocator.dupe(ShutdownCallback, callbacks);
+    errdefer allocator.free(owned);
+
     const handler = try SignalHandler.init();
-    const thread = try std.Thread.spawn(.{}, shutdownThreadFn, .{ io, callbacks });
-    return .{ .handler = handler, .thread = thread };
+    const thread = try std.Thread.spawn(.{}, shutdownThreadFn, .{ io, owned });
+    return .{ .handler = handler, .thread = thread, .callbacks = owned };
 }
 
 fn shutdownThreadFn(io: std.Io, callbacks: []const ShutdownCallback) void {
@@ -234,4 +245,36 @@ test "ShutdownCallback: multiple callbacks" {
     // Assert
     try testing.expectEqual(@as(u32, 1), c1.count);
     try testing.expectEqual(@as(u32, 1), c2.count);
+}
+
+test "setupShutdown: handle owns callbacks across caller's scope" {
+    // Arrange
+    if (comptime !isPosixSupported()) return error.SkipZigTest;
+
+    const Counter = struct {
+        count: u32 = 0,
+        fn increment(self: *@This()) void {
+            self.count += 1;
+        }
+    };
+    var c = Counter{};
+
+    signal_received.store(1, .release);
+    received_signal.store(@intFromEnum(std.posix.SIG.TERM), .release);
+    defer {
+        signal_received.store(0, .release);
+        received_signal.store(0, .release);
+    }
+
+    // Act
+    var handle = blk: {
+        const callbacks = [_]ShutdownCallback{
+            ShutdownCallback.fromTypedCtx(Counter, &c, Counter.increment),
+        };
+        break :blk try setupShutdown(testing.allocator, std.testing.io, &callbacks);
+    };
+    handle.deinit(testing.allocator);
+
+    // Assert
+    try testing.expectEqual(@as(u32, 1), c.count);
 }
