@@ -99,7 +99,7 @@ fn taggedUnionEqual(comptime T: type, a: T, b: T) bool {
 
 fn jsonArrayHashMapEqual(comptime T: type, a: T, b: T) bool {
     if (a.map.count() != b.map.count()) return false;
-    const V = @TypeOf(a.map).Value;
+    const V = std.meta.Child(@TypeOf(a.map.values()));
     var it = a.map.iterator();
     while (it.next()) |entry| {
         const b_val = b.map.get(entry.key_ptr.*) orelse return false;
@@ -480,21 +480,21 @@ test "deepEqual: json.Value array same items are equal, different are not" {
 
 test "deepEqual: json.Value object same entries are equal, different are not" {
     // Arrange
-    var obj_a = json.ObjectMap.init(testing.allocator);
-    defer obj_a.deinit();
-    try obj_a.put("key", .{ .integer = 42 });
+    var obj_a: json.ObjectMap = .empty;
+    defer obj_a.deinit(testing.allocator);
+    try obj_a.put(testing.allocator, "key", .{ .integer = 42 });
 
     // Act
-    var obj_b = json.ObjectMap.init(testing.allocator);
-    defer obj_b.deinit();
-    try obj_b.put("key", .{ .integer = 42 });
+    var obj_b: json.ObjectMap = .empty;
+    defer obj_b.deinit(testing.allocator);
+    try obj_b.put(testing.allocator, "key", .{ .integer = 42 });
 
     // Assert
     try testing.expect(deepEqual(json.Value, .{ .object = obj_a }, .{ .object = obj_b }));
 
-    var obj_c = json.ObjectMap.init(testing.allocator);
-    defer obj_c.deinit();
-    try obj_c.put("key", .{ .integer = 99 });
+    var obj_c: json.ObjectMap = .empty;
+    defer obj_c.deinit(testing.allocator);
+    try obj_c.put(testing.allocator, "key", .{ .integer = 99 });
 
     try testing.expect(!deepEqual(json.Value, .{ .object = obj_a }, .{ .object = obj_c }));
 }

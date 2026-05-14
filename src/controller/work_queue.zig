@@ -982,9 +982,9 @@ test "WorkQueue: isShutdown" {
     }
 
     // Act / Assert
-    try testing.expect(!q.isShutdown(std.testing.io));
+    try testing.expect(!q.isShutdown());
     q.shutdown(std.testing.io);
-    try testing.expect(q.isShutdown(std.testing.io));
+    try testing.expect(q.isShutdown());
 }
 
 test "WorkQueue: len returns queued count" {
@@ -1407,7 +1407,7 @@ test "WorkQueue: done clears failure entries after successful processing" {
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
 
     // Assert
-    try q.addRateLimited(key);
+    try q.addRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
     std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms } }, std.testing.io) catch {};
@@ -1443,10 +1443,10 @@ test "WorkQueue: done preserves failure entries when key is awaiting rate-limite
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
 
     // Assert
-    try q.add(key, .{});
+    try q.add(std.testing.io, key, .{});
     const k1 = (try q.get(std.testing.io)).?;
 
-    try q.addRateLimited(k1);
+    try q.addRateLimited(std.testing.io, k1);
     try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
     // in waiting_keys (awaiting rate-limited requeue)
@@ -1483,7 +1483,7 @@ test "WorkQueue: addLockedFromWaiting cleans up failures on dirty.put OOM" {
 
     // Act
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try q.addRateLimited(key);
+    try q.addRateLimited(std.testing.io, key);
     try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key));
 
     // Assert
@@ -1584,8 +1584,8 @@ test "WorkQueue: done(.requeue_after) clears failure counter" {
     const key_template = ObjectKey{ .namespace = "ns", .name = "pod-1" };
 
     // Build up some failure state via addRateLimited.
-    try q.addRateLimited(key_template);
-    try q.addRateLimited(key_template);
+    try q.addRateLimited(std.testing.io, key_template);
+    try q.addRateLimited(std.testing.io, key_template);
     try testing.expectEqual(@as(u32, 2), q.numRequeues(std.testing.io, key_template));
 
     // Drain the waiting item.
@@ -1624,9 +1624,9 @@ test "WorkQueue: done(.requeue_after) deduplicates against existing waiting entr
     q.done(std.testing.io, key, .{ .requeue_after = 50 * std.time.ns_per_ms });
 
     // Assert
-    q.mutex.lock();
+    q.mutex.lockUncancelable(std.testing.io);
     const waiting_count = q.scheduler.count();
-    q.mutex.unlock();
+    q.mutex.unlock(std.testing.io);
     try testing.expectEqual(@as(usize, 1), waiting_count);
 
     // Drain.
@@ -1697,7 +1697,7 @@ test "WorkQueue: done(.backoff) increments failure counter across calls" {
     const key_template = ObjectKey{ .namespace = "ns", .name = "pod-1" };
 
     // First cycle: add, get, done(.backoff)
-    try q.add(key_template, .{});
+    try q.add(std.testing.io, key_template, .{});
     const k1 = (try q.get(std.testing.io)).?;
     q.done(std.testing.io, k1, .backoff);
     try testing.expectEqual(@as(u32, 1), q.numRequeues(std.testing.io, key_template));
@@ -1886,12 +1886,12 @@ test "WorkQueue: overall limiter adds delay to rate-limited requeues" {
     const key2 = ObjectKey{ .namespace = "ns", .name = "b" };
 
     // First addRateLimited consumes the one burst token (zero bucket delay).
-    try q.addRateLimited(key1);
+    try q.addRateLimited(std.testing.io, key1);
 
     // Second addRateLimited goes into debt, so bucket delay > 0.
     // With 10 QPS, the delay is ~100ms. Per-key backoff is ~1ns,
     // so the max(backoff, bucket_delay) is dominated by the bucket.
-    try q.addRateLimited(key2);
+    try q.addRateLimited(std.testing.io, key2);
 
     // Assert
     // The first key should become available almost immediately.
@@ -1931,7 +1931,7 @@ test "WorkQueue: overall limiter disabled when qps is 0" {
     try testing.expect(q.scheduler.overall_limiter == null);
 
     const key = ObjectKey{ .namespace = "ns", .name = "pod-1" };
-    try q.addRateLimited(key);
+    try q.addRateLimited(std.testing.io, key);
 
     // With disabled limiter and tiny backoff, key should be available quickly.
     std.Io.Clock.Duration.sleep(.{ .clock = .awake, .raw = .{ .nanoseconds = 50 * std.time.ns_per_ms } }, std.testing.io) catch {};

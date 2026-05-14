@@ -147,7 +147,7 @@ test "readToken caches until mtime changes" {
 
     tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v1" }) catch unreachable;
 
-    const path = try tmp.dir.realPathFileAlloc(io, testing.allocator, "token");
+    const path = try tmp.dir.realPathFileAlloc(io, "token", testing.allocator);
     defer testing.allocator.free(path);
 
     var auth = AuthProvider.init(testing.allocator, path, Logger.noop);
@@ -174,7 +174,7 @@ test "force refresh bypasses cache" {
 
     tmp.dir.writeFile(io, .{ .sub_path = "token", .data = "test-token-v1" }) catch unreachable;
 
-    const path = try tmp.dir.realPathFileAlloc(io, testing.allocator, "token");
+    const path = try tmp.dir.realPathFileAlloc(io, "token", testing.allocator);
     defer testing.allocator.free(path);
 
     var auth = AuthProvider.init(testing.allocator, path, Logger.noop);

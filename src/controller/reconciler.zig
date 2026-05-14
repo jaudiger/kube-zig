@@ -617,7 +617,7 @@ test "Reconciler: start joins all threads on partial failure" {
     fa.resize_fail_index = fa.resize_index;
 
     // Act
-    try testing.expectError(error.OutOfMemory, r.start());
+    try testing.expectError(error.OutOfMemory, r.start(std.testing.io));
 
     // Assert
     // All previously-spawned threads must have been joined and cleared.

@@ -324,7 +324,7 @@ const MockTransport = @import("../client/mock.zig").MockTransport;
 test "ensureFinalizer: adds finalizer via GET-PUT with retry" {
     // Arrange
     const types = @import("types");
-    const CoreV1Pod = types.core_v1.CoreV1Pod;
+    const CoreV1Pod = types.CoreV1Pod;
     const Api = Api_mod.Api;
 
     // Act
@@ -333,20 +333,20 @@ test "ensureFinalizer: adds finalizer via GET-PUT with retry" {
 
     // Assert
     // GET response: pod without finalizers
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"1"}}
     );
     // PUT response: success
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"2","finalizers":["my-finalizer"]}}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(CoreV1Pod).init(&c, c.context(), "default");
 
-    try ensureFinalizer(CoreV1Pod, pods, testing.allocator, "test-pod", "my-finalizer");
+    try ensureFinalizer(CoreV1Pod, std.testing.io, pods, testing.allocator, "test-pod", "my-finalizer");
 
     // Verify GET then PUT were sent.
     try testing.expectEqual(@as(usize, 2), mock.requestCount());
@@ -360,7 +360,7 @@ test "ensureFinalizer: adds finalizer via GET-PUT with retry" {
 test "ensureFinalizer: skips PUT when finalizer already present" {
     // Arrange
     const types = @import("types");
-    const CoreV1Pod = types.core_v1.CoreV1Pod;
+    const CoreV1Pod = types.CoreV1Pod;
     const Api = Api_mod.Api;
 
     // Act
@@ -369,16 +369,16 @@ test "ensureFinalizer: skips PUT when finalizer already present" {
 
     // Assert
     // GET response: pod already has the finalizer
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"1","finalizers":["my-finalizer"]}}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(CoreV1Pod).init(&c, c.context(), "default");
 
-    try ensureFinalizer(CoreV1Pod, pods, testing.allocator, "test-pod", "my-finalizer");
+    try ensureFinalizer(CoreV1Pod, std.testing.io, pods, testing.allocator, "test-pod", "my-finalizer");
 
     // Only GET, no PUT needed.
     try testing.expectEqual(@as(usize, 1), mock.requestCount());
@@ -387,7 +387,7 @@ test "ensureFinalizer: skips PUT when finalizer already present" {
 test "ensureFinalizer: retries on 409 Conflict" {
     // Arrange
     const types = @import("types");
-    const CoreV1Pod = types.core_v1.CoreV1Pod;
+    const CoreV1Pod = types.CoreV1Pod;
     const Api = Api_mod.Api;
 
     // Act
@@ -396,26 +396,26 @@ test "ensureFinalizer: retries on 409 Conflict" {
 
     // Assert
     // First attempt: GET ok, PUT 409
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"1"}}
     );
-    mock.respondWith(.conflict,
+    try mock.respondWith(.conflict,
         \\{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Conflict","code":409}
     );
     // Retry: GET (new resourceVersion), PUT ok
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"2"}}
     );
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"3","finalizers":["my-finalizer"]}}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(CoreV1Pod).init(&c, c.context(), "default");
 
-    try ensureFinalizer(CoreV1Pod, pods, testing.allocator, "test-pod", "my-finalizer");
+    try ensureFinalizer(CoreV1Pod, std.testing.io, pods, testing.allocator, "test-pod", "my-finalizer");
 
     // GET + PUT (409) + GET + PUT (ok) = 4 requests
     try testing.expectEqual(@as(usize, 4), mock.requestCount());
@@ -424,7 +424,7 @@ test "ensureFinalizer: retries on 409 Conflict" {
 test "removeFinalizerAndUpdate: removes finalizer via GET-PUT" {
     // Arrange
     const types = @import("types");
-    const CoreV1Pod = types.core_v1.CoreV1Pod;
+    const CoreV1Pod = types.CoreV1Pod;
     const Api = Api_mod.Api;
 
     // Act
@@ -433,20 +433,20 @@ test "removeFinalizerAndUpdate: removes finalizer via GET-PUT" {
 
     // Assert
     // GET response: pod with finalizer
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"1","finalizers":["my-finalizer"]}}
     );
     // PUT response: success
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"2"}}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(CoreV1Pod).init(&c, c.context(), "default");
 
-    try removeFinalizerAndUpdate(CoreV1Pod, pods, "test-pod", "my-finalizer");
+    try removeFinalizerAndUpdate(CoreV1Pod, std.testing.io, pods, "test-pod", "my-finalizer");
 
     try testing.expectEqual(@as(usize, 2), mock.requestCount());
     try testing.expectEqual(std.http.Method.PUT, mock.getRequest(1).?.method);
@@ -455,7 +455,7 @@ test "removeFinalizerAndUpdate: removes finalizer via GET-PUT" {
 test "removeFinalizerAndUpdate: skips PUT when finalizer absent" {
     // Arrange
     const types = @import("types");
-    const CoreV1Pod = types.core_v1.CoreV1Pod;
+    const CoreV1Pod = types.CoreV1Pod;
     const Api = Api_mod.Api;
 
     // Act
@@ -464,16 +464,16 @@ test "removeFinalizerAndUpdate: skips PUT when finalizer absent" {
 
     // Assert
     // GET response: pod without the target finalizer
-    mock.respondWith(.ok,
+    try mock.respondWith(.ok,
         \\{"metadata":{"name":"test-pod","namespace":"default","resourceVersion":"1","finalizers":["other"]}}
     );
 
-    var c = mock.client();
-    defer c.deinit();
+    var c = try mock.client(std.testing.io);
+    defer c.deinit(std.testing.io);
 
     const pods = Api(CoreV1Pod).init(&c, c.context(), "default");
 
-    try removeFinalizerAndUpdate(CoreV1Pod, pods, "test-pod", "my-finalizer");
+    try removeFinalizerAndUpdate(CoreV1Pod, std.testing.io, pods, "test-pod", "my-finalizer");
 
     // Only GET, no PUT needed.
     try testing.expectEqual(@as(usize, 1), mock.requestCount());

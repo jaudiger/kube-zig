@@ -658,8 +658,8 @@ test "config defaults" {
 
 test "renewalDeadlineExceeded: true when no observation" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
@@ -678,8 +678,8 @@ test "renewalDeadlineExceeded: true when no observation" {
 
 test "renewalDeadlineExceeded: false within duration" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
@@ -700,8 +700,8 @@ test "renewalDeadlineExceeded: false within duration" {
 
 test "renewalDeadlineExceeded: true past duration" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
@@ -758,8 +758,8 @@ test "apiserverLeaseExpired: acquireTime is used when renewTime is null" {
 
 test "interruptibleSleep wakes on stop" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
@@ -803,8 +803,8 @@ test "interruptibleSleep wakes on stop" {
 
 test "stop without start is safe" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
@@ -825,8 +825,8 @@ test "stop without start is safe" {
 
 test "isLeader state check" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
@@ -856,8 +856,8 @@ test "isLeader state check" {
 
 test "healthCheck: reflects isLeader state" {
     // Arrange
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
         .lease_name = "test",
@@ -874,13 +874,14 @@ test "healthCheck: reflects isLeader state" {
 
     elector.state.raw = .leading;
     try testing.expect(check.check_fn(check.ctx, std.testing.io));
+    elector.state.raw = .idle;
 }
 
 test "setObservedResourceVersion: OOM on dupe does not corrupt state" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var client = try Client.init(testing.allocator, "http://127.0.0.1:8001", .{});
-    defer client.deinit();
+    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
+    defer client.deinit(std.testing.io);
 
     // Act
     var elector = LeaderElector.init(fa.allocator(), &client, client.context(), .{

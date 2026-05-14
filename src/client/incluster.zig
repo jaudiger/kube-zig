@@ -28,21 +28,20 @@ pub const InClusterConfig = struct {
     /// Detect in-cluster credentials from the standard service-account mount
     /// and environment variables. Returns `error.NotInCluster` when not running
     /// inside a Kubernetes pod.
-    pub fn init(allocator: Allocator) !InClusterConfig {
-        const host = std.posix.getenv("KUBERNETES_SERVICE_HOST") orelse return error.NotInCluster;
-        const port = std.posix.getenv("KUBERNETES_SERVICE_PORT") orelse return error.NotInCluster;
+    pub fn init(allocator: Allocator, io: std.Io, environ: std.process.Environ) !InClusterConfig {
+        const host = environ.getPosix("KUBERNETES_SERVICE_HOST") orelse return error.NotInCluster;
+        const port = environ.getPosix("KUBERNETES_SERVICE_PORT") orelse return error.NotInCluster;
 
         const base_url = try buildBaseUrl(allocator, host, port);
         errdefer allocator.free(base_url);
 
-        // Verify CA cert and token files exist.
-        std.fs.cwd().access(ca_cert, .{}) catch return error.NotInCluster;
-        std.fs.cwd().access(token, .{}) catch return error.NotInCluster;
+        const cwd = std.Io.Dir.cwd();
+        cwd.access(io, ca_cert, .{}) catch return error.NotInCluster;
+        cwd.access(io, token, .{}) catch return error.NotInCluster;
 
-        // Read namespace file and trim trailing whitespace.
-        const raw_ns = std.fs.cwd().readFileAlloc(allocator, ns_file, 1024) catch return error.NotInCluster;
+        const raw_ns = cwd.readFileAlloc(io, ns_file, allocator, .limited(1024)) catch return error.NotInCluster;
         defer allocator.free(raw_ns);
-        const trimmed = std.mem.trimRight(u8, raw_ns, &std.ascii.whitespace);
+        const trimmed = std.mem.trimEnd(u8, raw_ns, &std.ascii.whitespace);
         const namespace = try allocator.dupe(u8, trimmed);
         errdefer allocator.free(namespace);
 
@@ -73,7 +72,7 @@ pub const InClusterConfig = struct {
 
 test "init returns NotInCluster when env vars are absent" {
     // Arrange
-    const result = InClusterConfig.init(testing.allocator);
+    const result = InClusterConfig.init(testing.allocator, std.testing.io, .empty);
 
     // Act / Assert
     try testing.expectError(error.NotInCluster, result);

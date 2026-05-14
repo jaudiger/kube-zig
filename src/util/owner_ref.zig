@@ -58,7 +58,7 @@ pub fn hasOwnerReference(items: anytype, uid: []const u8) bool {
 /// Add or replace an owner reference in `list`. Replaces in-place when the
 /// UID matches an existing entry; otherwise appends.
 pub fn setOwnerReference(list: anytype, allocator: Allocator, ref: anytype) !void {
-    const T = std.meta.Child(std.meta.Child(@TypeOf(list)));
+    const T = std.meta.Child(@TypeOf(list.items));
     const new_ref: T = .{
         .apiVersion = ref.apiVersion,
         .kind = ref.kind,

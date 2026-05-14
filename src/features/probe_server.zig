@@ -227,10 +227,7 @@ fn sendRequest(io: std.Io, address: net.IpAddress, request: []const u8) !Request
     var result: RequestResult = undefined;
     var total: usize = 0;
     while (total < result.data.len) {
-        const slice = rd.interface.readSliceShort(result.data[total..]) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
+        const slice = try rd.interface.readSliceShort(result.data[total..]);
         if (slice == 0) break;
         total += slice;
     }

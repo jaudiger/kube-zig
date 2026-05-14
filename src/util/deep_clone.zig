@@ -47,6 +47,7 @@ fn deepCloneImpl(comptime T: type, allocator: Allocator, value: T) Allocator.Err
                     }
                     // []const SomeType: allocate new slice, clone each element.
                     const new_slice = try allocator.alloc(ptr.child, value.len);
+                    errdefer allocator.free(new_slice);
                     for (value, 0..) |item, i| {
                         new_slice[i] = try deepCloneImpl(ptr.child, allocator, item);
                     }
@@ -54,6 +55,7 @@ fn deepCloneImpl(comptime T: type, allocator: Allocator, value: T) Allocator.Err
                 },
                 .one => {
                     const new_ptr = try allocator.create(ptr.child);
+                    errdefer allocator.destroy(new_ptr);
                     new_ptr.* = try deepCloneImpl(ptr.child, allocator, value.*);
                     return new_ptr;
                 },
@@ -126,6 +128,7 @@ fn cloneTaggedUnion(comptime T: type, allocator: Allocator, value: T) Allocator.
 fn cloneJsonArrayHashMap(comptime T: type, allocator: Allocator, value: T) Allocator.Error!T {
     var result: T = .{}; // .map = .empty (default)
     try result.map.ensureTotalCapacity(allocator, value.map.count());
+    errdefer result.map.deinit(allocator);
     var it = value.map.iterator();
     while (it.next()) |entry| {
         const new_key = try allocator.dupe(u8, entry.key_ptr.*);
@@ -139,6 +142,7 @@ fn cloneJsonArrayHashMap(comptime T: type, allocator: Allocator, value: T) Alloc
 /// each key and value into the target allocator.
 fn cloneManagedArrayHashMap(comptime T: type, allocator: Allocator, value: T) Allocator.Error!T {
     var new_map = T.init(allocator);
+    errdefer new_map.deinit();
     try new_map.ensureTotalCapacity(value.count());
     var it = value.iterator();
     while (it.next()) |entry| {
@@ -161,6 +165,7 @@ fn cloneJsonValue(allocator: Allocator, value: json.Value) Allocator.Error!json.
         .string => |s| return .{ .string = try allocator.dupe(u8, s) },
         .array => |arr| {
             var new_arr = @TypeOf(arr).init(allocator);
+            errdefer new_arr.deinit();
             try new_arr.ensureTotalCapacity(arr.items.len);
             for (arr.items) |item| {
                 new_arr.appendAssumeCapacity(try cloneJsonValue(allocator, item));
@@ -169,6 +174,7 @@ fn cloneJsonValue(allocator: Allocator, value: json.Value) Allocator.Error!json.
         },
         .object => |obj| {
             var new_obj: @TypeOf(obj) = .empty;
+            errdefer new_obj.deinit(allocator);
             try new_obj.ensureTotalCapacity(allocator, obj.count());
             var it = obj.iterator();
             while (it.next()) |entry| {
@@ -353,9 +359,9 @@ test "deepClone: json.Value object" {
     const alloc = arena.allocator();
 
     // Act
-    var obj = json.ObjectMap.init(alloc);
-    try obj.put("key1", json.Value{ .string = "val1" });
-    try obj.put("key2", json.Value{ .integer = 99 });
+    var obj: json.ObjectMap = .empty;
+    try obj.put(alloc, "key1", json.Value{ .string = "val1" });
+    try obj.put(alloc, "key2", json.Value{ .integer = 99 });
     const original = json.Value{ .object = obj };
 
     // Assert

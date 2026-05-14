@@ -475,11 +475,13 @@ test "DynamicApi.init: resource with slash returns error" {
 // applyInternal body isolation test
 test "applyInternal does not mutate the caller's body" {
     // Arrange
-    var obj = std.json.ObjectMap.init(testing.allocator);
-    defer obj.deinit();
-    try obj.put("metadata", .{ .object = blk: {
-        var meta = std.json.ObjectMap.init(testing.allocator);
-        try meta.put("name", .{ .string = "my-pod" });
+    var body_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer body_arena.deinit();
+    const body_alloc = body_arena.allocator();
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(body_alloc, "metadata", .{ .object = blk: {
+        var meta: std.json.ObjectMap = .empty;
+        try meta.put(body_alloc, "name", .{ .string = "my-pod" });
         break :blk meta;
     } });
     const body: Json = .{ .object = obj };
@@ -493,8 +495,8 @@ test "applyInternal does not mutate the caller's body" {
     var patched = try deepClone(Json, clone_arena.allocator(), body);
     switch (patched) {
         .object => |*patched_obj| {
-            try patched_obj.put("apiVersion", .{ .string = "v1" });
-            try patched_obj.put("kind", .{ .string = "Pod" });
+            try patched_obj.put(clone_arena.allocator(), "apiVersion", .{ .string = "v1" });
+            try patched_obj.put(clone_arena.allocator(), "kind", .{ .string = "Pod" });
         },
         else => {},
     }

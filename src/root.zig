@@ -180,3 +180,8 @@ pub const equality = @import("util/equality.zig");
 pub const resource_shape = @import("util/resource_shape.zig");
 pub const time = @import("util/time.zig");
 pub const types = @import("types");
+
+test {
+    const std = @import("std");
+    std.testing.refAllDecls(@This());
+}

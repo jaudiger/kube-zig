@@ -433,12 +433,9 @@ fn makeMockRunnable(state: *MockState) Runnable {
         fn cancel(ptr: *anyopaque, _: std.Io) void {
             const s: *MockState = @ptrCast(@alignCast(ptr));
             s.canceled = true;
-            s.stopped = true; // backwards compat for existing tests
+            s.stopped = true;
             if (s.cancel_counter) |counter| {
                 s.cancel_order = counter.fetchAdd(1, .seq_cst);
-            }
-            if (s.stop_counter) |counter| {
-                s.stop_order = counter.fetchAdd(1, .seq_cst);
             }
         }
         fn join(ptr: *anyopaque) void {
@@ -451,6 +448,9 @@ fn makeMockRunnable(state: *MockState) Runnable {
             s.joined = true;
             if (s.join_counter) |counter| {
                 s.join_order = counter.fetchAdd(1, .seq_cst);
+            }
+            if (s.stop_counter) |counter| {
+                s.stop_order = counter.fetchAdd(1, .seq_cst);
             }
         }
         fn hasSynced(ptr: *anyopaque, _: std.Io) bool {

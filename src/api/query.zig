@@ -748,11 +748,11 @@ test "serializeDeleteOpts: orphan propagation policy" {
     try testing.expectEqualStrings("{\"apiVersion\":\"v1\",\"kind\":\"DeleteOptions\",\"propagationPolicy\":\"Orphan\"}", result);
 }
 
-test "serializeDeleteOpts: OOM on allocation returns OutOfMemory" {
+test "serializeDeleteOpts: OOM on allocation returns WriteFailed" {
     // Arrange
     var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
     fa.fail_index = 0;
 
     // Act / Assert
-    try testing.expectError(error.OutOfMemory, serializeDeleteOpts(fa.allocator(), .{ .propagation_policy = .background }));
+    try testing.expectError(error.WriteFailed, serializeDeleteOpts(fa.allocator(), .{ .propagation_policy = .background }));
 }

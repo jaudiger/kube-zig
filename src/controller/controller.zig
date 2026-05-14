@@ -768,11 +768,11 @@ test "Controller: init returns OutOfMemory without leaking" {
     // Act / Assert
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
-        var failing = std.heap.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
         const result = Controller(TestResource).init(failing.allocator(), std.testing.io, dummy_client, Context.background(), "default", opts);
-        if (result) |_| {
+        if (result) |ok| {
             // Succeeded: all allocations passed; clean up and stop.
-            var ctrl = result.?;
+            var ctrl = ok;
             ctrl.deinit(std.testing.io);
             break;
         } else |err| {
@@ -830,7 +830,7 @@ test "Controller: watchSecondary returns OutOfMemory without leaking" {
     // Act / Assert: every OOM path in watchSecondary leaves no leak.
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
-        var failing = std.heap.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
         const alloc = failing.allocator();
 
         var ctrl = Controller(TestResource).init(alloc, std.testing.io, dummy_client, Context.background(), "default", .{
@@ -844,8 +844,11 @@ test "Controller: watchSecondary returns OutOfMemory without leaking" {
         });
         ctrl.cancel(std.testing.io);
         ctrl.deinit(std.testing.io);
-        if (ws_result) |_| break;
-        try testing.expectError(error.OutOfMemory, ws_result);
+        if (ws_result) |_| {
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+        }
     }
     // At minimum: WorkQueue create, addEventHandler append, MappingCtx
     // create, Informer(S) create, and secondary_informers append.
@@ -876,9 +879,11 @@ test "Controller: secondary handler enqueues primary key on all event types" {
     arena.* = std.heap.ArenaAllocator.init(testing.allocator);
     const old_entry = try ctrl.informer.store.put(
         std.testing.io,
-        .{ .namespace = "default", .name = "my-deploy" },
-        TestResource{ .metadata = .{ .name = "my-deploy", .namespace = "default" } },
-        arena,
+        .{
+            .key = .{ .namespace = "default", .name = "my-deploy" },
+            .object = TestResource{ .metadata = .{ .name = "my-deploy", .namespace = "default" } },
+            .arena = arena,
+        },
     );
     if (old_entry) |e| e.release();
 
