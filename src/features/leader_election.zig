@@ -50,7 +50,6 @@ pub const LeaderElectionConfig = struct {
 /// to acquire) the lease, and callbacks notify the application when leadership
 /// is acquired or lost.
 pub const LeaderElector = struct {
-    allocator: std.mem.Allocator,
     client: *Client,
     ctx: Context,
     config: LeaderElectionConfig,
@@ -59,8 +58,6 @@ pub const LeaderElector = struct {
     stop_cond_epoch: std.atomic.Value(u32),
     state: std.atomic.Value(State),
     renew_thread: ?std.Thread,
-    /// Heap-owned resourceVersion from the last observed Lease.
-    observed_resource_version: ?[]const u8,
     /// Monotonic time of our own last successful create/renew/takeover.
     our_last_renew_time: ?std.Io.Clock.Timestamp,
 
@@ -79,7 +76,7 @@ pub const LeaderElector = struct {
     };
 
     /// Create an elector in `idle` state. Asserts that `renew_interval_s < lease_duration_s`.
-    pub fn init(allocator: std.mem.Allocator, client: *Client, ctx: Context, config: LeaderElectionConfig) LeaderElector {
+    pub fn init(client: *Client, ctx: Context, config: LeaderElectionConfig) LeaderElector {
         std.debug.assert(config.renew_interval_s < config.lease_duration_s);
         std.debug.assert(config.retry_period_s > 0);
 
@@ -87,7 +84,6 @@ pub const LeaderElector = struct {
         cfg.logger = config.logger.withScope("leader_election");
 
         return .{
-            .allocator = allocator,
             .client = client,
             .ctx = ctx,
             .config = cfg,
@@ -95,19 +91,14 @@ pub const LeaderElector = struct {
             .stop_cond_epoch = std.atomic.Value(u32).init(0),
             .state = std.atomic.Value(State).init(.idle),
             .renew_thread = null,
-            .observed_resource_version = null,
             .our_last_renew_time = null,
         };
     }
 
-    /// Release owned memory. The elector must not be in `standby` or `leading` state.
+    /// The elector must not be in `standby` or `leading` state when called.
     pub fn deinit(self: *LeaderElector) void {
         const s = self.state.load(.acquire);
         std.debug.assert(s != .standby and s != .leading);
-        if (self.observed_resource_version) |rv| {
-            self.allocator.free(rv);
-            self.observed_resource_version = null;
-        }
     }
 
     /// Spawn the background election loop. Transitions from `idle` to `standby`.
@@ -298,11 +289,7 @@ pub const LeaderElector = struct {
                 defer parsed.deinit();
                 const lease = parsed.value;
 
-                // Store the observed resourceVersion for optimistic concurrency.
                 const rv = if (lease.metadata) |m| m.resourceVersion else null;
-                if (rv) |new_rv| {
-                    self.setObservedResourceVersion(new_rv);
-                }
 
                 const holder = if (lease.spec) |s| s.holderIdentity else null;
                 const is_us = if (holder) |h| std.mem.eql(u8, h, self.config.identity) else false;
@@ -369,10 +356,6 @@ pub const LeaderElector = struct {
         switch (unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
-                const rv = if (parsed.value.metadata) |m| m.resourceVersion else null;
-                if (rv) |new_rv| {
-                    self.setObservedResourceVersion(new_rv);
-                }
                 self.our_last_renew_time = .now(io, .awake);
                 return .acquired;
             },
@@ -431,10 +414,6 @@ pub const LeaderElector = struct {
         switch (unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
-                const new_rv = if (parsed.value.metadata) |m| m.resourceVersion else null;
-                if (new_rv) |nrv| {
-                    self.setObservedResourceVersion(nrv);
-                }
                 self.our_last_renew_time = .now(io, .awake);
                 return .renewed;
             },
@@ -498,10 +477,6 @@ pub const LeaderElector = struct {
         switch (unwrapped) {
             .ok => |parsed| {
                 defer parsed.deinit();
-                const new_rv = if (parsed.value.metadata) |m| m.resourceVersion else null;
-                if (new_rv) |nrv| {
-                    self.setObservedResourceVersion(nrv);
-                }
                 self.our_last_renew_time = .now(io, .awake);
                 return .acquired;
             },
@@ -582,15 +557,6 @@ pub const LeaderElector = struct {
         }
     }
 
-    // Helpers
-    fn setObservedResourceVersion(self: *LeaderElector, new_rv: []const u8) void {
-        const new_copy = self.allocator.dupe(u8, new_rv) catch return;
-        if (self.observed_resource_version) |old| {
-            self.allocator.free(old);
-        }
-        self.observed_resource_version = new_copy;
-    }
-
     /// Returns `true` when `spec.renewTime` (or `spec.acquireTime` as a
     /// fallback) is at least `lease_duration_s` ago on the wall clock.
     /// Missing or unparseable timestamps return `true`; a reference in
@@ -662,7 +628,7 @@ test "renewalDeadlineExceeded: true when no observation" {
     defer client.deinit(std.testing.io);
 
     // Act
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -682,7 +648,7 @@ test "renewalDeadlineExceeded: false within duration" {
     defer client.deinit(std.testing.io);
 
     // Act
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -704,7 +670,7 @@ test "renewalDeadlineExceeded: true past duration" {
     defer client.deinit(std.testing.io);
 
     // Act
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -762,7 +728,7 @@ test "interruptibleSleep wakes on stop" {
     defer client.deinit(std.testing.io);
 
     // Act
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -807,7 +773,7 @@ test "stop without start is safe" {
     defer client.deinit(std.testing.io);
 
     // Act
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -829,7 +795,7 @@ test "isLeader state check" {
     defer client.deinit(std.testing.io);
 
     // Act
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -859,7 +825,7 @@ test "healthCheck: reflects isLeader state" {
     var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
     defer client.deinit(std.testing.io);
 
-    var elector = LeaderElector.init(testing.allocator, &client, client.context(), .{
+    var elector = LeaderElector.init(&client, client.context(), .{
         .lease_name = "test",
         .lease_namespace = "default",
         .identity = "pod-1",
@@ -875,27 +841,4 @@ test "healthCheck: reflects isLeader state" {
     elector.state.raw = .leading;
     try testing.expect(check.check_fn(check.ctx, std.testing.io));
     elector.state.raw = .idle;
-}
-
-test "setObservedResourceVersion: OOM on dupe does not corrupt state" {
-    // Arrange
-    var fa = std.testing.FailingAllocator.init(testing.allocator, .{});
-    var client = try Client.init(testing.allocator, std.testing.io, "http://127.0.0.1:8001", .{});
-    defer client.deinit(std.testing.io);
-
-    // Act
-    var elector = LeaderElector.init(fa.allocator(), &client, client.context(), .{
-        .lease_name = "test",
-        .lease_namespace = "default",
-        .identity = "pod-1",
-        .on_started_leading = dummyOnStarted,
-        .on_stopped_leading = dummyOnStopped,
-    });
-    defer elector.deinit();
-
-    // Assert
-    fa.fail_index = fa.alloc_index;
-    elector.setObservedResourceVersion("12345");
-
-    try testing.expect(elector.observed_resource_version == null);
 }
