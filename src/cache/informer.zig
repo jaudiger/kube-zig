@@ -38,6 +38,9 @@ pub fn EventHandler(comptime T: type) type {
 
         /// Create a handler from a typed context pointer.
         /// Each callback receives the context as its first argument.
+        ///
+        /// The `ctx` pointer is borrowed. Callers MUST keep the pointee
+        /// valid until the owning `Informer.run` loop has returned.
         pub fn fromTypedCtx(comptime Ctx: type, ctx: *Ctx, comptime fns: struct {
             on_add: ?*const fn (c: *Ctx, io: std.Io, obj: *const T, is_initial_list: bool) void = null,
             on_update: ?*const fn (c: *Ctx, io: std.Io, old: *const T, new: *const T) void = null,
