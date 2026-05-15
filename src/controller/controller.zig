@@ -30,6 +30,7 @@ const metrics_mod = @import("../util/metrics.zig");
 const MetricsProvider = metrics_mod.MetricsProvider;
 const mapper_mod = @import("mapper.zig");
 const testing = std.testing;
+const MockTransport = @import("../client/mock.zig").MockTransport;
 
 /// Type-erased wrapper for secondary informers of different resource types.
 ///
@@ -764,14 +765,16 @@ test "Controller: init returns OutOfMemory without leaking" {
     const opts = Controller(TestResource).Options{
         .reconcile_fn = reconcile_fn,
     };
-    // Use a dummy client pointer. init() only stores it, never dereferences.
-    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+    var client = try mock.client(std.testing.io);
+    defer client.deinit(std.testing.io);
 
     // Act / Assert
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        const result = Controller(TestResource).init(failing.allocator(), std.testing.io, dummy_client, Context.background(), "default", opts);
+        const result = Controller(TestResource).init(failing.allocator(), std.testing.io, &client, Context.background(), "default", opts);
         if (result) |ok| {
             // Succeeded: all allocations passed; clean up and stop.
             var ctrl = ok;
@@ -793,8 +796,11 @@ test "Controller: watchSecondary registers secondaries and blocks hasSynced unti
             return .{};
         }
     }.reconcile);
-    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
-    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, dummy_client, Context.background(), "default", .{
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+    var client = try mock.client(std.testing.io);
+    defer client.deinit(std.testing.io);
+    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, &client, Context.background(), "default", .{
         .reconcile_fn = reconcile_fn,
     });
     defer {
@@ -803,10 +809,10 @@ test "Controller: watchSecondary registers secondaries and blocks hasSynced unti
     }
 
     // Act
-    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, &client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
     });
-    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, &client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
     });
 
@@ -827,7 +833,10 @@ test "Controller: watchSecondary returns OutOfMemory without leaking" {
             return .{};
         }
     }.reconcile);
-    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+    var client = try mock.client(std.testing.io);
+    defer client.deinit(std.testing.io);
 
     // Act / Assert: every OOM path in watchSecondary leaves no leak.
     var fail_index: usize = 0;
@@ -835,13 +844,13 @@ test "Controller: watchSecondary returns OutOfMemory without leaking" {
         var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
         const alloc = failing.allocator();
 
-        var ctrl = Controller(TestResource).init(alloc, std.testing.io, dummy_client, Context.background(), "default", .{
+        var ctrl = Controller(TestResource).init(alloc, std.testing.io, &client, Context.background(), "default", .{
             .reconcile_fn = reconcile_fn,
         }) catch |err| {
             try testing.expectEqual(error.OutOfMemory, err);
             continue;
         };
-        const ws_result = ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
+        const ws_result = ctrl.watchSecondary(std.testing.io, TestSecondary, &client, "default", .{
             .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "primary"),
         });
         ctrl.cancel(std.testing.io);
@@ -865,15 +874,18 @@ test "Controller: secondary handler enqueues primary key on all event types" {
             return .{};
         }
     }.reconcile);
-    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
-    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, dummy_client, Context.background(), "default", .{
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+    var client = try mock.client(std.testing.io);
+    defer client.deinit(std.testing.io);
+    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, &client, Context.background(), "default", .{
         .reconcile_fn = reconcile_fn,
     });
     defer {
         ctrl.cancel(std.testing.io);
         ctrl.deinit(std.testing.io);
     }
-    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, &client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "my-deploy"),
     });
 
@@ -928,8 +940,11 @@ test "Controller: secondary handler skips enqueue when conditions are not met" {
             return .{};
         }
     }.reconcile);
-    const dummy_client: *Client = @ptrFromInt(@alignOf(Client));
-    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, dummy_client, Context.background(), "default", .{
+    var mock = MockTransport.init(testing.allocator);
+    defer mock.deinit();
+    var client = try mock.client(std.testing.io);
+    defer client.deinit(std.testing.io);
+    var ctrl = try Controller(TestResource).init(testing.allocator, std.testing.io, &client, Context.background(), "default", .{
         .reconcile_fn = reconcile_fn,
     });
     defer {
@@ -937,11 +952,11 @@ test "Controller: secondary handler skips enqueue when conditions are not met" {
         ctrl.deinit(std.testing.io);
     }
     // First secondary: map_fn returns a key but the primary is not in the store.
-    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, &client, "default", .{
         .map_fn = mapper_mod.enqueueConst(TestSecondary, "default", "my-deploy"),
     });
     // Second secondary: map_fn returns null for objects without a matching ownerRef.
-    try ctrl.watchSecondary(std.testing.io, TestSecondary, dummy_client, "default", .{
+    try ctrl.watchSecondary(std.testing.io, TestSecondary, &client, "default", .{
         .map_fn = mapper_mod.enqueueOwner(TestSecondary, "Deployment"),
     });
 
