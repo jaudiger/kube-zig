@@ -910,26 +910,26 @@ test "Controller: secondary handler enqueues primary key on all event types" {
     // Act / Assert: on_add enqueues the mapped primary key.
     handler.onAdd(std.testing.io, &sec_obj, false);
     {
-        const key = (try ctrl.queue.get(std.testing.io)).?;
-        try testing.expectEqualStrings("default", key.namespace);
-        try testing.expectEqualStrings("my-deploy", key.name);
-        ctrl.queue.done(std.testing.io, key, .success);
+        var item = (try ctrl.queue.get(std.testing.io)).?;
+        try testing.expectEqualStrings("default", item.key.namespace);
+        try testing.expectEqualStrings("my-deploy", item.key.name);
+        item.done(std.testing.io, .success);
     }
 
     // Act / Assert: on_update enqueues the mapped primary key.
     handler.onUpdate(std.testing.io, &sec_obj, &sec_obj);
     {
-        const key = (try ctrl.queue.get(std.testing.io)).?;
-        try testing.expectEqualStrings("my-deploy", key.name);
-        ctrl.queue.done(std.testing.io, key, .success);
+        var item = (try ctrl.queue.get(std.testing.io)).?;
+        try testing.expectEqualStrings("my-deploy", item.key.name);
+        item.done(std.testing.io, .success);
     }
 
     // Act / Assert: on_delete enqueues the mapped primary key.
     handler.onDelete(std.testing.io, &sec_obj);
     {
-        const key = (try ctrl.queue.get(std.testing.io)).?;
-        try testing.expectEqualStrings("my-deploy", key.name);
-        ctrl.queue.done(std.testing.io, key, .success);
+        var item = (try ctrl.queue.get(std.testing.io)).?;
+        try testing.expectEqualStrings("my-deploy", item.key.name);
+        item.done(std.testing.io, .success);
     }
 }
 

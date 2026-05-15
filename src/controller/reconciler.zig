@@ -197,15 +197,16 @@ pub const Reconciler = struct {
 
     fn workerLoop(self: *Reconciler, io: std.Io) void {
         while (true) {
-            const key = self.queue.get(io) catch |err| {
+            var item = self.queue.get(io) catch |err| {
                 self.logger.warn("work queue get failed", &.{
                     LogField.string("error", @errorName(err)),
                 });
                 continue;
             } orelse return; // null = shutdown
 
+            const key = item.key;
             var done_action: WorkQueue.DoneAction = .backoff;
-            defer self.queue.done(io, key, done_action);
+            defer item.done(io, done_action);
 
             self.metrics.active_workers.inc();
             defer self.metrics.active_workers.dec();
