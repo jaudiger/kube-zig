@@ -131,6 +131,26 @@ pub fn Controller(comptime T: type) type {
             };
         }
 
+        /// Closure state for the mapping event handler installed on a
+        /// secondary informer.
+        pub fn SecondaryMappingCtx(comptime S: type) type {
+            return struct {
+                queue: *WorkQueue,
+                map_fn: mapper_mod.MapFn(S),
+                primary_store: StoreT.View,
+                allocator: std.mem.Allocator,
+            };
+        }
+
+        /// Heap-allocated co-owner of a secondary `Informer(S)` and its
+        /// mapping context.
+        pub fn SecondaryWrapper(comptime S: type) type {
+            return struct {
+                informer: informer_mod.Informer(S),
+                ctx: SecondaryMappingCtx(S),
+            };
+        }
+
         /// Create a new controller for resource type `T` in the given namespace.
         pub fn init(
             allocator: std.mem.Allocator,
@@ -244,41 +264,30 @@ pub fn Controller(comptime T: type) type {
             std.debug.assert(self.informer_thread == null);
             const InformerS = informer_mod.Informer(S);
             const EventHandlerS = informer_mod.EventHandler(S);
+            const MappingCtx = SecondaryMappingCtx(S);
+            const Wrapper = SecondaryWrapper(S);
 
-            // Context struct for the mapping event handler.
-            const MappingCtx = struct {
-                queue: *WorkQueue,
-                map_fn: mapper_mod.MapFn(S),
-                primary_store: StoreT.View,
-                allocator: std.mem.Allocator,
-            };
+            const wrapper = try self.allocator.create(Wrapper);
+            errdefer self.allocator.destroy(wrapper);
 
-            // Heap-allocate the mapping context for pointer stability.
-            const mapping_ctx = try self.allocator.create(MappingCtx);
-            errdefer self.allocator.destroy(mapping_ctx);
-            mapping_ctx.* = .{
-                .queue = self.queue,
-                .map_fn = opts.map_fn,
-                .primary_store = self.informer.getStore(),
-                .allocator = self.allocator,
-            };
-
-            // Heap-allocate the secondary Informer(S).
-            const sec_informer = try self.allocator.create(InformerS);
-            errdefer {
-                sec_informer.deinit(io);
-                self.allocator.destroy(sec_informer);
-            }
-            sec_informer.* = InformerS.init(self.allocator, client, self.ctx, namespace, .{
+            wrapper.informer = InformerS.init(self.allocator, client, self.ctx, namespace, .{
                 .label_selector = opts.label_selector,
                 .field_selector = opts.field_selector,
                 .page_size = opts.page_size,
                 .watch_timeout_seconds = opts.watch_timeout_seconds,
                 .logger = self.logger,
             });
+            errdefer wrapper.informer.deinit(io);
+
+            wrapper.ctx = .{
+                .queue = self.queue,
+                .map_fn = opts.map_fn,
+                .primary_store = self.informer.getStore(),
+                .allocator = self.allocator,
+            };
 
             // Create the mapping event handler that maps S events to T keys.
-            const handler = EventHandlerS.fromTypedCtx(MappingCtx, mapping_ctx, .{
+            const handler = EventHandlerS.fromTypedCtx(MappingCtx, &wrapper.ctx, .{
                 .on_add = struct {
                     fn f(ctx: *MappingCtx, cb_io: std.Io, obj: *const S, _: bool) void {
                         if (ctx.map_fn(ctx.allocator, obj)) |key| {
@@ -320,38 +329,31 @@ pub fn Controller(comptime T: type) type {
                 }.f,
             });
 
-            try sec_informer.addEventHandler(handler);
+            try wrapper.informer.addEventHandler(handler);
 
-            // Build the type-erased vtable for this Informer(S).
+            // Build the type-erased vtable for this wrapper.
             const Impl = struct {
                 fn run(ptr: *anyopaque, vt_io: std.Io) InformerError!void {
-                    const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    return inf.run(vt_io);
+                    const w: *Wrapper = @ptrCast(@alignCast(ptr));
+                    return w.informer.run(vt_io);
                 }
                 fn stop(ptr: *anyopaque, vt_io: std.Io) void {
-                    const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    inf.stop(vt_io);
+                    const w: *Wrapper = @ptrCast(@alignCast(ptr));
+                    w.informer.stop(vt_io);
                 }
                 fn hasSynced(ptr: *anyopaque, vt_io: std.Io) bool {
-                    const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    return inf.hasSynced(vt_io);
+                    const w: *Wrapper = @ptrCast(@alignCast(ptr));
+                    return w.informer.hasSynced(vt_io);
                 }
                 fn deinitFn(ptr: *anyopaque, allocator: std.mem.Allocator, vt_io: std.Io) void {
-                    const inf: *InformerS = @ptrCast(@alignCast(ptr));
-                    // Mapping ctx is stored as the first handler's ctx pointer.
-                    if (inf.handlers.items.len > 0) {
-                        if (inf.handlers.items[0].ctx) |ctx_ptr| {
-                            const ctx: *MappingCtx = @ptrCast(@alignCast(ctx_ptr));
-                            allocator.destroy(ctx);
-                        }
-                    }
-                    inf.deinit(vt_io);
-                    allocator.destroy(inf);
+                    const w: *Wrapper = @ptrCast(@alignCast(ptr));
+                    w.informer.deinit(vt_io);
+                    allocator.destroy(w);
                 }
             };
 
             const si = SecondaryInformer{
-                .ptr = @ptrCast(sec_informer),
+                .ptr = @ptrCast(wrapper),
                 .vtable = &.{
                     .run = Impl.run,
                     .cancel = Impl.stop,
@@ -850,8 +852,9 @@ test "Controller: watchSecondary returns OutOfMemory without leaking" {
             try testing.expectEqual(error.OutOfMemory, err);
         }
     }
-    // At minimum: WorkQueue create, addEventHandler append, MappingCtx
-    // create, Informer(S) create, and secondary_informers append.
+    // At minimum: WorkQueue create, primary addEventHandler append,
+    // SecondaryWrapper create, secondary addEventHandler append, and
+    // secondary_informers append.
     try testing.expect(fail_index >= 4);
 }
 
@@ -887,9 +890,9 @@ test "Controller: secondary handler enqueues primary key on all event types" {
     );
     if (old_entry) |e| e.release();
 
-    const InformerS = informer_mod.Informer(TestSecondary);
-    const sec_inf: *InformerS = @ptrCast(@alignCast(ctrl.secondary_informers.items[0].ptr));
-    const handler = sec_inf.handlers.items[0];
+    const Wrapper = Controller(TestResource).SecondaryWrapper(TestSecondary);
+    const wrapper: *Wrapper = @ptrCast(@alignCast(ctrl.secondary_informers.items[0].ptr));
+    const handler = wrapper.informer.handlers.items[0];
     const sec_obj = TestSecondary{};
 
     // Act / Assert: on_add enqueues the mapped primary key.
@@ -942,9 +945,11 @@ test "Controller: secondary handler skips enqueue when conditions are not met" {
         .map_fn = mapper_mod.enqueueOwner(TestSecondary, "Deployment"),
     });
 
-    const InformerS = informer_mod.Informer(TestSecondary);
-    const h0 = (@as(*InformerS, @ptrCast(@alignCast(ctrl.secondary_informers.items[0].ptr)))).handlers.items[0];
-    const h1 = (@as(*InformerS, @ptrCast(@alignCast(ctrl.secondary_informers.items[1].ptr)))).handlers.items[0];
+    const Wrapper = Controller(TestResource).SecondaryWrapper(TestSecondary);
+    const w0: *Wrapper = @ptrCast(@alignCast(ctrl.secondary_informers.items[0].ptr));
+    const w1: *Wrapper = @ptrCast(@alignCast(ctrl.secondary_informers.items[1].ptr));
+    const h0 = w0.informer.handlers.items[0];
+    const h1 = w1.informer.handlers.items[0];
     const sec_obj = TestSecondary{};
 
     // Act
