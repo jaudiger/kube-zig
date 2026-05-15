@@ -70,7 +70,7 @@ pub const TransportResponse = struct {
     /// After this call, `body` is null and `deinit()` will not free it.
     /// Panics if body is already null.
     pub fn takeBody(self: *TransportResponse) []const u8 {
-        const b = self.body orelse unreachable;
+        const b = self.body orelse @panic("takeBody called with null body");
         self.body = null;
         return b;
     }

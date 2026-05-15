@@ -19,7 +19,9 @@ pub const SpanContext = tracing.SpanContext;
 /// Build a tree by calling `Context.withCancel`. When a source is cancelled
 /// its flag is set and every descendant's flag is also set (cascade).
 ///
-/// Callers MUST call `deinit` before a source is destroyed.
+/// Callers MUST call `deinit` before a source is destroyed. When a source
+/// is registered as a child via `Context.withCancel`, its parent source
+/// MUST remain valid until the child's `deinit` returns.
 pub const CancelSource = struct {
     done: std.atomic.Value(u32),
 
@@ -156,7 +158,8 @@ pub const Context = struct {
     /// new source or any ancestor source is canceled.
     ///
     /// Callers MUST call `child_cancel.deinit(io)` before destroying the
-    /// child source.
+    /// child source, and the parent source (`self.cancel`) MUST remain
+    /// valid until that `deinit` returns.
     pub fn withCancel(self: Context, io: std.Io, child_cancel: *CancelSource) Context {
         const parent_cs = self.cancel;
         parent_cs.mu.lockUncancelable(io);
