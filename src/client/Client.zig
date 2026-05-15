@@ -1510,10 +1510,7 @@ pub const Client = struct {
         errdefer allocator.free(owned_url);
 
         const tp = try allocator.create(StdHttpTransport);
-        errdefer {
-            tp.http_client.deinit();
-            allocator.destroy(tp);
-        }
+        errdefer allocator.destroy(tp);
 
         tp.* = .{
             .http_client = .{ .allocator = allocator, .io = io },
@@ -1528,6 +1525,7 @@ pub const Client = struct {
             .logger = options.logger.withScope("transport"),
             .self_allocator = allocator,
         };
+        errdefer tp.http_client.deinit();
 
         if (options.pool_size) |size| {
             tp.http_client.connection_pool.free_size = size;

@@ -271,21 +271,22 @@ pub fn Controller(comptime T: type) type {
             const wrapper = try self.allocator.create(Wrapper);
             errdefer self.allocator.destroy(wrapper);
 
-            wrapper.informer = InformerS.init(self.allocator, client, self.ctx, namespace, .{
-                .label_selector = opts.label_selector,
-                .field_selector = opts.field_selector,
-                .page_size = opts.page_size,
-                .watch_timeout_seconds = opts.watch_timeout_seconds,
-                .logger = self.logger,
-            });
-            errdefer wrapper.informer.deinit(io);
-
-            wrapper.ctx = .{
-                .queue = self.queue,
-                .map_fn = opts.map_fn,
-                .primary_store = self.informer.getStore(),
-                .allocator = self.allocator,
+            wrapper.* = .{
+                .informer = InformerS.init(self.allocator, client, self.ctx, namespace, .{
+                    .label_selector = opts.label_selector,
+                    .field_selector = opts.field_selector,
+                    .page_size = opts.page_size,
+                    .watch_timeout_seconds = opts.watch_timeout_seconds,
+                    .logger = self.logger,
+                }),
+                .ctx = .{
+                    .queue = self.queue,
+                    .map_fn = opts.map_fn,
+                    .primary_store = self.informer.getStore(),
+                    .allocator = self.allocator,
+                },
             };
+            errdefer wrapper.informer.deinit(io);
 
             // Create the mapping event handler that maps S events to T keys.
             const handler = EventHandlerS.fromTypedCtx(MappingCtx, &wrapper.ctx, .{
