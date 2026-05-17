@@ -72,7 +72,7 @@ pub const DiscoveryV1EndpointSlice = struct {
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// endpoints is a list of unique endpoints in this slice. Each slice may include a maximum of 1000 endpoints.
-    endpoints: []const DiscoveryV1Endpoint,
+    endpoints: ?[]const DiscoveryV1Endpoint = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
     /// Standard object's metadata.

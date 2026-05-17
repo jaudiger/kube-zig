@@ -29,7 +29,7 @@ pub const SchedulingV1PriorityClass = struct {
     /// preemptionPolicy is the Policy for preempting pods with lower priority. One of Never, PreemptLowerPriority. Defaults to PreemptLowerPriority if unset.
     preemptionPolicy: ?[]const u8 = null,
     /// value represents the integer value of this priority class. This is the actual priority that pods receive when they have the name of this class in their pod spec.
-    value: i32,
+    value: ?i32 = null,
 };
 
 /// PriorityClassList is a collection of priority classes.

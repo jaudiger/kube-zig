@@ -170,6 +170,8 @@ pub const MetaV1ListMeta = struct {
     resourceVersion: ?[]const u8 = null,
     /// Deprecated: selfLink is a legacy read-only field that is no longer populated by the system.
     selfLink: ?[]const u8 = null,
+    /// shardInfo is set when the list is a filtered subset of the full collection, as selected by a shard selector on the request. It echoes back the selector so clients can verify which shard they received and merge sharded responses. Clients should not cache sharded list responses as a full representation of the collection.
+    shardInfo: ?MetaV1ShardInfo = null,
 };
 
 /// ManagedFieldsEntry is a workflow-id, a FieldSet and the group version of the resource that the fieldset applies to.
@@ -260,6 +262,12 @@ pub const MetaV1ServerAddressByClientCIDR = struct {
     clientCIDR: []const u8,
     /// Address of this server, suitable for a client that matches the above CIDR. This can be a hostname, hostname:port, IP or IP:port.
     serverAddress: []const u8,
+};
+
+/// ShardInfo describes the shard selector that was applied to produce a list response. Its presence on a list response indicates the list is a filtered subset.
+pub const MetaV1ShardInfo = struct {
+    /// selector is the shard selector string from the request, echoed back so clients can verify which shard they received and merge responses from multiple shards.
+    selector: []const u8,
 };
 
 /// Status is a return value for calls that don't return other objects.
