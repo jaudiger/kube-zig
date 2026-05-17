@@ -102,6 +102,8 @@ pub const ResourceV1Device = struct {
     consumesCounters: ?[]const ResourceV1DeviceCounterConsumption = null,
     /// Name is unique identifier among all devices managed by the driver in the pool. It must be a DNS label.
     name: []const u8,
+    /// NodeAllocatableResourceMappings defines the mapping of node resources that are managed by the DRA driver exposing this device. This includes resources currently reported in v1.Node `status.allocatable` that are not extended resources (see https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#extended-resources). Examples include "cpu", "memory", "ephemeral-storage", and hugepages. In addition to standard requests made through the Pod `spec`, these resources can also be requested through claims and allocated by the DRA driver. For example, a CPU DRA driver might allocate exclusive CPUs or auxiliary node memory dependencies of an accelerator device. The keys of this map are the node-allocatable resource names (e.g., "cpu", "memory"). Extended resource names are not permitted as keys.
+    nodeAllocatableResourceMappings: ?json.ArrayHashMap(ResourceV1NodeAllocatableResourceMapping) = null,
     /// NodeName identifies the node where the device is available.
     nodeName: ?[]const u8 = null,
     /// NodeSelector defines the nodes where the device is available.
@@ -132,12 +134,20 @@ pub const ResourceV1DeviceAllocationResult = struct {
 pub const ResourceV1DeviceAttribute = struct {
     /// BoolValue is a true/false value.
     bool: ?bool = null,
+    /// BoolValues is a non-empty list of true/false values.
+    bools: ?[]const bool = null,
     /// IntValue is a number.
     int: ?i64 = null,
+    /// IntValues is a non-empty list of numbers.
+    ints: ?[]const i64 = null,
     /// StringValue is a string. Must not be longer than 64 characters.
     string: ?[]const u8 = null,
+    /// StringValues is a non-empty list of strings. Each string must not be longer than 64 characters.
+    strings: ?[]const []const u8 = null,
     /// VersionValue is a semantic version according to semver.org spec 2.0.0. Must not be longer than 64 characters.
     version: ?[]const u8 = null,
+    /// VersionValues is a non-empty list of semantic versions according to semver.org spec 2.0.0. Each version string must not be longer than 64 characters.
+    versions: ?[]const []const u8 = null,
 };
 
 /// DeviceCapacity describes a quantity associated with a device.
@@ -297,7 +307,7 @@ pub const ResourceV1DeviceTaint = struct {
     effect: []const u8,
     /// The taint key to be applied to a device. Must be a label name.
     key: []const u8,
-    /// TimeAdded represents the time at which the taint was added. Added automatically during create or update if not set.
+    /// TimeAdded represents the time at which the taint was added or (only in a DeviceTaintRule) the effect was modified. Added automatically during create or update if not set.
     timeAdded: ?meta_v1.MetaV1Time = null,
     /// The taint value corresponding to the taint key. Must be a label value.
     value: ?[]const u8 = null,
@@ -343,6 +353,14 @@ pub const ResourceV1NetworkDeviceData = struct {
     interfaceName: ?[]const u8 = null,
     /// IPs lists the network addresses assigned to the device's network interface. This can include both IPv4 and IPv6 addresses. The IPs are in the CIDR notation, which includes both the address and the associated subnet mask. e.g.: "192.0.2.5/24" for IPv4 and "2001:db8::5/64" for IPv6.
     ips: ?[]const []const u8 = null,
+};
+
+/// NodeAllocatableResourceMapping defines the translation between the DRA device/capacity units requested to the corresponding quantity of the node allocatable resource.
+pub const ResourceV1NodeAllocatableResourceMapping = struct {
+    /// AllocationMultiplier is used as a multiplier for the allocated device count or the allocated capacity in the claim. It defaults to 1 if not specified. How the field is used also depends on whether `capacityKey` is set. 1.  If `capacityKey` is NOT set: `allocationMultiplier` multiplies the device count allocated to the claim.
+    allocationMultiplier: ?api_resource.ApiResourceQuantity = null,
+    /// CapacityKey references a capacity name defined as a key in the `spec.devices[*].capacity` map. When this field is set, the value associated with this key in the `status.allocation.devices.results[*].consumedCapacity` map (for a specific claim allocation) determines the base quantity for the node allocatable resource. If `allocationMultiplier` is also set, it is multiplied with the base quantity. For example, if `spec.devices[*].capacity` has an entry "dra.example.com/memory": "128Gi", and this field is set to "dra.example.com/memory", then for a claim allocation that consumes { "dra.example.com/memory": "4Gi" } the base quantity for the node allocatable resource mapping will be "4Gi", and `allocationMultiplier` should be omitted or set to "1".
+    capacityKey: ?[]const u8 = null,
 };
 
 /// OpaqueDeviceConfiguration contains configuration parameters for a driver in a format defined by the driver vendor.

@@ -33,7 +33,7 @@ pub const AutoscalingV1HorizontalPodAutoscaler = struct {
     /// Standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec defines the behaviour of autoscaler. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status.
-    spec: ?AutoscalingV1HorizontalPodAutoscalerSpec = null,
+    spec: AutoscalingV1HorizontalPodAutoscalerSpec,
     /// status is the current information about the autoscaler.
     status: ?AutoscalingV1HorizontalPodAutoscalerStatus = null,
 };

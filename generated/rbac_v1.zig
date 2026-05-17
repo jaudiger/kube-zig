@@ -166,7 +166,7 @@ pub const RbacV1RoleList = struct {
 /// RoleRef contains information that points to the role being used
 pub const RbacV1RoleRef = struct {
     /// APIGroup is the group for the resource being referenced
-    apiGroup: []const u8,
+    apiGroup: ?[]const u8 = null,
     /// Kind is the type of resource being referenced
     kind: []const u8,
     /// Name is the name of resource being referenced

@@ -23,7 +23,7 @@ pub const NetworkingV1beta1IPAddress = struct {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec is the desired state of the IPAddress. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?NetworkingV1beta1IPAddressSpec = null,
+    spec: NetworkingV1beta1IPAddressSpec,
 };
 
 /// IPAddressList contains a list of IPAddress.
