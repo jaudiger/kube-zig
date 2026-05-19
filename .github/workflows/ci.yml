@@ -36,35 +36,35 @@ jobs:
             workflows:
               - '.github/workflows/**'
 
-  lint-zig:
-    needs: changes
-    if: needs.changes.outputs.zig == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-zig.yml@01ae1180108c78f09cb34eed8d9e97dacf2083a9
-    with:
-      zig-version: "0.16.0"
-
   build-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/build-zig.yml@01ae1180108c78f09cb34eed8d9e97dacf2083a9
+    uses: jaudiger/reusable-workflows/.github/workflows/build-zig.yml@4aef3115afe05a19785b3e14970ecd4f400cc457
+    with:
+      zig-version: "0.16.0"
+
+  lint-zig:
+    needs: changes
+    if: needs.changes.outputs.zig == 'true'
+    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-zig.yml@4aef3115afe05a19785b3e14970ecd4f400cc457
     with:
       zig-version: "0.16.0"
 
   test-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/tests-zig.yml@01ae1180108c78f09cb34eed8d9e97dacf2083a9
+    uses: jaudiger/reusable-workflows/.github/workflows/tests-zig.yml@4aef3115afe05a19785b3e14970ecd4f400cc457
     with:
       zig-version: "0.16.0"
 
   lint-actions:
     needs: changes
     if: needs.changes.outputs.workflows == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-github-actions.yml@01ae1180108c78f09cb34eed8d9e97dacf2083a9
+    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-github-actions.yml@4aef3115afe05a19785b3e14970ecd4f400cc457
 
   ci:
     if: always()
-    needs: [lint-zig, build-zig, test-zig, lint-actions]
+    needs: [build-zig, lint-zig, test-zig, lint-actions]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required checks passed
