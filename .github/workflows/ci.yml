@@ -32,6 +32,7 @@ jobs:
               - '**/*.zig'
               - 'build.zig.zon'
               - 'test/fixtures/**'
+              - '.github/workflows/ci.yml'
             workflows:
               - '.github/workflows/**'
 
