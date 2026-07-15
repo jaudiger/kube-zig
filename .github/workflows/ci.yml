@@ -39,28 +39,28 @@ jobs:
   build-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/build-zig.yml@16364121c482897e29680101ea22b8a3ea472c25
+    uses: jaudiger/reusable-workflows/.github/workflows/build-zig.yml@8104be620dc861697cf02b53d8fe3119edece0b5
     with:
       zig-version: "0.16.0"
 
   lint-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-zig.yml@16364121c482897e29680101ea22b8a3ea472c25
+    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-zig.yml@8104be620dc861697cf02b53d8fe3119edece0b5
     with:
       zig-version: "0.16.0"
 
   test-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/tests-zig.yml@16364121c482897e29680101ea22b8a3ea472c25
+    uses: jaudiger/reusable-workflows/.github/workflows/tests-zig.yml@8104be620dc861697cf02b53d8fe3119edece0b5
     with:
       zig-version: "0.16.0"
 
   lint-actions:
     needs: changes
     if: needs.changes.outputs.workflows == 'true'
-    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-github-actions.yml@16364121c482897e29680101ea22b8a3ea472c25
+    uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-github-actions.yml@8104be620dc861697cf02b53d8fe3119edece0b5
 
   ci:
     if: always()
