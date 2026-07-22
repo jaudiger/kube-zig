@@ -273,7 +273,7 @@ pub const ControllerManager = struct {
             io.futexWake(u32, &self.stop_cond_epoch.raw, std.math.maxInt(u32));
         }
 
-        // Set the client's shutdown flag.  This propagates to all
+        // Set the client's shutdown flag. This propagates to all
         // contexts derived from client.context(), unblocking any thread
         // in interruptibleSleep() or ctx.check().
         if (self.client) |c| c.shutdown(io);

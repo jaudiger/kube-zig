@@ -231,7 +231,7 @@ const ReconcileCtx = struct {
         }
 
         // Only call the API-server GET+PUT when the cached object lacks the
-        // finalizer.  On steady-state re-reconciles the finalizer is present in
+        // finalizer. On steady-state re-reconciles the finalizer is present in
         // the cache, so this avoids a round-trip every cycle.
         if (!kube_zig.finalizers.hasFinalizer(&meta, finalizer_name)) {
             kube_zig.finalizers.ensureFinalizer(EphemeralEnv, self.io, api, self.allocator, env_name, finalizer_name) catch |err| {
@@ -254,7 +254,7 @@ const ReconcileCtx = struct {
         const ttl_seconds = ttl_minutes * 60;
 
         // Derive creation time from the immutable creationTimestamp set by the
-        // API server.  No annotation PATCH needed, which avoids a CR write that
+        // API server. No annotation PATCH needed, which avoids a CR write that
         // would generate a watch event and trigger a dirty-flag re-enqueue.
         const created_epoch = kube_zig.time.parseTimestamp(meta.creationTimestamp orelse "") orelse {
             self.logger.warn("failed to parse creationTimestamp", &.{LogField.string("name", env_name)});
@@ -306,7 +306,7 @@ const ReconcileCtx = struct {
 
         const current_phase = if (obj.status) |s| s.phase orelse "" else "";
 
-        // Already fully provisioned, nothing to do.  Returning without
+        // Already fully provisioned, nothing to do. Returning without
         // any API calls avoids generating watch MODIFY events on the CR,
         // which would set the work-queue dirty flag and bypass the
         // requeue_after delay.

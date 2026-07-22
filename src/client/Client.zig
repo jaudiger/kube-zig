@@ -133,7 +133,7 @@ pub const StreamState = struct {
     }
 
     /// Shut down the underlying socket, causing any blocked `read()` to
-    /// return immediately.  Safe to call from another thread because the fd
+    /// return immediately. Safe to call from another thread because the fd
     /// remains valid for the owning thread's subsequent `deinit()`.
     pub fn interrupt(self: *StreamState, io: std.Io) void {
         if (self.request.connection) |conn| {

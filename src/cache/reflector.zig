@@ -531,7 +531,7 @@ pub fn Reflector(comptime T: type) type {
                 if (list.metadata) |m| {
                     const rv = if (@hasField(@TypeOf(m), "resourceVersion")) m.resourceVersion else null;
                     // Kubernetes returns continue:"" (empty string) when there are
-                    // no more pages.  Normalize to null so callers can simply check
+                    // no more pages. Normalize to null so callers can simply check
                     // for null to detect the last page.
                     const ct: ?[]const u8 = blk: {
                         if (!@hasField(@TypeOf(m), "continue")) break :blk null;
