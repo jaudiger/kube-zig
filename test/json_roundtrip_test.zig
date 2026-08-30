@@ -45,7 +45,7 @@ test "Deployment: parse fixture round-trip" {
 
     // Act
     const deploy = parsed.value;
-    const containers = deploy.spec.?.template.spec.?.containers;
+    const containers = deploy.spec.template.spec.?.containers;
     const port = containers[0].ports.?[0];
 
     // Assert
@@ -53,7 +53,7 @@ test "Deployment: parse fixture round-trip" {
     try testing.expectEqualStrings("Deployment", deploy.kind.?);
     try testing.expectEqualStrings("nginx-deployment", deploy.metadata.?.name.?);
     try testing.expectEqualStrings("default", deploy.metadata.?.namespace.?);
-    try testing.expectEqual(@as(?i32, 3), deploy.spec.?.replicas);
+    try testing.expectEqual(@as(?i32, 3), deploy.spec.replicas);
     try testing.expectEqual(@as(usize, 1), containers.len);
     try testing.expectEqualStrings("nginx", containers[0].name);
     try testing.expectEqualStrings("nginx:1.25", containers[0].image.?);
@@ -120,7 +120,7 @@ test "DeploymentList: parse fixture round-trip" {
     try testing.expectEqual(@as(usize, 1), list.items.len);
     try testing.expectEqualStrings("67890", list.metadata.?.resourceVersion.?);
     try testing.expectEqualStrings("my-deploy", deploy.metadata.?.name.?);
-    try testing.expectEqual(@as(?i32, 2), deploy.spec.?.replicas);
+    try testing.expectEqual(@as(?i32, 2), deploy.spec.replicas);
 }
 
 // ServiceList round-trip

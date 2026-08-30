@@ -41,7 +41,7 @@ const pod_json =
 
 /// Minimal deployment JSON for create/update responses.
 const deployment_json =
-    \\{"metadata":{"name":"test-deploy","namespace":"default","resourceVersion":"50"}}
+    \\{"metadata":{"name":"test-deploy","namespace":"default","resourceVersion":"50"},"spec":{"selector":{},"template":{}}}
 ;
 
 /// 404 Not Found JSON error response.
@@ -162,6 +162,10 @@ test "Api(AppsV1Deployment).create: sends to correct named-group path" {
     const deploys = Api(k8s.AppsV1Deployment).init(&c, c.context(), "default");
     const deploy = k8s.AppsV1Deployment{
         .metadata = .{ .name = "test-deploy", .namespace = "default" },
+        .spec = .{
+            .selector = .{},
+            .template = .{},
+        },
     };
 
     const result = try expectOk(try deploys.create(std.testing.io, deploy, .{}));
@@ -962,6 +966,10 @@ test "Api(AppsV1Deployment).apply: named group has apiVersion apps/v1" {
     const deploys = Api(k8s.AppsV1Deployment).init(&c, c.context(), "default");
     const body = k8s.AppsV1Deployment{
         .metadata = .{ .name = "test-deploy" },
+        .spec = .{
+            .selector = .{},
+            .template = .{},
+        },
     };
 
     // Act
