@@ -26,8 +26,7 @@ pub const HealthCheck = health_check_mod.HealthCheck;
 pub const ProbeServer = struct {
     allocator: std.mem.Allocator,
     server: net.Server,
-    thread: ?std.Thread,
-    stop_flag: std.atomic.Value(bool),
+    task: ?std.Io.Future(std.Io.Cancelable!void),
     liveness_checks: std.ArrayList(HealthCheck),
     readiness_checks: std.ArrayList(HealthCheck),
     read_timeout_ms: u32,
@@ -51,8 +50,7 @@ pub const ProbeServer = struct {
         return .{
             .allocator = allocator,
             .server = server,
-            .thread = null,
-            .stop_flag = std.atomic.Value(bool).init(false),
+            .task = null,
             .liveness_checks = .empty,
             .readiness_checks = .empty,
             .read_timeout_ms = opts.read_timeout_ms,
@@ -70,29 +68,25 @@ pub const ProbeServer = struct {
         try self.readiness_checks.append(self.allocator, check);
     }
 
-    /// Spawn the background accept-loop thread.
+    /// Start the cancelable accept-loop task.
     pub fn start(self: *ProbeServer, io: std.Io) !void {
-        self.thread = try std.Thread.spawn(.{}, acceptLoop, .{ self, io });
+        if (self.closed) return error.Closed;
+        if (self.task != null) return error.AlreadyStarted;
+        self.task = try io.concurrent(acceptLoop, .{ self, io });
     }
 
-    /// Signal the accept loop to stop and join the thread.
+    /// Cancel the accept-loop task and wait for it to finish.
+    /// Must be called by the owner of the task lifecycle.
     pub fn stop(self: *ProbeServer, io: std.Io) void {
-        self.stop_flag.store(true, .release);
-        // Closing the listening socket causes accept() to fail; the loop
-        // checks stop_flag and exits.
-        if (!self.closed) {
-            self.server.deinit(io);
-            self.closed = true;
-        }
-        if (self.thread) |t| {
-            t.join();
-            self.thread = null;
+        if (self.task) |*task| {
+            task.cancel(io) catch {};
+            self.task = null;
         }
     }
 
-    /// Release all resources. Must call stop() first if started.
+    /// Stop the server and release all resources.
     pub fn deinit(self: *ProbeServer, io: std.Io) void {
-        std.debug.assert(self.thread == null);
+        self.stop(io);
         if (!self.closed) {
             self.server.deinit(io);
             self.closed = true;
@@ -101,11 +95,11 @@ pub const ProbeServer = struct {
         self.readiness_checks.deinit(self.allocator);
     }
 
-    fn acceptLoop(self: *ProbeServer, io: std.Io) void {
-        while (!self.stop_flag.load(.acquire)) {
-            var stream = self.server.accept(io) catch {
-                if (self.stop_flag.load(.acquire)) return;
-                continue;
+    fn acceptLoop(self: *ProbeServer, io: std.Io) std.Io.Cancelable!void {
+        while (true) {
+            var stream = self.server.accept(io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
             };
             defer stream.close(io);
             setReadTimeout(stream, self.read_timeout_ms);
