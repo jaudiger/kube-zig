@@ -9,7 +9,7 @@ const meta_v1 = @import("meta_v1.zig");
 pub const AuthenticationV1BoundObjectReference = struct {
     /// apiVersion is API version of the referent.
     apiVersion: ?[]const u8 = null,
-    /// kind of the referent. Valid kinds are 'Pod' and 'Secret'.
+    /// kind of the referent. Valid kinds are 'Pod', 'Secret', 'Node', 'ValidatingWebhookConfiguration', and 'MutatingWebhookConfiguration'.
     kind: ?[]const u8 = null,
     /// name of the referent.
     name: ?[]const u8 = null,
@@ -60,6 +60,8 @@ pub const AuthenticationV1TokenRequest = struct {
 
 /// TokenRequestSpec contains client provided parameters of a token request.
 pub const AuthenticationV1TokenRequestSpec = struct {
+    /// attestations is a map of well-known keys to string-slice values. The values for each key have a specific semantic meaning, which is documented on the key definition. Requesters of tokens may ask the Kubernetes API Server to attest to certain claims. The API Server may perform authorization checks depending on the key of this map.
+    attestations: ?json.ArrayHashMap([]const []const u8) = null,
     /// audiences are the intendend audiences of the token. A recipient of a token must identify themself with an identifier in the list of audiences of the token, and otherwise should reject the token. A token issued for multiple audiences may be used to authenticate against any of the audiences listed but implies a high degree of trust between the target audiences.
     audiences: ?[]const []const u8 = null,
     /// boundObjectRef is a reference to an object that the token will be bound to. The token will only be valid for as long as the bound object exists. NOTE: The API server's TokenReview endpoint will validate the BoundObjectRef, but other audiences may not. Keep ExpirationSeconds small if you want prompt revocation.

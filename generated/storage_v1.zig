@@ -22,7 +22,7 @@ pub const StorageV1CSIDriver = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object metadata. metadata.Name indicates the name of the CSI driver that this object refers to; it MUST be the same name returned by the CSI GetPluginName() call for that driver. The driver name must be 63 characters or less, beginning and ending with an alphanumeric character ([a-z0-9A-Z]) with dashes (-), dots (.), and alphanumerics between. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. metadata.Name indicates the name of the CSI driver that this object refers to; it MUST be the same name returned by the CSI GetPluginName() call for that driver. The driver name must be 63 characters or less, beginning and ending with an alphanumeric character ([a-z0-9A-Z]) with dashes (-), dots (.), and alphanumerics between. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec represents the specification of the CSI Driver.
     spec: StorageV1CSIDriverSpec,
@@ -50,7 +50,7 @@ pub const StorageV1CSIDriverSpec = struct {
     nodeAllocatableUpdatePeriodSeconds: ?i64 = null,
     /// podInfoOnMount indicates this CSI volume driver requires additional pod information (like podName, podUID, etc.) during mount operations, if set to true. If set to false, pod information will not be passed on mount. Default is false.
     podInfoOnMount: ?bool = null,
-    /// PreventPodSchedulingIfMissing indicates that the CSI driver wants to prevent pod scheduling if the CSI driver on the node is missing.
+    /// preventPodSchedulingIfMissing indicates that the CSI driver wants to prevent pod scheduling if the CSI driver on the node is missing.
     preventPodSchedulingIfMissing: ?bool = null,
     /// requiresRepublish indicates the CSI driver wants `NodePublishVolume` being periodically called to reflect any possible change in the mounted volume. This field defaults to false.
     requiresRepublish: ?bool = null,
@@ -81,10 +81,12 @@ pub const StorageV1CSINode = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. metadata.name must be the Kubernetes node name.
+    /// metadata is the standard object metadata. metadata.name must be the Kubernetes node name.
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec is the specification of CSINode
     spec: StorageV1CSINodeSpec,
+    /// status contains health and status information for the node's storage.
+    status: ?StorageV1CSINodeStatus = null,
 };
 
 /// CSINodeDriver holds information about the specification of one CSI driver installed on a node
@@ -117,6 +119,12 @@ pub const StorageV1CSINodeSpec = struct {
     drivers: []const StorageV1CSINodeDriver,
 };
 
+/// CSINodeStatus contains health and status information for storage on a node.
+pub const StorageV1CSINodeStatus = struct {
+    /// storageHealth contains backend health reports for CSI drivers registered on the node.
+    storageHealth: ?[]const StorageV1StorageHealth = null,
+};
+
 /// CSIStorageCapacity stores the result of one CSI GetCapacity call. For a given StorageClass, this describes the available capacity in a particular topology segment.  This can be used when considering where to instantiate new PersistentVolumes.
 pub const StorageV1CSIStorageCapacity = struct {
     pub const resource_meta = .{
@@ -136,7 +144,7 @@ pub const StorageV1CSIStorageCapacity = struct {
     kind: ?[]const u8 = null,
     /// maximumVolumeSize is the value reported by the CSI driver in its GetCapacityResponse for a GetCapacityRequest with topology and parameters that match the previous fields.
     maximumVolumeSize: ?api_resource.ApiResourceQuantity = null,
-    /// Standard object's metadata. The name has no particular meaning. It must be a DNS subdomain (dots allowed, 253 characters). To ensure that there are no conflicts with other CSI drivers on the cluster, the recommendation is to use csisc-<uuid>, a generated name, or a reverse-domain name which ends with the unique CSI driver name.
+    /// metadata is the standard object metadata. The name has no particular meaning. It must be a DNS subdomain (dots allowed, 253 characters). To ensure that there are no conflicts with other CSI drivers on the cluster, the recommendation is to use csisc-<uuid>, a generated name, or a reverse-domain name which ends with the unique CSI driver name.
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// nodeTopology defines which nodes have access to the storage for which capacity was reported. If not set, the storage is not accessible from any node in the cluster. If empty, the storage is accessible from all nodes. This field is immutable.
     nodeTopology: ?meta_v1.MetaV1LabelSelector = null,
@@ -175,7 +183,7 @@ pub const StorageV1StorageClass = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// mountOptions controls the mountOptions for dynamically provisioned PersistentVolumes of this storage class. e.g. ["ro", "soft"]. Not validated - mount of the PVs will simply fail if one is invalid.
     mountOptions: ?[]const []const u8 = null,
@@ -201,6 +209,30 @@ pub const StorageV1StorageClassList = struct {
     metadata: ?meta_v1.MetaV1ListMeta = null,
 };
 
+/// StorageHealth contains storage backend health reported by a CSI driver on a node.
+pub const StorageV1StorageHealth = struct {
+    /// healthConditions are the adverse storage backend conditions reported by the CSI driver. At most 16 conditions may be reported.
+    healthConditions: ?[]const StorageV1StorageHealthCondition = null,
+    /// name is the CSI driver name, matching CSINodeDriver.name.
+    name: []const u8,
+};
+
+/// StorageHealthCondition represents an adverse health condition reported by a CSI driver for its storage backend on a node.
+pub const StorageV1StorageHealthCondition = struct {
+    /// accessMode is the access mode affected. Nil means all access modes are affected.
+    accessMode: ?[]const u8 = null,
+    /// lastTransitionTime is when this condition first appeared at its current state.
+    lastTransitionTime: ?meta_v1.MetaV1Time = null,
+    /// message is a human-readable description. Maximum permitted length of a message is 1024 characters.
+    message: ?[]const u8 = null,
+    /// reason is a brief CamelCase machine-parseable reason. Maximum permitted length of a reason is 256 characters.
+    reason: []const u8,
+    /// status is the health status category. One of "StorageUnreachable", "StorageDegraded".
+    status: []const u8,
+    /// volumeMode is the volume mode affected. Nil means both are affected.
+    volumeMode: ?[]const u8 = null,
+};
+
 /// TokenRequest contains parameters of a service account token.
 pub const StorageV1TokenRequest = struct {
     /// audience is the intended audience of the token in "TokenRequestSpec". It will default to the audiences of kube apiserver.
@@ -224,7 +256,7 @@ pub const StorageV1VolumeAttachment = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec represents specification of the desired attach/detach volume behavior. Populated by the Kubernetes system.
     spec: StorageV1VolumeAttachmentSpec,
@@ -287,11 +319,11 @@ pub const StorageV1VolumeAttributesClass = struct {
 
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
-    /// Name of the CSI driver This field is immutable.
+    /// driverName is the name of the CSI driver This field is immutable.
     driverName: []const u8,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// parameters hold volume attributes defined by the CSI driver. These values are opaque to the Kubernetes and are passed directly to the CSI driver. The underlying storage provider supports changing these attributes on an existing volume, however the parameters field itself is immutable. To invoke a volume update, a new VolumeAttributesClass should be created with new parameters, and the PersistentVolumeClaim should be updated to reference the new VolumeAttributesClass.
     parameters: ?json.ArrayHashMap([]const u8) = null,

@@ -111,6 +111,8 @@ pub const AutoscalingV2HorizontalPodAutoscalerCondition = struct {
     lastTransitionTime: ?meta_v1.MetaV1Time = null,
     /// message is a human-readable explanation containing details about the transition
     message: ?[]const u8 = null,
+    /// observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+    observedGeneration: ?i64 = null,
     /// reason is the reason for the condition's last transition.
     reason: ?[]const u8 = null,
     /// status is the status of the condition (True, False, Unknown)
@@ -187,7 +189,7 @@ pub const AutoscalingV2MetricSpec = struct {
 
 /// MetricStatus describes the last-read state of a single metric.
 pub const AutoscalingV2MetricStatus = struct {
-    /// container resource refers to a resource metric (such as those specified in requests and limits) known to Kubernetes describing a single container in each pod in the current scale target (e.g. CPU or memory). Such metrics are built in to Kubernetes, and have special scaling options on top of those available to normal per-pod metrics using the "pods" source.
+    /// containerResource refers to a resource metric (such as those specified in requests and limits) known to Kubernetes describing a single container in each pod in the current scale target (e.g. CPU or memory). Such metrics are built in to Kubernetes, and have special scaling options on top of those available to normal per-pod metrics using the "pods" source.
     containerResource: ?AutoscalingV2ContainerResourceMetricStatus = null,
     /// external refers to a global metric that is not associated with any Kubernetes object. It allows autoscaling based on information coming from components running outside of cluster (for example length of queue in cloud messaging service, or QPS from loadbalancer running outside of cluster).
     external: ?AutoscalingV2ExternalMetricStatus = null,
@@ -215,7 +217,7 @@ pub const AutoscalingV2MetricTarget = struct {
 
 /// MetricValueStatus holds the current value for a metric
 pub const AutoscalingV2MetricValueStatus = struct {
-    /// currentAverageUtilization is the current value of the average of the resource metric across all relevant pods, represented as a percentage of the requested value of the resource for the pods.
+    /// averageUtilization is the current value of the average of the resource metric across all relevant pods, represented as a percentage of the requested value of the resource for the pods.
     averageUtilization: ?i32 = null,
     /// averageValue is the current value of the average of the metric across all relevant pods (as a quantity)
     averageValue: ?api_resource.ApiResourceQuantity = null,
@@ -237,7 +239,7 @@ pub const AutoscalingV2ObjectMetricSource = struct {
 pub const AutoscalingV2ObjectMetricStatus = struct {
     /// current contains the current value for the given metric
     current: AutoscalingV2MetricValueStatus,
-    /// DescribedObject specifies the descriptions of a object,such as kind,name apiVersion
+    /// describedObject specifies the descriptions of a object,such as kind,name apiVersion
     describedObject: AutoscalingV2CrossVersionObjectReference,
     /// metric identifies the target metric by name and selector
     metric: AutoscalingV2MetricIdentifier,

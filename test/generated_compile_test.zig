@@ -42,15 +42,20 @@ test "default init produces all-null Pod" {
     try testing.expectEqual(null, pod.spec);
 }
 
-test "default init produces all-null Deployment" {
+test "default init produces a Deployment with required spec" {
     // Act
-    const deploy = k8s.AppsV1Deployment{};
+    const deploy = k8s.AppsV1Deployment{
+        .spec = .{
+            .selector = .{},
+            .template = .{},
+        },
+    };
 
     // Assert
     try testing.expectEqual(null, deploy.apiVersion);
     try testing.expectEqual(null, deploy.kind);
     try testing.expectEqual(null, deploy.metadata);
-    try testing.expectEqual(null, deploy.spec);
+    try testing.expectEqual(null, deploy.spec.replicas);
     try testing.expectEqual(null, deploy.status);
 }
 
@@ -76,7 +81,7 @@ test "quoted keyword fields are accessible" {
     // Act / Assert
     try testing.expectEqual(null, svc_spec.type);
     try testing.expectEqual(null, list_meta.@"continue");
-    try testing.expectEqualStrings("", cond.type);
+    try testing.expectEqualStrings("", cond.type.?);
 }
 
 // Correct primitive types

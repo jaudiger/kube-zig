@@ -64,6 +64,13 @@ fn validateConditionType(comptime C: type) void {
     }
 }
 
+fn getStringField(value: anytype) ?[]const u8 {
+    const FieldType = @TypeOf(value);
+    if (FieldType == []const u8) return value;
+    if (FieldType == ?[]const u8) return value;
+    @compileError("expected []const u8 or ?[]const u8, got " ++ @typeName(FieldType));
+}
+
 /// Set a string field that may be `[]const u8` or `?[]const u8`.
 /// Silently skips if the field does not exist on C.
 fn setStringField(comptime C: type, obj: *C, comptime field_name: []const u8, value: []const u8) void {
@@ -91,7 +98,8 @@ pub fn findCondition(comptime SliceT: type, conds: SliceT, condition_type: []con
         conds;
 
     for (slice) |*cond| {
-        if (std.mem.eql(u8, cond.type, condition_type)) return cond;
+        const cond_type = getStringField(cond.type) orelse continue;
+        if (std.mem.eql(u8, cond_type, condition_type)) return cond;
     }
     return null;
 }
@@ -100,25 +108,29 @@ pub fn findCondition(comptime SliceT: type, conds: SliceT, condition_type: []con
 /// Returns true if a condition with the given type exists and has status "True".
 pub fn isConditionTrue(comptime SliceT: type, conds: SliceT, condition_type: []const u8) bool {
     const cond = findCondition(SliceT, conds, condition_type) orelse return false;
-    return std.mem.eql(u8, cond.status, "True");
+    const status = getStringField(cond.status) orelse return false;
+    return std.mem.eql(u8, status, "True");
 }
 
 /// Returns true if a condition with the given type exists and has status "False".
 pub fn isConditionFalse(comptime SliceT: type, conds: SliceT, condition_type: []const u8) bool {
     const cond = findCondition(SliceT, conds, condition_type) orelse return false;
-    return std.mem.eql(u8, cond.status, "False");
+    const status = getStringField(cond.status) orelse return false;
+    return std.mem.eql(u8, status, "False");
 }
 
 /// Returns true if a condition with the given type exists and has status "Unknown".
 pub fn isConditionUnknown(comptime SliceT: type, conds: SliceT, condition_type: []const u8) bool {
     const cond = findCondition(SliceT, conds, condition_type) orelse return false;
-    return std.mem.eql(u8, cond.status, "Unknown");
+    const status = getStringField(cond.status) orelse return false;
+    return std.mem.eql(u8, status, "Unknown");
 }
 
 /// Returns the parsed ConditionStatus for a condition type, or null if the condition doesn't exist.
 pub fn getConditionStatus(comptime SliceT: type, conds: SliceT, condition_type: []const u8) ?ConditionStatus {
     const cond = findCondition(SliceT, conds, condition_type) orelse return null;
-    return ConditionStatus.fromValue(cond.status);
+    const status = getStringField(cond.status) orelse return null;
+    return ConditionStatus.fromValue(status);
 }
 
 // Set / remove
@@ -157,7 +169,8 @@ pub fn setCondition(
     // Find existing condition with matching type.
     var found_index: ?usize = null;
     for (slice, 0..) |cond, i| {
-        if (std.mem.eql(u8, cond.type, value.type)) {
+        const cond_type = getStringField(cond.type) orelse continue;
+        if (std.mem.eql(u8, cond_type, value.type)) {
             found_index = i;
             break;
         }
@@ -200,7 +213,8 @@ pub fn removeCondition(
     // Measure
     var keep: usize = 0;
     for (slice) |cond| {
-        if (!std.mem.eql(u8, cond.type, condition_type)) keep += 1;
+        const cond_type = getStringField(cond.type);
+        if (cond_type == null or !std.mem.eql(u8, cond_type.?, condition_type)) keep += 1;
     }
 
     // Allocate
@@ -210,7 +224,8 @@ pub fn removeCondition(
     // Fill
     var i: usize = 0;
     for (slice) |cond| {
-        if (!std.mem.eql(u8, cond.type, condition_type)) {
+        const cond_type = getStringField(cond.type);
+        if (cond_type == null or !std.mem.eql(u8, cond_type.?, condition_type)) {
             result[i] = cond;
             i += 1;
         }
@@ -252,7 +267,10 @@ fn makeNewCondition(comptime C: type, value: ConditionValue, timestamp: []const 
 /// has not changed.
 fn updateCondition(comptime C: type, existing: C, value: ConditionValue, timestamp: []const u8) C {
     var cond = existing;
-    const status_changed = !std.mem.eql(u8, existing.status, value.status.toValue());
+    const status_changed = if (getStringField(existing.status)) |status|
+        !std.mem.eql(u8, status, value.status.toValue())
+    else
+        true;
     cond.status = value.status.toValue();
 
     setStringField(C, &cond, "reason", value.reason);
@@ -294,8 +312,8 @@ const LegacyCondition = struct {
     lastUpdateTime: ?[]const u8 = null,
     message: ?[]const u8 = null,
     reason: ?[]const u8 = null,
-    status: []const u8,
-    type: []const u8,
+    status: ?[]const u8 = null,
+    type: ?[]const u8 = null,
 };
 
 // ConditionStatus tests
@@ -373,7 +391,7 @@ test "findCondition works with LegacyCondition" {
     const found = findCondition([]const LegacyCondition, &conds, "Progressing").?;
 
     // Assert
-    try testing.expectEqualStrings("Progressing", found.type);
+    try testing.expectEqualStrings("Progressing", found.type.?);
     try testing.expectEqualStrings("NewReplicaSet", found.reason.?);
 }
 
@@ -588,7 +606,7 @@ test "setCondition skips observedGeneration on LegacyCondition" {
 
     // Act / Assert
     try testing.expectEqual(@as(usize, 1), result.len);
-    try testing.expectEqualStrings("Available", result[0].type);
+    try testing.expectEqualStrings("Available", result[0].type.?);
 }
 
 test "setCondition handles optional fields (LegacyCondition)" {
@@ -603,8 +621,8 @@ test "setCondition handles optional fields (LegacyCondition)" {
     defer testing.allocator.free(result);
 
     // Act / Assert
-    try testing.expectEqualStrings("Progressing", result[0].type);
-    try testing.expectEqualStrings("True", result[0].status);
+    try testing.expectEqualStrings("Progressing", result[0].type.?);
+    try testing.expectEqualStrings("True", result[0].status.?);
     try testing.expectEqualStrings("NewRS", result[0].reason.?);
     try testing.expectEqualStrings("rolling", result[0].message.?);
     try testing.expectEqualStrings("2024-01-01T00:00:00Z", result[0].lastTransitionTime.?);
@@ -699,7 +717,7 @@ test "removeCondition works with LegacyCondition" {
 
     // Assert
     try testing.expectEqual(@as(usize, 1), result.len);
-    try testing.expectEqualStrings("Progressing", result[0].type);
+    try testing.expectEqualStrings("Progressing", result[0].type.?);
 }
 
 // OOM tests

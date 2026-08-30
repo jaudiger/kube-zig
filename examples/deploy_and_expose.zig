@@ -149,7 +149,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer dep_get.deinit();
 
-    const desired = if (dep_get.value.spec) |s| (s.replicas orelse 0) else 0;
+    const desired = dep_get.value.spec.replicas orelse 0;
     const ready_replicas = if (dep_get.value.status) |s| (s.readyReplicas orelse 0) else 0;
     try w.print("  Deployment {s}: {d}/{d} replicas ready\n", .{ app_name, ready_replicas, desired });
 

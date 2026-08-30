@@ -37,7 +37,7 @@ pub const FlowcontrolV1FlowSchema = struct {
     /// `metadata` is the standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// `spec` is the specification of the desired behavior of a FlowSchema. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?FlowcontrolV1FlowSchemaSpec = null,
+    spec: FlowcontrolV1FlowSchemaSpec,
     /// `status` is the current status of a FlowSchema. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     status: ?FlowcontrolV1FlowSchemaStatus = null,
 };
@@ -50,10 +50,10 @@ pub const FlowcontrolV1FlowSchemaCondition = struct {
     message: ?[]const u8 = null,
     /// `reason` is a unique, one-word, CamelCase reason for the condition's last transition.
     reason: ?[]const u8 = null,
-    /// `status` is the status of the condition. Can be True, False, Unknown. Required.
+    /// `status` is the status of the condition. Should be specified and set to one of True, False, Unknown.
     status: ?[]const u8 = null,
     /// `type` is the type of the condition. Required.
-    type: ?[]const u8 = null,
+    type: []const u8,
 };
 
 /// FlowSchemaList is a list of FlowSchema objects.
@@ -107,7 +107,7 @@ pub const FlowcontrolV1LimitedPriorityLevelConfiguration = struct {
     /// `lendablePercent` prescribes the fraction of the level's NominalCL that can be borrowed by other priority levels. The value of this field must be between 0 and 100, inclusive, and it defaults to 0. The number of seats that other levels can borrow from this level, known as this level's LendableConcurrencyLimit (LendableCL), is defined as follows.
     lendablePercent: ?i32 = null,
     /// `limitResponse` indicates what to do with requests that can not be executed right now
-    limitResponse: ?FlowcontrolV1LimitResponse = null,
+    limitResponse: FlowcontrolV1LimitResponse,
     /// `nominalConcurrencyShares` (NCS) contributes to the computation of the NominalConcurrencyLimit (NominalCL) of this level. This is the number of execution seats available at this priority level. This is used both for requests dispatched from this priority level as well as requests dispatched from other priority levels borrowing seats from this level. The server's concurrency limit (ServerCL) is divided among the Limited priority levels in proportion to their NCS values:
     nominalConcurrencyShares: ?i32 = null,
 };
@@ -148,7 +148,7 @@ pub const FlowcontrolV1PriorityLevelConfiguration = struct {
     /// `metadata` is the standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// `spec` is the specification of the desired behavior of a "request-priority". More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?FlowcontrolV1PriorityLevelConfigurationSpec = null,
+    spec: FlowcontrolV1PriorityLevelConfigurationSpec,
     /// `status` is the current status of a "request-priority". More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     status: ?FlowcontrolV1PriorityLevelConfigurationStatus = null,
 };
@@ -161,10 +161,10 @@ pub const FlowcontrolV1PriorityLevelConfigurationCondition = struct {
     message: ?[]const u8 = null,
     /// `reason` is a unique, one-word, CamelCase reason for the condition's last transition.
     reason: ?[]const u8 = null,
-    /// `status` is the status of the condition. Can be True, False, Unknown. Required.
+    /// `status` is the status of the condition. Should be specified and set to one of True, False, Unknown.
     status: ?[]const u8 = null,
     /// `type` is the type of the condition. Required.
-    type: ?[]const u8 = null,
+    type: []const u8,
 };
 
 /// PriorityLevelConfigurationList is a list of PriorityLevelConfiguration objects.
