@@ -102,8 +102,8 @@ pub const ResourceV1beta2Device = struct {
     consumesCounters: ?[]const ResourceV1beta2DeviceCounterConsumption = null,
     /// Name is unique identifier among all devices managed by the driver in the pool. It must be a DNS label.
     name: []const u8,
-    /// NodeAllocatableResourceMappings defines the mapping of node resources that are managed by the DRA driver exposing this device. This includes resources currently reported in v1.Node `status.allocatable` that are not extended resources (see https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#extended-resources). Examples include "cpu", "memory", "ephemeral-storage", and hugepages. In addition to standard requests made through the Pod `spec`, these resources can also be requested through claims and allocated by the DRA driver. For example, a CPU DRA driver might allocate exclusive CPUs or auxiliary node memory dependencies of an accelerator device. The keys of this map are the node-allocatable resource names (e.g., "cpu", "memory"). Extended resource names are not permitted as keys.
-    nodeAllocatableResourceMappings: ?json.ArrayHashMap(ResourceV1beta2NodeAllocatableResourceMapping) = null,
+    /// NodeAllocatableResources defines the mapping of node resources that are managed by the DRA driver exposing this device. This includes resources currently reported in v1.Node `status.allocatable` that are not extended resources (see https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#extended-resources). Examples include "cpu", "memory", "ephemeral-storage", and hugepages. In addition to standard requests made through the Pod `spec`, these resources can also be requested through claims and allocated by the DRA driver. For example, a CPU DRA driver might allocate exclusive CPUs or auxiliary node memory dependencies of an accelerator device. The keys of this map are the node-allocatable resource names (e.g., "cpu", "memory"). Extended resource names are not permitted as keys.
+    nodeAllocatableResources: ?json.ArrayHashMap(ResourceV1beta2NodeAllocatableResource) = null,
     /// NodeName identifies the node where the device is available.
     nodeName: ?[]const u8 = null,
     /// NodeSelector defines the nodes where the device is available.
@@ -194,7 +194,7 @@ pub const ResourceV1beta2DeviceClass = struct {
     /// Standard object metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Spec defines what can be allocated and how to configure it.
-    spec: ResourceV1beta2DeviceClassSpec,
+    spec: ?ResourceV1beta2DeviceClassSpec = null,
 };
 
 /// DeviceClassConfiguration is used in DeviceClass.
@@ -237,10 +237,20 @@ pub const ResourceV1beta2DeviceConstraint = struct {
 
 /// DeviceCounterConsumption defines a set of counters that a device will consume from a CounterSet.
 pub const ResourceV1beta2DeviceCounterConsumption = struct {
+    /// CompatibilityGroups is a list of opaque group names for this counter set consumption.
+    compatibilityGroups: ?[]const []const u8 = null,
     /// CounterSet is the name of the set from which the counters defined will be consumed.
     counterSet: []const u8,
     /// Counters defines the counters that will be consumed by the device.
     counters: json.ArrayHashMap(ResourceV1beta2Counter),
+};
+
+/// DeviceDerivedAttribute defines a derived attribute computed via CEL.
+pub const ResourceV1beta2DeviceDerivedAttribute = struct {
+    /// Expression is a CEL expression evaluated against each candidate device. The expression must evaluate to a primitive scalar (string, integer, boolean, or semver) or a list of these scalars ([]string, []int64, []bool, []semver) to act as a virtual grouping key. Any other return type is an error and causes CEL evaluation for the device to fail.
+    expression: []const u8,
+    /// Name is the identifier for this derived attribute, used in constraints.
+    name: []const u8,
 };
 
 /// DeviceRequest is a request for devices required for a claim. This is typically a request for a single resource like a device, but can also ask for several identical devices. With FirstAvailable it is also possible to provide a prioritized list of requests.
@@ -273,6 +283,8 @@ pub const ResourceV1beta2DeviceRequestAllocationResult = struct {
     request: []const u8,
     /// ShareID uniquely identifies an individual allocation share of the device, used when the device supports multiple simultaneous allocations. It serves as an additional map key to differentiate concurrent shares of the same device.
     shareID: ?[]const u8 = null,
+    /// SkipNodeOperations lists node-local resource operations (gRPC calls) that will be skipped for this allocated device when determining whether operations are necessary on the node. If all allocated devices for a driver in a claim skip an operation, that gRPC call will be skipped. It is a copy of the ResourceSlice.spec.skipNodeOperations value at the time when the device was allocated.
+    skipNodeOperations: ?[]const []const u8 = null,
     /// A copy of all tolerations specified in the request at the time when the device got allocated.
     tolerations: ?[]const ResourceV1beta2DeviceToleration = null,
 };
@@ -291,6 +303,8 @@ pub const ResourceV1beta2DeviceSubRequest = struct {
     capacity: ?ResourceV1beta2CapacityRequirements = null,
     /// Count is used only when the count mode is "ExactCount". Must be greater than zero. If AllocationMode is ExactCount and this field is not specified, the default is one.
     count: ?i64 = null,
+    /// DerivedAttributes defines a set of virtual attributes computed via CEL expressions for each candidate device. These virtual attributes can be referenced in `.devices.constraints` to align and match different devices (e.g., co-allocating a GPU and a NIC on the same NUMA node) even if their drivers publish different attributes. Derived attributes are not available via `device.attributes` in the CEL environment when evaluating selector expressions.
+    derivedAttributes: ?[]const ResourceV1beta2DeviceDerivedAttribute = null,
     /// DeviceClassName references a specific DeviceClass, which can define additional configuration and selectors to be inherited by this subrequest.
     deviceClassName: []const u8,
     /// Name can be used to reference this subrequest in the list of constraints or the list of configurations for the claim. References must use the format <main request>/<subrequest>.
@@ -396,6 +410,8 @@ pub const ResourceV1beta2ExactDeviceRequest = struct {
     capacity: ?ResourceV1beta2CapacityRequirements = null,
     /// Count is used only when the count mode is "ExactCount". Must be greater than zero. If AllocationMode is ExactCount and this field is not specified, the default is one.
     count: ?i64 = null,
+    /// DerivedAttributes defines a set of virtual attributes computed via CEL expressions for each candidate device. These virtual attributes can be referenced in `.devices.constraints` to align and match different devices (e.g., co-allocating a GPU and a NIC on the same NUMA node) even if their drivers publish different attributes. Derived attributes are not available via `device.attributes` in the CEL environment when evaluating selector expressions.
+    derivedAttributes: ?[]const ResourceV1beta2DeviceDerivedAttribute = null,
     /// DeviceClassName references a specific DeviceClass, which can define additional configuration and selectors to be inherited by this request.
     deviceClassName: []const u8,
     /// Selectors define criteria which must be satisfied by a specific device in order for that device to be considered for this request. All selectors must be satisfied for a device to be considered.
@@ -414,12 +430,30 @@ pub const ResourceV1beta2NetworkDeviceData = struct {
     ips: ?[]const []const u8 = null,
 };
 
-/// NodeAllocatableResourceMapping defines the translation between the DRA device/capacity units requested to the corresponding quantity of the node allocatable resource.
-pub const ResourceV1beta2NodeAllocatableResourceMapping = struct {
-    /// AllocationMultiplier is used as a multiplier for the allocated device count or the allocated capacity in the claim. It defaults to 1 if not specified. How the field is used also depends on whether `capacityKey` is set. 1.  If `capacityKey` is NOT set: `allocationMultiplier` multiplies the device count allocated to the claim.
-    allocationMultiplier: ?api_resource.ApiResourceQuantity = null,
-    /// CapacityKey references a capacity name defined as a key in the `spec.devices[*].capacity` map. When this field is set, the value associated with this key in the `status.allocation.devices.results[*].consumedCapacity` map (for a specific claim allocation) determines the base quantity for the node allocatable resource. If `allocationMultiplier` is also set, it is multiplied with the base quantity. For example, if `spec.devices[*].capacity` has an entry "dra.example.com/memory": "128Gi", and this field is set to "dra.example.com/memory", then for a claim allocation that consumes { "dra.example.com/memory": "4Gi" } the base quantity for the node allocatable resource mapping will be "4Gi", and `allocationMultiplier` should be omitted or set to "1".
+/// NodeAllocatableMapping defines how a DRA allocation directly translates into a node allocatable resource quantity. The mapping can be derived from either the count of allocated devices (via deviceMultiplier) or the specific capacity consumed (via capacityKey and capacityMultiplier). These options are mutually exclusive. Kubelet adds this mapped resource quantity from claim to both requests and limits at the pod-level cgroup, and to limits at the container-level cgroup for each container referencing the claim.
+pub const ResourceV1beta2NodeAllocatableMapping = struct {
+    /// CapacityKey references a capacity name defined as a key in the `spec.devices[*].capacity` map. When this field is set, the value associated with this key in the `status.allocation.devices.results[*].consumedCapacity` map (for a specific claim allocation) determines the base quantity for the node allocatable resource. `capacityMultiplier` must also be set and is multiplied with the base quantity. For example, if `spec.devices[*].capacity` has an entry "dra.example.com/memory": "128Gi", and this field is set to "dra.example.com/memory", then for a claim allocation that consumes { "dra.example.com/memory": "4Gi" } the base quantity for the node allocatable resource mapping will be "4Gi". The final node allocatable resource amount is `consumedCapacity[capacityKey]` * `capacityMultiplier`.
     capacityKey: ?[]const u8 = null,
+    /// CapacityMultiplier is used as a multiplier for the allocated capacity consumed. It is only valid if `capacityKey` is set. The final node allocatable resource amount is `consumedCapacity[capacityKey]` * `capacityMultiplier`. For example, if a Device's capacity "dra.example.com/cores" is consumed, and each "core" provides 2 "cpu"s, the mapping would be: {ResourceName: "cpu", capacityKey: "dra.example.com/cores", capacityMultiplier: "2"}. If a claim consumes 8 "dra.example.com/cores", the CPU footprint is 8 * 2 = 16.
+    capacityMultiplier: ?api_resource.ApiResourceQuantity = null,
+    /// DeviceMultiplier is used as a multiplier for the allocated device count in the claim. The final node allocatable resource amount is `deviceCount` * `deviceMultiplier`. For example, a DRA driver representing each cache complex (CCX) as a device would have {ResourceName: "cpu", deviceMultiplier: "8"} in its `nodeAllocatableResources`. If 2 devices (CCX) are allocated to the claim, 2 * 8 = 16 CPUs would be considered as allocated. It is only valid when `capacityKey` and `capacityMultiplier` are not set.
+    deviceMultiplier: ?api_resource.ApiResourceQuantity = null,
+};
+
+/// NodeAllocatableOverhead defines auxiliary resource overheads incurred when allocating a device. Overheads can be specified as a fixed cost per pod referencing the claim, a variable cost per container reference, or both. Kubelet accounts for this overhead by adding it to both the pod-level and container-level cgroups of referencing containers.
+pub const ResourceV1beta2NodeAllocatableOverhead = struct {
+    /// PerContainer is applied per container reference to the claim. This models overhead scaling linearly with the number of containers actively using the device. When both PerPod and PerContainer are specified, the total overhead allocated for each pod referencing the claim is computed as: Quantity = PerPod + (PerContainer * NumReferences) Kubelet accounts for this overhead in cgroups: - Pod-level cgroup (requests and limits): Kubelet adds PerPod + (PerContainer * NumReferences). - Container-level cgroup (limits only): Kubelet adds PerPod + PerContainer for each referencing container. This allows any single container to access the pod-level overhead, while the parent cgroup caps the total usage to account for PerPod exactly once.
+    perContainer: ?api_resource.ApiResourceQuantity = null,
+    /// PerPod is overhead applied once per pod referencing the claim on this node. This is a flat overhead incurred for every pod referencing the claim.
+    perPod: ?api_resource.ApiResourceQuantity = null,
+};
+
+/// NodeAllocatableResource defines the translation between the DRA device/capacity units requested to the corresponding quantity of the node allocatable resource. At least one of Mapping or Overhead must be specified. Not specifying either is an invalid configuration.
+pub const ResourceV1beta2NodeAllocatableResource = struct {
+    /// Mapping is used when the device directly models a node allocatable resource like standard CPU or memory (e.g., with a CPU DRA driver). The calculated quantity is accounted for exactly once per claim instance on the node. To prevent node cgroup isolation friction, the scheduler explicitly blocks sharing mapped device claims across multiple pods.
+    mapping: ?ResourceV1beta2NodeAllocatableMapping = null,
+    /// Overhead contains fields for modeling auxiliary overhead incurred on node allocatable resources when allocating devices that are not themselves modeling a node allocatable resource (e.g., host memory overhead for GPUs). Sharing overhead-mapped claims across multiple pods is allowed. The node allocatable overhead is accounted for individually for each pod referencing the claim. Overhead is always subtracted from the node's allocatable capacity for the resource, even when mapping is specified for the same resource. Eg: If a device models memory capacity per socket as a consumable capacity pool via Mapping (with CapacityKey), any overhead specified for the same resource will be subtracted from the node's general allocatable capacity and not from the per-socket capacity pool in Mapping.
+    overhead: ?ResourceV1beta2NodeAllocatableOverhead = null,
 };
 
 /// OpaqueDeviceConfiguration contains configuration parameters for a driver in a format defined by the driver vendor.
@@ -448,7 +482,7 @@ pub const ResourceV1beta2ResourceClaim = struct {
     /// Standard object metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Spec describes what is being requested and how to configure it. The spec is immutable.
-    spec: ResourceV1beta2ResourceClaimSpec,
+    spec: ?ResourceV1beta2ResourceClaimSpec = null,
     /// Status describes whether the claim is ready to use and what has been allocated.
     status: ?ResourceV1beta2ResourceClaimStatus = null,
 };
@@ -511,7 +545,7 @@ pub const ResourceV1beta2ResourceClaimTemplate = struct {
     /// Standard object metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Describes the ResourceClaim that is to be generated.
-    spec: ResourceV1beta2ResourceClaimTemplateSpec,
+    spec: ?ResourceV1beta2ResourceClaimTemplateSpec = null,
 };
 
 /// ResourceClaimTemplateList is a collection of claim templates.
@@ -531,14 +565,14 @@ pub const ResourceV1beta2ResourceClaimTemplateSpec = struct {
     /// ObjectMeta may contain labels and annotations that will be copied into the ResourceClaim when creating it. No other fields are allowed and will be rejected during validation.
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Spec for the ResourceClaim. The entire content is copied unchanged into the ResourceClaim that gets created from this template. The same fields as in a ResourceClaim are also valid here.
-    spec: ResourceV1beta2ResourceClaimSpec,
+    spec: ?ResourceV1beta2ResourceClaimSpec = null,
 };
 
 /// ResourcePool describes the pool that ResourceSlices belong to.
 pub const ResourceV1beta2ResourcePool = struct {
     /// Generation tracks the change in a pool over time. Whenever a driver changes something about one or more of the resources in a pool, it must change the generation in all ResourceSlices which are part of that pool. Consumers of ResourceSlices should only consider resources from the pool with the highest generation number. The generation may be reset by drivers, which should be fine for consumers, assuming that all ResourceSlices in a pool are updated to match or deleted.
     generation: i64,
-    /// Name is used to identify the pool. For node-local devices, this is often the node name, but this is not required.
+    /// Name is used to identify the pool. For node-local devices, this is often the node name, but this is not required. A field selector can be used to list only ResourceSlice objects belonging to a certain pool.
     name: []const u8,
     /// ResourceSliceCount is the total number of ResourceSlices in the pool at this generation number. Must be greater than zero.
     resourceSliceCount: i64,
@@ -589,10 +623,14 @@ pub const ResourceV1beta2ResourceSliceSpec = struct {
     nodeName: ?[]const u8 = null,
     /// NodeSelector defines which nodes have access to the resources in the pool, when that pool is not limited to a single node.
     nodeSelector: ?core_v1.CoreV1NodeSelector = null,
+    /// PartitionTypeAttribute names a string device attribute (by fully qualified name, e.g. "gpu.example.com/profile") whose value labels each device with its partition type, such as "Full" or "Half" for a MIG-style GPU.
+    partitionTypeAttribute: ?[]const u8 = null,
     /// PerDeviceNodeSelection defines whether the access from nodes to resources in the pool is set on the ResourceSlice level or on each device. If it is set to true, every device defined the ResourceSlice must specify this individually.
     perDeviceNodeSelection: ?bool = null,
     /// Pool describes the pool that this ResourceSlice belongs to.
     pool: ResourceV1beta2ResourcePool,
     /// SharedCounters defines a list of counter sets, each of which has a name and a list of counters available.
     sharedCounters: ?[]const ResourceV1beta2CounterSet = null,
+    /// SkipNodeOperations lists node-local resource operations (gRPC calls) that will be skipped for the devices in this slice when determining whether operations are necessary on the node. If all allocated devices for a driver in a claim skip an operation, that gRPC call will be skipped. Valid values are:
+    skipNodeOperations: ?[]const []const u8 = null,
 };

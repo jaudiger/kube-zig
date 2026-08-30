@@ -22,13 +22,13 @@ pub const AppsV1ControllerRevision = struct {
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
     /// Data is the serialized representation of the state.
-    data: ?pkg_runtime.PkgRuntimeRawExtension = null,
+    data: pkg_runtime.PkgRuntimeRawExtension,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Revision indicates the revision of the state represented by Data.
-    revision: i64,
+    revision: ?i64 = null,
 };
 
 /// ControllerRevisionList is a resource containing a list of ControllerRevision objects.
@@ -61,7 +61,7 @@ pub const AppsV1DaemonSet = struct {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// The desired behavior of this daemon set. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?AppsV1DaemonSetSpec = null,
+    spec: AppsV1DaemonSetSpec,
     /// The current status of this daemon set. This data may be out of date by some window of time. Populated by the system. Read-only. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     status: ?AppsV1DaemonSetStatus = null,
 };
@@ -75,9 +75,9 @@ pub const AppsV1DaemonSetCondition = struct {
     /// The reason for the condition's last transition.
     reason: ?[]const u8 = null,
     /// Status of the condition, one of True, False, Unknown.
-    status: []const u8,
+    status: ?[]const u8 = null,
     /// Type of DaemonSet condition.
-    type: []const u8,
+    type: ?[]const u8 = null,
 };
 
 /// DaemonSetList is a collection of daemon sets.
@@ -156,7 +156,7 @@ pub const AppsV1Deployment = struct {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Specification of the desired behavior of the Deployment.
-    spec: ?AppsV1DeploymentSpec = null,
+    spec: AppsV1DeploymentSpec,
     /// Most recently observed status of the Deployment.
     status: ?AppsV1DeploymentStatus = null,
 };
@@ -172,9 +172,9 @@ pub const AppsV1DeploymentCondition = struct {
     /// The reason for the condition's last transition.
     reason: ?[]const u8 = null,
     /// Status of the condition, one of True, False, Unknown.
-    status: []const u8,
+    status: ?[]const u8 = null,
     /// Type of deployment condition.
-    type: []const u8,
+    type: ?[]const u8 = null,
 };
 
 /// DeploymentList is a list of Deployments.
@@ -257,7 +257,7 @@ pub const AppsV1ReplicaSet = struct {
     /// If the Labels of a ReplicaSet are empty, they are defaulted to be the same as the Pod(s) that the ReplicaSet manages. Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Spec defines the specification of the desired behavior of the ReplicaSet. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
-    spec: ?AppsV1ReplicaSetSpec = null,
+    spec: AppsV1ReplicaSetSpec,
     /// Status is the most recently observed status of the ReplicaSet. This data may be out of date by some window of time. Populated by the system. Read-only. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     status: ?AppsV1ReplicaSetStatus = null,
 };
@@ -271,9 +271,9 @@ pub const AppsV1ReplicaSetCondition = struct {
     /// The reason for the condition's last transition.
     reason: ?[]const u8 = null,
     /// Status of the condition, one of True, False, Unknown.
-    status: []const u8,
+    status: ?[]const u8 = null,
     /// Type of replica set condition.
-    type: []const u8,
+    type: ?[]const u8 = null,
 };
 
 /// ReplicaSetList is a collection of ReplicaSets.
@@ -360,7 +360,7 @@ pub const AppsV1StatefulSet = struct {
     /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Spec defines the desired identities of pods in this set.
-    spec: ?AppsV1StatefulSetSpec = null,
+    spec: AppsV1StatefulSetSpec,
     /// Status is the current status of Pods in this StatefulSet. This data may be out of date by some window of time.
     status: ?AppsV1StatefulSetStatus = null,
 };
@@ -374,9 +374,9 @@ pub const AppsV1StatefulSetCondition = struct {
     /// The reason for the condition's last transition.
     reason: ?[]const u8 = null,
     /// Status of the condition, one of True, False, Unknown.
-    status: []const u8,
+    status: ?[]const u8 = null,
     /// Type of statefulset condition.
-    type: []const u8,
+    type: ?[]const u8 = null,
 };
 
 /// StatefulSetList is a collection of StatefulSets.

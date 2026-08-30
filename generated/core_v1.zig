@@ -247,6 +247,8 @@ pub const CoreV1ClusterTrustBundleProjection = struct {
     path: []const u8,
     /// Select all ClusterTrustBundles that match this signer name. Mutually-exclusive with name.  The contents of all selected ClusterTrustBundles will be unified and deduplicated.
     signerName: ?[]const u8 = null,
+    /// user is Optional: The owner UID of the created file. If specified, the item-level user field takes precedence over defaultUser. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    user: ?i64 = null,
 };
 
 /// Information about the condition of a component.
@@ -307,7 +309,7 @@ pub const CoreV1ConfigMap = struct {
 
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
-    /// BinaryData contains the binary data. Each key must consist of alphanumeric characters, '-', '_' or '.'. BinaryData can contain byte sequences that are not in the UTF-8 range. The keys stored in BinaryData must not overlap with the ones in the Data field, this is enforced during validation process. Using this field will require 1.10+ apiserver and kubelet.
+    /// BinaryData contains the binary data. Each key must consist of alphanumeric characters, '-', '_' or '.'. BinaryData can contain byte sequences that are not in the UTF-8 range. The keys stored in BinaryData must not overlap with the ones in the Data field, this is enforced during validation process. Using this field will require 1.10+ apiserver and kubelet. Note: BinaryData keys are not currently propagated to container env vars via ConfigMapKeyRef or ConfigMapRef env sources; only Data keys are used.
     binaryData: ?json.ArrayHashMap(ByteString) = null,
     /// Data contains the configuration data. Each key must consist of alphanumeric characters, '-', '_' or '.'. Values with non-UTF-8 byte sequences must use the BinaryData field. The keys stored in Data must not overlap with the keys in the BinaryData field, this is enforced during validation process.
     data: ?json.ArrayHashMap([]const u8) = null,
@@ -329,7 +331,7 @@ pub const CoreV1ConfigMapEnvSource = struct {
 
 /// Selects a key from a ConfigMap.
 pub const CoreV1ConfigMapKeySelector = struct {
-    /// The key to select.
+    /// The key to select from the ConfigMap's Data field. Keys in the BinaryData field are not currently propagated to container env vars.
     key: []const u8,
     /// Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
     name: ?[]const u8 = null,
@@ -377,6 +379,8 @@ pub const CoreV1ConfigMapProjection = struct {
 pub const CoreV1ConfigMapVolumeSource = struct {
     /// defaultMode is optional: mode bits used to set permissions on created files by default. Must be an octal value between 0000 and 0777 or a decimal value between 0 and 511. YAML accepts both octal and decimal values, JSON requires decimal values for mode bits. Defaults to 0644. Directories within the path are not affected by this setting. This might be in conflict with other options that affect the file mode, like fsGroup, and the result can be other mode bits set.
     defaultMode: ?i32 = null,
+    /// defaultUser is Optional: The owner UID of the created files by default. The defaultUser field is only used as a fallback when the item-level user field is unset. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    defaultUser: ?i64 = null,
     /// items if unspecified, each key-value pair in the Data field of the referenced ConfigMap will be projected into the volume as a file whose name is the key and content is the value. If specified, the listed keys will be projected into the specified paths, and unlisted keys will not be present. If a key is specified which is not present in the ConfigMap, the volume setup will error unless it is marked optional. Paths must be relative and may not contain the '..' path or start with '..'.
     items: ?[]const CoreV1KeyToPath = null,
     /// Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
@@ -599,12 +603,16 @@ pub const CoreV1DownwardAPIVolumeFile = struct {
     path: []const u8,
     /// Selects a resource of the container: only resources limits and requests (limits.cpu, limits.memory, requests.cpu and requests.memory) are currently supported.
     resourceFieldRef: ?CoreV1ResourceFieldSelector = null,
+    /// user is Optional: The owner UID of the created file. If specified, the item-level user field takes precedence over defaultUser. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    user: ?i64 = null,
 };
 
 /// DownwardAPIVolumeSource represents a volume containing downward API info. Downward API volumes support ownership management and SELinux relabeling.
 pub const CoreV1DownwardAPIVolumeSource = struct {
     /// Optional: mode bits to use on created files by default. Must be a Optional: mode bits used to set permissions on created files by default. Must be an octal value between 0000 and 0777 or a decimal value between 0 and 511. YAML accepts both octal and decimal values, JSON requires decimal values for mode bits. Defaults to 0644. Directories within the path are not affected by this setting. This might be in conflict with other options that affect the file mode, like fsGroup, and the result can be other mode bits set.
     defaultMode: ?i32 = null,
+    /// defaultUser is Optional: The owner UID of the created files by default. The defaultUser field is only used as a fallback when the item-level user field is unset. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    defaultUser: ?i64 = null,
     /// Items is a list of downward API volume file
     items: ?[]const CoreV1DownwardAPIVolumeFile = null,
 };
@@ -613,6 +621,8 @@ pub const CoreV1DownwardAPIVolumeSource = struct {
 pub const CoreV1EmptyDirVolumeSource = struct {
     /// medium represents what type of storage medium should back this directory. The default is "" which means to use the node's default medium. Must be an empty string (default) or Memory. More info: https://kubernetes.io/docs/concepts/storage/volumes#emptydir
     medium: ?[]const u8 = null,
+    /// mode specifies the permission bits for the emptyDir directory, in numeric notation (e.g., 0755, 01777). Must be a value between 0000 and 01777. If not specified, defaults to 0777. This might be in conflict with other options that affect the file mode, like fsGroup. If fsGroup is specified, the fsGroup permissions will override the mode specified here. This field has no effect on Windows. This field is alpha and requires EmptyDirVolumeMode featuregate to be enabled.
+    mode: ?i32 = null,
     /// sizeLimit is the total amount of local storage required for this EmptyDir volume. The size limit is also applicable for memory medium. The maximum usage on memory medium EmptyDir would be the minimum value between the SizeLimit specified here and the sum of memory limits of all containers in a pod. The default is nil which means that the limit is undefined. More info: https://kubernetes.io/docs/concepts/storage/volumes#emptydir
     sizeLimit: ?api_resource.ApiResourceQuantity = null,
 };
@@ -855,6 +865,14 @@ pub const CoreV1EventSource = struct {
     host: ?[]const u8 = null,
 };
 
+/// EvictionResponder allows you to specify the responder reacting to an Eviction. Responders should observe and communicate through the Eviction Resource API to help with the graceful eviction of a target (e.g. termination of a pod).
+pub const CoreV1EvictionResponder = struct {
+    /// name allows you to identify the responder responding to the Eviction.
+    name: []const u8,
+    /// priority for this responder. Higher priorities are selected first by the evictionrequest-controller. If there are responders with the same priority, the responder whose domain name comes first in the alphabetical higher domain order, will be picked. This means that the top domain labels are compared alphabetically first, followed by the lower domain labels. The key is compared last.
+    priority: i32,
+};
+
 /// ExecAction describes a "run in container" action.
 pub const CoreV1ExecAction = struct {
     /// Command is the command line to execute inside the container, the working directory for the command  is root ('/') in the container's filesystem. The command is simply exec'd, it is not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use a shell, you need to explicitly call out to that shell. Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
@@ -937,6 +955,8 @@ pub const CoreV1GCEPersistentDiskVolumeSource = struct {
 
 /// GRPCAction specifies an action involving a GRPC service.
 pub const CoreV1GRPCAction = struct {
+    /// mode specifies the connection mode for the gRPC health probe. Set to "TLS" to use TLS without certificate verification. Set to "Plaintext" to use a plaintext (insecure) connection explicitly. If not specified, the probe uses a plaintext (insecure) connection.
+    mode: ?[]const u8 = null,
     /// Port number of the gRPC service. Number must be in the range 1 to 65535.
     port: i32,
     /// Service is the name of the service to place in the gRPC HealthCheckRequest (see https://github.com/grpc/grpc/blob/master/doc/health-checking.md).
@@ -985,6 +1005,8 @@ pub const CoreV1HTTPGetAction = struct {
     path: ?[]const u8 = null,
     /// Name or number of the port to access on the container. Number must be in the range 1 to 65535. Name must be an IANA_SVC_NAME.
     port: util_intstr.UtilIntstrIntOrString,
+    /// Protocol selects the wire protocol for the probe connection. Nil defaults to HTTP/1.1.
+    protocol: ?[]const u8 = null,
     /// Scheme to use for connecting to the host. Defaults to HTTP.
     scheme: ?[]const u8 = null,
 };
@@ -1093,6 +1115,8 @@ pub const CoreV1KeyToPath = struct {
     mode: ?i32 = null,
     /// path is the relative path of the file to map the key to. May not be an absolute path. May not contain the path element '..'. May not start with the string '..'.
     path: []const u8,
+    /// user is Optional: The owner UID of the created file. If specified, the item-level user field takes precedence over defaultUser. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    user: ?i64 = null,
 };
 
 /// Lifecycle describes actions that the management system should take in response to container lifecycle events. For the PostStart and PreStop lifecycle handlers, management of the container blocks until the action is complete, unless the container process fails, in which case the handler is aborted.
@@ -1334,14 +1358,34 @@ pub const CoreV1NodeAffinity = struct {
     requiredDuringSchedulingIgnoredDuringExecution: ?CoreV1NodeSelector = null,
 };
 
+/// NodeAllocatableMappedResources describes mapped node allocatable resource allocations.
+pub const CoreV1NodeAllocatableMappedResources = struct {
+    /// Name is the name of the resource (e.g., cpu, memory).
+    name: []const u8,
+    /// Quantity is the total node allocatable resource capacity allocated for the claim. This claim's allocated devices is shared by all the containers referencing the claim. Kubelet adds this value to both requests and limits at the pod-level cgroup, and to limits at the container-level cgroup for each container referencing the claim.
+    quantity: api_resource.ApiResourceQuantity,
+};
+
+/// NodeAllocatableOverheadResources describes auxiliary overhead resource allocations.
+pub const CoreV1NodeAllocatableOverheadResources = struct {
+    /// Name is the name of the resource (e.g., cpu, memory).
+    name: []const u8,
+    /// PerContainer is the variable overhead quantity applied for each container referencing the claim. The container references are recorded in `nodeAllocatableResourceClaimStatuses.containers`. The total overhead quantity allocated for the claim is computed as: Quantity = PerPod + (PerContainer * NumReferences) Kubelet accounts for this overhead in cgroups: - Pod-level cgroup (requests and limits): Kubelet adds PerPod + (PerContainer * NumReferences). - Container-level cgroup (limits only): Kubelet adds PerPod + PerContainer for each referencing container. This allows any single container to access the pod-level overhead, while the parent cgroup caps the total usage to account for PerPod exactly once. At least one of PerPod or PerContainer must be specified. Specifying neither is an invalid configuration.
+    perContainer: ?api_resource.ApiResourceQuantity = null,
+    /// PerPod is the flat overhead quantity allocated per pod. Adding to each container limit allows individual containers to utilize the overhead, while the parent pod-level cgroup limit caps the total usage at the pod boundary where the overhead is accounted for exactly once. At least one of PerPod or PerContainer must be specified. Specifying neither is an invalid configuration.
+    perPod: ?api_resource.ApiResourceQuantity = null,
+};
+
 /// NodeAllocatableResourceClaimStatus describes the status of node allocatable resources allocated via DRA.
 pub const CoreV1NodeAllocatableResourceClaimStatus = struct {
     /// Containers lists the names of all containers in this pod that reference the claim.
     containers: ?[]const []const u8 = null,
+    /// Mapping contains allocations through devices mapped in the device spec's `nodeAllocatableResources[...].mapping` field. This is used by kubelet for pod level and container-level cgroup enforcement.
+    mapping: ?[]const CoreV1NodeAllocatableMappedResources = null,
+    /// Overhead contains allocations through devices mapped in the device spec's `nodeAllocatableResources[...].overhead` field. This is used by kubelet for pod level and container-level cgroup enforcement.
+    overhead: ?[]const CoreV1NodeAllocatableOverheadResources = null,
     /// ResourceClaimName is the resource claim referenced by the pod that resulted in this node allocatable resource allocation.
     resourceClaimName: []const u8,
-    /// Resources is a map of the node-allocatable resource name to the aggregate quantity allocated to the claim.
-    resources: json.ArrayHashMap(api_resource.ApiResourceQuantity),
 };
 
 /// NodeCondition contains condition information for a node.
@@ -1402,6 +1446,12 @@ pub const CoreV1NodeList = struct {
     metadata: ?meta_v1.MetaV1ListMeta = null,
 };
 
+/// NodePodPreemptionPolicy defines the node-level policies governing preemption for pods on this node.
+pub const CoreV1NodePodPreemptionPolicy = struct {
+    /// DisableResizePreemption lists the owners (e.g., autoscalers, operators, administrators) that have requested to disable scheduler and Kubelet preemption for in-place pod resize on this node. If this list is non-empty, resize-induced preemption is disabled on this node. This is an alpha field and requires enabling the InPlacePodVerticalScalingSchedulerPreemption feature gate.
+    disableResizePreemption: ?[]const []const u8 = null,
+};
+
 /// NodeRuntimeHandler is a set of runtime handler information.
 pub const CoreV1NodeRuntimeHandler = struct {
     /// Supported features.
@@ -1452,6 +1502,8 @@ pub const CoreV1NodeSpec = struct {
     podCIDR: ?[]const u8 = null,
     /// podCIDRs represents the IP ranges assigned to the node for usage by Pods on that node. If this field is specified, the 0th entry must match the podCIDR field. It may contain at most 1 value for each of IPv4 and IPv6.
     podCIDRs: ?[]const []const u8 = null,
+    /// PodPreemptionPolicy controls the node-level preemption behaviors for pods on this node. This is an alpha field and requires enabling the InPlacePodVerticalScalingSchedulerPreemption feature gate.
+    podPreemptionPolicy: ?CoreV1NodePodPreemptionPolicy = null,
     /// ID of the node assigned by the cloud provider in the format: <ProviderName>://<ProviderSpecificNodeID>
     providerID: ?[]const u8 = null,
     /// If specified, the node's taints.
@@ -1518,6 +1570,8 @@ pub const CoreV1NodeSystemInfo = struct {
     operatingSystem: []const u8,
     /// OS Image reported by the node from /etc/os-release (e.g. Debian GNU/Linux 7 (wheezy)).
     osImage: []const u8,
+    /// Whether the node is running in a user namespace.
+    runningInUserNamespace: ?bool = null,
     /// Swap Info reported by the node.
     swap: ?CoreV1NodeSwapStatus = null,
     /// SystemUUID reported by the node. For unique machine identification MachineID is preferred. This field is specific to Red Hat hosts https://access.redhat.com/documentation/en-us/red_hat_subscription_management/1/html/rhsm/uuid
@@ -1628,7 +1682,7 @@ pub const CoreV1PersistentVolumeClaimList = struct {
 pub const CoreV1PersistentVolumeClaimSpec = struct {
     /// accessModes contains the desired access modes the volume should have. More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#access-modes-1
     accessModes: ?[]const []const u8 = null,
-    /// dataSource field can be used to specify either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot) * An existing PVC (PersistentVolumeClaim) If the provisioner or an external controller can support the specified data source, it will create a new volume based on the contents of the specified data source. When the AnyVolumeDataSource feature gate is enabled, dataSource contents will be copied to dataSourceRef, and dataSourceRef contents will be copied to dataSource when dataSourceRef.namespace is not specified. If the namespace is specified, then dataSourceRef will not be copied to dataSource.
+    /// dataSource field can be used to specify either: * An existing VolumeSnapshot object (snapshot.storage.k8s.io/VolumeSnapshot) * An existing PVC (PersistentVolumeClaim) If the provisioner or an external controller can support the specified data source, it will create a new volume based on the contents of the specified data source. dataSource contents will be copied to dataSourceRef, and dataSourceRef contents will be copied to dataSource when dataSourceRef.namespace is not specified. If the namespace is specified, then dataSourceRef will not be copied to dataSource.
     dataSource: ?CoreV1TypedLocalObjectReference = null,
     /// dataSourceRef specifies the object from which to populate the volume with data, if a non-empty volume is desired. This may be any object from a non-empty API group (non core object) or a PersistentVolumeClaim object. When this field is specified, volume binding will only succeed if the type of the specified object matches some installed volume populator or dynamic provisioner. This field will replace the functionality of the dataSource field and as such if both fields are non-empty, they must have the same value. For backwards compatibility, when namespace isn't specified in dataSourceRef, both fields (dataSource and dataSourceRef) will be set to the same value automatically if one of them is empty and the other is non-empty. When namespace is specified in dataSourceRef, dataSource isn't set to the same value and must be empty. There are three important differences between dataSource and dataSourceRef: * While dataSource only allows two specific types of objects, dataSourceRef
     dataSourceRef: ?CoreV1TypedObjectReference = null,
@@ -1660,6 +1714,8 @@ pub const CoreV1PersistentVolumeClaimStatus = struct {
     conditions: ?[]const CoreV1PersistentVolumeClaimCondition = null,
     /// currentVolumeAttributesClassName is the current name of the VolumeAttributesClass the PVC is using. When unset, there is no VolumeAttributeClass applied to this PersistentVolumeClaim
     currentVolumeAttributesClassName: ?[]const u8 = null,
+    /// healthStatus contains the latest controller-reported health information for the volume bound to this claim.
+    healthStatus: ?CoreV1VolumeHealthStatus = null,
     /// ModifyVolumeStatus represents the status object of ControllerModifyVolume operation. When this is unset, there is no ModifyVolume operation being attempted.
     modifyVolumeStatus: ?CoreV1ModifyVolumeStatus = null,
     /// phase represents the current phase of PersistentVolumeClaim.
@@ -1849,6 +1905,8 @@ pub const CoreV1PodCertificateProjection = struct {
     maxExpirationSeconds: ?i32 = null,
     /// Kubelet's generated CSRs will be addressed to this signer.
     signerName: []const u8,
+    /// user is Optional: The owner UID of the created file. If specified, the item-level user field takes precedence over defaultUser. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    user: ?i64 = null,
     /// userAnnotations allow pod authors to pass additional information to the signer implementation.  Kubernetes does not restrict or validate this metadata in any way.
     userAnnotations: ?json.ArrayHashMap([]const u8) = null,
 };
@@ -2005,6 +2063,8 @@ pub const CoreV1PodSpec = struct {
     enableServiceLinks: ?bool = null,
     /// List of ephemeral containers run in this pod. Ephemeral containers may be run in an existing pod to perform user-initiated actions such as debugging. This list cannot be specified when creating a pod, and it cannot be modified by updating the pod spec. In order to add an ephemeral container to an existing pod, use the pod's ephemeralcontainers subresource.
     ephemeralContainers: ?[]const CoreV1EphemeralContainer = null,
+    /// evictionResponders reference responders that react to Evictions based on EvictionRequests. Responders should observe and communicate through the Eviction Resource API to help with the graceful termination of a pod. The responders are selected sequentially, according to their specified priority.
+    evictionResponders: ?[]const CoreV1EvictionResponder = null,
     /// HostAliases is an optional list of hosts and IPs that will be injected into the pod's hosts file if specified.
     hostAliases: ?[]const CoreV1HostAlias = null,
     /// Use the host's ipc namespace. Optional: Default to false.
@@ -2031,7 +2091,7 @@ pub const CoreV1PodSpec = struct {
     os: ?CoreV1PodOS = null,
     /// Overhead represents the resource overhead associated with running a pod for a given RuntimeClass. This field will be autopopulated at admission time by the RuntimeClass admission controller. If the RuntimeClass admission controller is enabled, overhead must not be set in Pod create requests. The RuntimeClass admission controller will reject Pod create requests which have the overhead already set. If RuntimeClass is configured and selected in the PodSpec, Overhead will be set to the value defined in the corresponding RuntimeClass, otherwise it will remain unset and treated as zero. More info: https://git.k8s.io/enhancements/keps/sig-node/688-pod-overhead/README.md
     overhead: ?json.ArrayHashMap(api_resource.ApiResourceQuantity) = null,
-    /// PreemptionPolicy is the Policy for preempting pods with lower priority. One of Never, PreemptLowerPriority. Defaults to PreemptLowerPriority if unset.
+    /// PreemptionPolicy is the Policy for preempting pods with lower priority. One of Never, PreemptLowerPriority. When Priority Admission Controller is enabled, it prevents users from setting this field. The admission controller populates this field from PriorityClassName. Defaults to PreemptLowerPriority if unset.
     preemptionPolicy: ?[]const u8 = null,
     /// The priority value. Various system components use this field to find the priority of the pod. When Priority Admission Controller is enabled, it prevents users from setting this field. The admission controller populates this field from PriorityClassName. The higher the value, the higher the priority.
     priority: ?i32 = null,
@@ -2119,6 +2179,8 @@ pub const CoreV1PodStatus = struct {
     resources: ?CoreV1ResourceRequirements = null,
     /// RFC 3339 date and time at which the object was acknowledged by the Kubelet. This is before the Kubelet pulled the container image(s) for the pod.
     startTime: ?meta_v1.MetaV1Time = null,
+    /// volumeHealth contains node-reported health for each volume the pod is using. Populated by the kubelet on the pod's node.
+    volumeHealth: ?[]const CoreV1PodVolumeHealth = null,
 };
 
 /// PodTemplate describes a template for creating copies of a predefined pod.
@@ -2160,6 +2222,16 @@ pub const CoreV1PodTemplateSpec = struct {
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// Specification of the desired behavior of the pod. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     spec: ?CoreV1PodSpec = null,
+};
+
+/// PodVolumeHealth contains health information for a volume used by a pod, reported by the CSI node plugin via the kubelet.
+pub const CoreV1PodVolumeHealth = struct {
+    /// conditions is the set of adverse conditions reported by the CSI node plugin for this volume on this node. At most 16 conditions may be reported.
+    healthConditions: ?[]const CoreV1VolumeHealthCondition = null,
+    /// lastTransitionTime is when the current set of conditions first appeared.
+    lastTransitionTime: ?meta_v1.MetaV1Time = null,
+    /// name matches an entry in pod.spec.volumes.
+    name: []const u8,
 };
 
 /// PortStatus represents the error condition of a service port
@@ -2218,6 +2290,8 @@ pub const CoreV1Probe = struct {
 pub const CoreV1ProjectedVolumeSource = struct {
     /// defaultMode are the mode bits used to set permissions on created files by default. Must be an octal value between 0000 and 0777 or a decimal value between 0 and 511. YAML accepts both octal and decimal values, JSON requires decimal values for mode bits. Directories within the path are not affected by this setting. This might be in conflict with other options that affect the file mode, like fsGroup, and the result can be other mode bits set.
     defaultMode: ?i32 = null,
+    /// defaultUser is Optional: The owner UID of the created files by default. The defaultUser field is only used as a fallback when the item-level user field is unset. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    defaultUser: ?i64 = null,
     /// sources is the list of volume projections. Each entry in this list handles one source.
     sources: ?[]const CoreV1VolumeProjection = null,
 };
@@ -2448,7 +2522,7 @@ pub const CoreV1ResourceRequirements = struct {
 
 /// ResourceStatus represents the status of a single resource allocated to a Pod.
 pub const CoreV1ResourceStatus = struct {
-    /// Name of the resource. Must be unique within the pod and in case of non-DRA resource, match one of the resources from the pod spec. For DRA resources, the value must be "claim:<claim_name>/<request>". When this status is reported about a container, the "claim_name" and "request" must match one of the claims of this container.
+    /// Name of the resource. Must be unique within the pod and in case of non-DRA resource, match one of the resources from the pod spec. For DRA resources, the value must be "claim:<claim_name>/<request>" when container.resources.claims[*].request is set or "claim:<claim_name>" when container.resources.claims[*].request is empty. For DRA-backed extended resources, "claim:<claim_name>/<request>" is used when the claim name and request name are recorded in pod.status.extendedResourceClaimStatus. When this status is reported about a container, the "claim_name" and "request" must match one of the claims of this container.
     name: []const u8,
     /// List of unique resources health. Each element in the list contains an unique resource ID and its health. At a minimum, for the lifetime of a Pod, resource ID must uniquely identify the resource allocated to the Pod on the Node. If other Pod on the same Node reports the status with the same resource ID, it must be the same resource they share. See ResourceID type definition for a specific format it has in various use cases.
     resources: ?[]const CoreV1ResourceHealth = null,
@@ -2617,6 +2691,8 @@ pub const CoreV1SecretReference = struct {
 pub const CoreV1SecretVolumeSource = struct {
     /// defaultMode is Optional: mode bits used to set permissions on created files by default. Must be an octal value between 0000 and 0777 or a decimal value between 0 and 511. YAML accepts both octal and decimal values, JSON requires decimal values for mode bits. Defaults to 0644. Directories within the path are not affected by this setting. This might be in conflict with other options that affect the file mode, like fsGroup, and the result can be other mode bits set.
     defaultMode: ?i32 = null,
+    /// defaultUser is Optional: The owner UID of the created files by default. The defaultUser field is only used as a fallback when the item-level user field is unset. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    defaultUser: ?i64 = null,
     /// items If unspecified, each key-value pair in the Data field of the referenced Secret will be projected into the volume as a file whose name is the key and content is the value. If specified, the listed keys will be projected into the specified paths, and unlisted keys will not be present. If a key is specified which is not present in the Secret, the volume setup will error unless it is marked optional. Paths must be relative and may not contain the '..' path or start with '..'.
     items: ?[]const CoreV1KeyToPath = null,
     /// optional field specify whether the Secret or its keys must be defined
@@ -2721,6 +2797,8 @@ pub const CoreV1ServiceAccountTokenProjection = struct {
     expirationSeconds: ?i64 = null,
     /// path is the path relative to the mount point of the file to project the token into.
     path: []const u8,
+    /// user is Optional: The owner UID of the created file. If specified, the item-level user field takes precedence over defaultUser. (Alpha) This field requires the AtomicWriteVolumeUserFields feature gate to be enabled.
+    user: ?i64 = null,
 };
 
 /// ServiceList holds a list of services.
@@ -3015,9 +3093,29 @@ pub const CoreV1VolumeDevice = struct {
     name: []const u8,
 };
 
+/// VolumeHealthCondition represents an adverse health condition reported for a volume.
+pub const CoreV1VolumeHealthCondition = struct {
+    /// message is a human-readable description. Maximum permitted length of a message is 1024 bytes.
+    message: ?[]const u8 = null,
+    /// reason is a brief CamelCase machine-parseable reason. Together with status it forms the unique identity of a condition entry. Maximum permitted length of a reason is 256 bytes.
+    reason: []const u8,
+    /// status is the machine-parseable health category. Possible values: - "Inaccessible": the volume cannot be accessed. - "DataLoss": data loss has been detected on the volume. - "Degraded": the volume is functioning with reduced capability.
+    status: []const u8,
+};
+
+/// VolumeHealthStatus contains health information for a volume reported by the CSI controller plugin.
+pub const CoreV1VolumeHealthStatus = struct {
+    /// conditions is the set of adverse conditions reported by the CSI controller plugin. An empty list means no adverse condition. At most 16 conditions may be reported.
+    healthConditions: ?[]const CoreV1VolumeHealthCondition = null,
+    /// lastTransitionTime is when the current set of conditions first appeared.
+    lastTransitionTime: ?meta_v1.MetaV1Time = null,
+};
+
 /// VolumeMount describes a mounting of a Volume within a container.
 pub const CoreV1VolumeMount = struct {
-    /// Path within the container at which the volume should be mounted.  Must not contain ':'.
+    /// bindMountOptions is the list of additional bind mount options to apply when mounting this volume into the container. Allowed values are noexec, nodev, and nosuid. These are Linux mount options and have no effect on Windows nodes. This field is not supported with image volumes. This is an alpha field and requires enabling the VolumeBindMountOptions feature gate.
+    bindMountOptions: ?[]const []const u8 = null,
+    /// Path within the container at which the volume should be mounted.
     mountPath: []const u8,
     /// mountPropagation determines how mounts are propagated from the host to container and the other way around. When not set, MountPropagationNone is used. This field is beta in 1.10. When RecursiveReadOnly is set to IfPossible or to Enabled, MountPropagation must be None or unspecified (which defaults to None).
     mountPropagation: ?[]const u8 = null,

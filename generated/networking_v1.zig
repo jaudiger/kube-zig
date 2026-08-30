@@ -38,7 +38,7 @@ pub const NetworkingV1IPAddress = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec is the desired state of the IPAddress. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     spec: NetworkingV1IPAddressSpec,
@@ -58,7 +58,7 @@ pub const NetworkingV1IPAddressList = struct {
 
 /// IPAddressSpec describe the attributes in an IP Address.
 pub const NetworkingV1IPAddressSpec = struct {
-    /// ParentRef references the resource that an IPAddress is attached to. An IPAddress must reference a parent object.
+    /// parentRef references the resource that an IPAddress is attached to. An IPAddress must reference a parent object.
     parentRef: NetworkingV1ParentReference,
 };
 
@@ -85,7 +85,7 @@ pub const NetworkingV1Ingress = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec is the desired state of the Ingress. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     spec: ?NetworkingV1IngressSpec = null,
@@ -116,7 +116,7 @@ pub const NetworkingV1IngressClass = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec is the desired state of the IngressClass. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     spec: ?NetworkingV1IngressClassSpec = null,
@@ -198,6 +198,7 @@ pub const NetworkingV1IngressPortStatus = struct {
 pub const NetworkingV1IngressRule = struct {
     /// host is the fully qualified domain name of a network host, as defined by RFC 3986. Note the following deviations from the "host" part of the URI as defined in RFC 3986: 1. IPs are not allowed. Currently an IngressRuleValue can only apply to
     host: ?[]const u8 = null,
+    /// http is a HTTP IngressRuleValue, which contains a list of http selectors
     http: ?NetworkingV1HTTPIngressRuleValue = null,
 };
 
@@ -250,7 +251,7 @@ pub const NetworkingV1NetworkPolicy = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec represents the specification of the desired behavior for this NetworkPolicy.
     spec: ?NetworkingV1NetworkPolicySpec = null,
@@ -318,13 +319,13 @@ pub const NetworkingV1NetworkPolicySpec = struct {
 
 /// ParentReference describes a reference to a parent object.
 pub const NetworkingV1ParentReference = struct {
-    /// Group is the group of the object being referenced.
+    /// group is the group of the object being referenced.
     group: ?[]const u8 = null,
-    /// Name is the name of the object being referenced.
+    /// name is the name of the object being referenced.
     name: []const u8,
-    /// Namespace is the namespace of the object being referenced.
+    /// namespace is the namespace of the object being referenced.
     namespace: ?[]const u8 = null,
-    /// Resource is the resource of the object being referenced.
+    /// resource is the resource of the object being referenced.
     resource: []const u8,
 };
 
@@ -351,7 +352,7 @@ pub const NetworkingV1ServiceCIDR = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
     /// spec is the desired state of the ServiceCIDR. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
     spec: ?NetworkingV1ServiceCIDRSpec = null,
@@ -373,7 +374,7 @@ pub const NetworkingV1ServiceCIDRList = struct {
 
 /// ServiceCIDRSpec define the CIDRs the user wants to use for allocating ClusterIPs for Services.
 pub const NetworkingV1ServiceCIDRSpec = struct {
-    /// CIDRs defines the IP blocks in CIDR notation (e.g. "192.168.0.0/24" or "2001:db8::/64") from which to assign service cluster IPs. Max of two CIDRs is allowed, one of each IP family. This field is immutable.
+    /// cidrs defines the IP blocks in CIDR notation (e.g. "192.168.0.0/24" or "2001:db8::/64") from which to assign service cluster IPs. Max of two CIDRs is allowed, one of each IP family. This field is immutable.
     cidrs: ?[]const []const u8 = null,
 };
 

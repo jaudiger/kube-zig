@@ -5,6 +5,7 @@ const std = @import("std");
 const json = std.json;
 const core_v1 = @import("core_v1.zig");
 const meta_v1 = @import("meta_v1.zig");
+const scheduling_v1alpha3 = @import("scheduling_v1alpha3.zig");
 
 /// CronJob represents the configuration of a single cron job.
 pub const BatchV1CronJob = struct {
@@ -122,6 +123,18 @@ pub const BatchV1JobList = struct {
     metadata: ?meta_v1.MetaV1ListMeta = null,
 };
 
+/// JobSchedulingConfiguration composes the reusable workload-aware scheduling building blocks.
+pub const BatchV1JobSchedulingConfiguration = struct {
+    /// DisruptionMode defines the mode in which the Job's pods can be disrupted. One of Single, All. This field is immutable after creation: it may not be added or removed, and the selected mode may not be changed.
+    disruptionMode: ?scheduling_v1alpha3.SchedulingV1alpha3WorkloadPodGroupDisruptionMode = null,
+    /// ResourceClaims defines which ResourceClaims may be shared among Pods in the Job. Pods consume the devices allocated to a PodGroup's claim by defining a claim in its own Spec.ResourceClaims that matches the PodGroup's claim exactly. The claim must have the same name and refer to the same ResourceClaim or ResourceClaimTemplate. At most 4 claims may be set, matching the limit on the resulting PodGroup. This list is immutable after creation: entries may neither be added, removed, nor modified.
+    resourceClaims: ?[]const scheduling_v1alpha3.SchedulingV1alpha3WorkloadPodGroupResourceClaim = null,
+    /// SchedulingConstraints defines scheduling constraints (e.g. topology) for the Job's pods. This field is immutable after creation.
+    schedulingConstraints: ?scheduling_v1alpha3.SchedulingV1alpha3WorkloadPodGroupSchedulingConstraints = null,
+    /// SchedulingPolicy defines the scheduling policy for this Job. Exactly one of Basic or Gang must be set. This field is immutable after creation: the policy may not be added or removed. The policy variant (basic/gang) is frozen by hand-written validation; only schedulingPolicy.gang.minCount may be changed.
+    schedulingPolicy: ?scheduling_v1alpha3.SchedulingV1alpha3WorkloadPodGroupSchedulingPolicy = null,
+};
+
 /// JobSpec describes how the job execution will look like.
 pub const BatchV1JobSpec = struct {
     /// Specifies the duration in seconds relative to the startTime that the job may be continuously active before the system tries to terminate it; value must be positive integer. If a Job is suspended (at creation or through an update), this timer will effectively be stopped and reset when the Job is resumed again.
@@ -146,6 +159,8 @@ pub const BatchV1JobSpec = struct {
     podFailurePolicy: ?BatchV1PodFailurePolicy = null,
     /// podReplacementPolicy specifies when to create replacement Pods. Possible values are: - TerminatingOrFailed means that we recreate pods
     podReplacementPolicy: ?[]const u8 = null,
+    /// scheduling defines the Workload-aware Scheduling configuration for this Job. When set, it specifies the scheduling policy (basic or gang), topology constraints, disruption mode, and shared resource claims. When omitted, the Job defaults to the basic scheduling policy, which behaves as standard pod-by-pod scheduling. This field is alpha-level and requires the WorkloadWithJob feature gate. This field is immutable, including whether it is set at all, only policy.gang.minCount may be changed after creation.
+    scheduling: ?BatchV1JobSchedulingConfiguration = null,
     /// A label query over pods that should match the pod count. Normally, the system sets this field for you. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors
     selector: ?meta_v1.MetaV1LabelSelector = null,
     /// successPolicy specifies the policy when the Job can be declared as succeeded. If empty, the default behavior applies - the Job is declared as succeeded only when the number of succeeded pods equals to the completions. When the field is specified, it must be immutable and works only for the Indexed Jobs. Once the Job meets the SuccessPolicy, the lingering pods are terminated.

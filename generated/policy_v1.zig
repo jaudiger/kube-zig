@@ -10,11 +10,11 @@ const util_intstr = @import("util_intstr.zig");
 pub const PolicyV1Eviction = struct {
     /// APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
     apiVersion: ?[]const u8 = null,
-    /// DeleteOptions may be provided
+    /// deleteOptions may be provided
     deleteOptions: ?meta_v1.MetaV1DeleteOptions = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// ObjectMeta describes the pod that is being evicted.
+    /// metadata describes the pod that is being evicted.
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
 };
 
@@ -33,11 +33,11 @@ pub const PolicyV1PodDisruptionBudget = struct {
     apiVersion: ?[]const u8 = null,
     /// Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
     kind: ?[]const u8 = null,
-    /// Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+    /// metadata is the standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
     metadata: ?meta_v1.MetaV1ObjectMeta = null,
-    /// Specification of the desired behavior of the PodDisruptionBudget.
+    /// spec is the specification of the desired behavior of the PodDisruptionBudget.
     spec: ?PolicyV1PodDisruptionBudgetSpec = null,
-    /// Most recently observed status of the PodDisruptionBudget.
+    /// status is the most recently observed status of the PodDisruptionBudget.
     status: ?PolicyV1PodDisruptionBudgetStatus = null,
 };
 
@@ -55,13 +55,13 @@ pub const PolicyV1PodDisruptionBudgetList = struct {
 
 /// PodDisruptionBudgetSpec is a description of a PodDisruptionBudget.
 pub const PolicyV1PodDisruptionBudgetSpec = struct {
-    /// An eviction is allowed if at most "maxUnavailable" pods selected by "selector" are unavailable after the eviction, i.e. even in absence of the evicted pod. For example, one can prevent all voluntary evictions by specifying 0. This is a mutually exclusive setting with "minAvailable".
+    /// maxUnavailable indicates that an eviction is allowed if at most "maxUnavailable" pods selected by "selector" are unavailable after the eviction, i.e. even in absence of the evicted pod. For example, one can prevent all voluntary evictions by specifying 0. This is a mutually exclusive setting with "minAvailable".
     maxUnavailable: ?util_intstr.UtilIntstrIntOrString = null,
-    /// An eviction is allowed if at least "minAvailable" pods selected by "selector" will still be available after the eviction, i.e. even in the absence of the evicted pod.  So for example you can prevent all voluntary evictions by specifying "100%".
+    /// minAvailable indicates that an eviction is allowed if at least "minAvailable" pods selected by "selector" will still be available after the eviction, i.e. even in the absence of the evicted pod.  So for example you can prevent all voluntary evictions by specifying "100%".
     minAvailable: ?util_intstr.UtilIntstrIntOrString = null,
-    /// Label query over pods whose evictions are managed by the disruption budget. A null selector will match no pods, while an empty ({}) selector will select all pods within the namespace.
+    /// selector is a label query over pods whose evictions are managed by the disruption budget. A null selector will match no pods, while an empty ({}) selector will select all pods within the namespace.
     selector: ?meta_v1.MetaV1LabelSelector = null,
-    /// UnhealthyPodEvictionPolicy defines the criteria for when unhealthy pods should be considered for eviction. Current implementation considers healthy pods, as pods that have status.conditions item with type="Ready",status="True".
+    /// unhealthyPodEvictionPolicy defines the criteria for when unhealthy pods should be considered for eviction. Current implementation considers healthy pods, as pods that have status.conditions item with type="Ready",status="True".
     unhealthyPodEvictionPolicy: ?[]const u8 = null,
 };
 

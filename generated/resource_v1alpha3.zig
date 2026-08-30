@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const json = std.json;
+const api_resource = @import("api_resource.zig");
 const meta_v1 = @import("meta_v1.zig");
 
 /// The device this taint is attached to has the "effect" on any claim which does not tolerate the taint and, through the claim, to pods using the claim.
@@ -76,6 +77,18 @@ pub const ResourceV1alpha3DeviceTaintSelector = struct {
     pool: ?[]const u8 = null,
 };
 
+/// PartitionTypeStatus reports allocatability for a single partition type, identified by the value of a grouping attribute.
+pub const ResourceV1alpha3PartitionTypeStatus = struct {
+    /// Allocatable is the number of additional devices of this partition type that could still be allocated given current shared-counter consumption.
+    allocatable: i32,
+    /// Attribute is the fully qualified name of the device attribute whose value groups this entry. It is the PartitionTypeAttribute declared by the devices' own slice, or the default named in the request when their slice declares none.
+    attribute: []const u8,
+    /// Total is the number of devices of this partition type in the pool.
+    total: i32,
+    /// Type is the partition type value (e.g. "Full" or "Half").
+    type: []const u8,
+};
+
 /// PoolStatus contains status information for a single resource pool.
 pub const ResourceV1alpha3PoolStatus = struct {
     /// AllocatedDevices is the number of devices currently allocated to claims. A value of 0 means no devices are allocated. May be unset when validationError is set.
@@ -88,10 +101,14 @@ pub const ResourceV1alpha3PoolStatus = struct {
     generation: i64,
     /// NodeName is the node this pool is associated with. When omitted, the pool is not associated with a specific node. Must be a valid DNS subdomain name (RFC1123).
     nodeName: ?[]const u8 = null,
+    /// PartitionSummary reports allocatability per (attribute, partition type) for a partitionable pool that publishes SharedCounters. Each entry names the grouping attribute it was resolved from: the PartitionTypeAttribute declared by a device's own slice, or for devices whose slice declares none, the default named in the request. A pool that mixes partitions declared under different attributes reports each independently. When no slice declares an attribute and the request names no default, the pool reports no partition summary.
+    partitionSummary: ?[]const ResourceV1alpha3PartitionTypeStatus = null,
     /// PoolName is the name of the pool. Must be a valid resource pool name (DNS subdomains separated by "/").
     poolName: []const u8,
     /// ResourceSliceCount is the number of ResourceSlices that make up this pool. May be unset when validationError is set.
     resourceSliceCount: ?i32 = null,
+    /// ShareableSummary reports aggregate capacity for a pool that contains devices with AllowMultipleAllocations. It is populated only when at least one device in the pool is shareable.
+    shareableSummary: ?ResourceV1alpha3ShareableSummaryStatus = null,
     /// TotalDevices is the total number of devices in the pool across all slices. A value of 0 means the pool has no devices. May be unset when validationError is set.
     totalDevices: ?i32 = null,
     /// UnavailableDevices is the number of devices that are not available due to taints or other conditions, but are not allocated. A value of 0 means all unallocated devices are available. May be unset when validationError is set.
@@ -137,6 +154,8 @@ pub const ResourceV1alpha3ResourcePoolStatusRequestList = struct {
 
 /// ResourcePoolStatusRequestSpec defines the filters for the pool status request.
 pub const ResourceV1alpha3ResourcePoolStatusRequestSpec = struct {
+    /// DefaultPartitionTypeAttribute optionally names a device attribute (by its fully qualified name, e.g. "gpu.example.com/profile") to use as the default grouping attribute for partitionable devices whose slice has not declared one themselves.
+    defaultPartitionTypeAttribute: ?[]const u8 = null,
     /// Driver specifies the DRA driver name to filter pools. Only pools from ResourceSlices with this driver will be included. Must be a DNS subdomain (e.g., "gpu.example.com").
     driver: []const u8,
     /// Limit optionally specifies the maximum number of pools to return in the status. If more pools match the filter criteria, the response will be truncated (i.e., len(status.pools) < status.poolCount).
@@ -153,4 +172,26 @@ pub const ResourceV1alpha3ResourcePoolStatusRequestStatus = struct {
     poolCount: i32,
     /// Pools contains the first `spec.limit` matching pools, sorted by driver then pool name. If `len(pools) < poolCount`, the list was truncated. When omitted, no pools matched the request filters.
     pools: ?[]const ResourceV1alpha3PoolStatus = null,
+};
+
+/// ShareableCapacityStatus reports aggregate amounts for a single shareable capacity key.
+pub const ResourceV1alpha3ShareableCapacityStatus = struct {
+    /// Available is Total minus Consumed, never negative.
+    available: api_resource.ApiResourceQuantity,
+    /// Consumed is the amount drawn by current allocations.
+    consumed: api_resource.ApiResourceQuantity,
+    /// Name is the capacity name.
+    name: []const u8,
+    /// Total is the sum of this capacity across shareable devices in the pool.
+    total: api_resource.ApiResourceQuantity,
+};
+
+/// ShareableSummaryStatus reports aggregate capacity for a pool that contains devices with AllowMultipleAllocations.
+pub const ResourceV1alpha3ShareableSummaryStatus = struct {
+    /// Capacity reports aggregate total, consumed, and available amounts per shareable capacity key across the pool.
+    capacity: ?[]const ResourceV1alpha3ShareableCapacityStatus = null,
+    /// FullyAvailableDevices is the number of shareable devices with no capacity consumed.
+    fullyAvailableDevices: i32,
+    /// PartiallyAvailableDevices is the number of shareable devices with some but not all capacity consumed.
+    partiallyAvailableDevices: i32,
 };
