@@ -77,6 +77,16 @@ jobs:
         if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
         run: zig fmt .
 
+      - name: Create GitHub App token
+        if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PEM_FILE }}
+          owner: ${{ github.repository_owner }}
+          repositories: kube-zig
+
       - name: Create pull request
         if: steps.check.outputs.needed == 'true' && steps.existing_pr.outputs.exists == 'false'
         run: |
@@ -99,4 +109,4 @@ jobs:
           EOF
           )"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
