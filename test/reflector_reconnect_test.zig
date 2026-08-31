@@ -69,6 +69,29 @@ fn freeInitPage(allocator: std.mem.Allocator, page: ReflectorEvent(Pod).InitPage
     allocator.free(page.items);
 }
 
+const WatchCollector = struct {
+    events: std.ArrayList(kube_zig.ParsedEvent(Pod)),
+
+    fn init() @This() {
+        return .{ .events = .empty };
+    }
+
+    fn deinit(self: *@This()) void {
+        for (self.events.items) |event| event.deinit();
+        self.events.deinit(testing.allocator);
+    }
+
+    fn receive(self: *@This(), _: std.Io, event: *const kube_zig.ParsedEvent(Pod)) anyerror!void {
+        try self.events.append(testing.allocator, event.*);
+        @constCast(event).arena = null;
+    }
+
+    fn run(self: *@This(), reflector: *Reflector(Pod)) !void {
+        const sink = kube_zig.EventSink(Pod).fromTypedCtx(@This(), self, @This().receive);
+        try reflector.runWatch(std.testing.io, sink);
+    }
+};
+
 // ============================================================================
 // watch 410 triggers re-list
 // ============================================================================
@@ -91,7 +114,7 @@ test "watch 410 triggers re-list" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // Step 1: initial listing returns init_page.
     const ev1 = (try reflector.step(std.testing.io)).?;
@@ -99,9 +122,11 @@ test "watch 410 triggers re-list" {
     freeInitPage(testing.allocator, ev1.init_page);
     try testing.expect(reflector.state == .watching);
 
-    // Step 2: watching opens stream, reads ERROR 410, returns .gone.
-    const ev2 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev2 == .gone);
+    // The watch task opens the stream, reads ERROR 410, and enters .gone.
+    var collector = WatchCollector.init();
+    defer collector.deinit();
+    try collector.run(&reflector);
+    try testing.expectEqual(@as(usize, 0), collector.events.items.len);
     try testing.expect(reflector.state == .gone);
 
     // Step 3: gone resets rv to "" (quorum read), returns null.
@@ -139,32 +164,33 @@ test "network disconnect reconnects with resourceVersion" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // Step 1: list.
     const ev1 = (try reflector.step(std.testing.io)).?;
     try testing.expect(ev1 == .init_page);
     freeInitPage(testing.allocator, ev1.init_page);
 
-    // Step 2: watch ADDED event (rv updated to 101).
-    const ev2 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev2 == .watch_event);
-    ev2.watch_event.deinit();
+    // Step 2: the watch task delivers the ADDED event and ends cleanly.
+    var collector = WatchCollector.init();
+    defer collector.deinit();
+    try collector.run(&reflector);
+    try testing.expectEqual(@as(usize, 1), collector.events.items.len);
+    try testing.expect(collector.events.items[0].event == .added);
     try testing.expectEqualStrings("101", reflector.resource_version.slice().?);
+    try testing.expect(reflector.state == .watch_ended);
 
-    // Step 3: stream ends cleanly, returns watch_ended.
-    const ev3 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev3 == .watch_ended);
-
-    // Step 4: watch_ended transitions back to watching (null step).
-    const ev4 = try reflector.step(std.testing.io);
-    try testing.expect(ev4 == null);
+    // Transition back to watching.
+    const ev3 = try reflector.step(std.testing.io);
+    try testing.expect(ev3 == null);
     try testing.expect(reflector.state == .watching);
 
-    // Step 5: new watch opens, reconnected with rv=101.
-    const ev5 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev5 == .watch_event);
-    ev5.watch_event.deinit();
+    // The reconnected watch uses rv=101.
+    collector.events.items[0].deinit();
+    collector.events.clearRetainingCapacity();
+    try collector.run(&reflector);
+    try testing.expectEqual(@as(usize, 1), collector.events.items.len);
+    try testing.expect(collector.events.items[0].event == .added);
 
     // Verify: the reconnected watch request (3rd request, index 2) uses rv=101.
     const req = mock.getRequest(2).?;
@@ -189,16 +215,19 @@ test "bookmark updates resourceVersion" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // Step 1: list (rv 100).
     const ev1 = (try reflector.step(std.testing.io)).?;
     freeInitPage(testing.allocator, ev1.init_page);
     try testing.expectEqualStrings("100", reflector.resource_version.slice().?);
 
-    // Step 2: watch reads BOOKMARK rv=150. Returns null (internal-only step).
-    const ev2 = try reflector.step(std.testing.io);
-    try testing.expect(ev2 == null);
+    // Step 2: the watch task reads BOOKMARK rv=150 and updates the reflector.
+    var collector = WatchCollector.init();
+    defer collector.deinit();
+    try collector.run(&reflector);
+    try testing.expectEqual(@as(usize, 1), collector.events.items.len);
+    try testing.expect(collector.events.items[0].event == .bookmark);
     try testing.expectEqualStrings("150", reflector.resource_version.slice().?);
 }
 
@@ -219,7 +248,7 @@ test "repeated failures use backoff" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // Each step should return .transient_error with incrementing backoff.
     for (0..5) |i| {
@@ -255,7 +284,7 @@ test "context cancellation stops reflector" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, cs.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // step() should return error.Canceled immediately.
     try testing.expectError(error.Canceled, reflector.step(std.testing.io));
@@ -283,7 +312,7 @@ test "empty re-list after 410 clears cache" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     var store = Store(Pod).init(testing.allocator);
     defer store.deinit(std.testing.io);
@@ -296,9 +325,12 @@ test "empty re-list after 410 clears cache" {
     testing.allocator.free(ev1.init_page.items);
     try testing.expectEqual(@as(u32, 2), store.len(std.testing.io));
 
-    // Step 2: watch returns 410 ERROR.
-    const ev2 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev2 == .gone);
+    // The watch returns 410 ERROR and enters .gone.
+    var collector = WatchCollector.init();
+    defer collector.deinit();
+    try collector.run(&reflector);
+    try testing.expectEqual(@as(usize, 0), collector.events.items.len);
+    try testing.expect(reflector.state == .gone);
 
     // Step 3: gone resets rv.
     _ = try reflector.step(std.testing.io);
@@ -341,19 +373,20 @@ test "partial JSON line treated as disconnect" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // Step 1: list succeeds.
     const ev1 = (try reflector.step(std.testing.io)).?;
     freeInitPage(testing.allocator, ev1.init_page);
 
-    // Step 2: watch opens, reads partial JSON with no trailing newline.
-    // readLine logs the dropped bytes and returns null, so next() returns null.
-    // The reflector sees a clean stream end and emits watch_ended.
-    const ev2 = (try reflector.step(std.testing.io)).?;
-    try testing.expect(ev2 == .watch_ended);
+    // Step 2: the watch task treats partial JSON without a trailing newline as
+    // a clean stream end.
+    var collector = WatchCollector.init();
+    defer collector.deinit();
+    try collector.run(&reflector);
+    try testing.expectEqual(@as(usize, 0), collector.events.items.len);
+    try testing.expect(reflector.state == .watch_ended);
     try testing.expectEqual(@as(u32, 0), reflector.consecutive_errors);
-    try testing.expect(reflector.watch_stream == null);
 }
 
 // ============================================================================
@@ -376,7 +409,7 @@ test "410 on initial list retries without resourceVersion" {
     defer c.deinit(std.testing.io);
 
     var reflector = Reflector(Pod).init(testing.allocator, &c, c.context(), "default", .{});
-    defer reflector.deinit(std.testing.io);
+    defer reflector.deinit();
 
     // Step 1: initial list returns 410 Gone.
     const ev1 = (try reflector.step(std.testing.io)).?;

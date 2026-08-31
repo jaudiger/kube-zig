@@ -72,10 +72,6 @@ pub fn ReflectorEvent(comptime T: type) type {
         /// Ownership of arenas transfers to the receiver.
         init_page: InitPage,
 
-        /// A single watch event (add/modify/delete).
-        /// Ownership of the ParsedEvent's arena transfers to the receiver.
-        watch_event: watch_mod.ParsedEvent(T),
-
         /// The watch stream ended cleanly (server timeout). Reflector will reconnect.
         watch_ended: void,
 
@@ -160,8 +156,8 @@ pub const ReflectorOptions = struct {
     logger: Logger = Logger.noop,
 };
 
-/// List+watch lifecycle manager. Drives the initial list and ongoing watch,
-/// producing events for the Informer to process via `step()`.
+/// List+watch lifecycle manager. Drives the initial list via `step()` and
+/// delivers the ongoing watch through `runWatch()`.
 pub fn Reflector(comptime T: type) type {
     const meta = T.resource_meta;
     const ListT = meta.list_kind;
@@ -182,7 +178,6 @@ pub fn Reflector(comptime T: type) type {
         state: State,
         resource_version: ResourceVersion,
         continue_token: ?[]const u8,
-        watch_stream: ?watch_mod.WatchStream(T),
         options: ReflectorOptions,
         metrics: InformerMetrics,
         logger: Logger,
@@ -206,7 +201,6 @@ pub fn Reflector(comptime T: type) type {
                 .state = .initial,
                 .resource_version = .{},
                 .continue_token = null,
-                .watch_stream = null,
                 .options = opts,
                 .metrics = opts.metrics,
                 .logger = opts.logger.withScope("reflector"),
@@ -223,20 +217,83 @@ pub fn Reflector(comptime T: type) type {
         }
 
         /// Release all resources owned by the reflector.
-        pub fn deinit(self: *Self, io: std.Io) void {
-            self.closeWatch(io);
+        pub fn deinit(self: *Self) void {
             if (self.continue_token) |ct| self.allocator.free(ct);
         }
 
-        /// Run one step of the reflector state machine.
-        /// Returns an event for the informer, or null for internal-only steps.
+        /// Run the current watch until it ends or fails, delivering events to `sink`.
+        /// The call owns the stream connection and closes it before returning.
+        /// Run it in an `std.Io.Future` when the watch must be canceled externally.
+        pub fn runWatch(self: *Self, io: std.Io, sink: watch_mod.EventSink(T)) anyerror!void {
+            std.debug.assert(self.state == .watching);
+            const timeout = self.randomizedWatchTimeout(io);
+            const api = ApiT.init(self.client, self.ctx, self.namespace);
+            var stream = api.watch(.{
+                .label_selector = self.options.label_selector,
+                .field_selector = self.options.field_selector,
+                .resource_version = self.resource_version.slice(),
+                .timeout_seconds = timeout,
+                .allow_bookmarks = true,
+            }) catch |err| {
+                if (err == error.HttpGone) {
+                    self.transitionTo(.gone);
+                    return;
+                }
+                return self.handleWatchError(err);
+            };
+            defer stream.deinit();
+
+            const RunSink = struct {
+                reflector: *Self,
+                downstream: watch_mod.EventSink(T),
+
+                fn receive(raw: *@This(), callback_io: std.Io, event: *const watch_mod.ParsedEvent(T)) anyerror!void {
+                    switch (event.event) {
+                        .bookmark => |bookmark| try raw.reflector.updateResourceVersion(bookmark.resource_version),
+                        .api_error => |api_error| {
+                            if (api_error.code) |code| {
+                                if (code == 410) return error.HttpGone;
+                                if (code == 401) return error.HttpUnauthorized;
+                                if (code == 403) return error.HttpForbidden;
+                            }
+                            return error.HttpRequestFailed;
+                        },
+                        .added, .modified, .deleted => {
+                            if (raw.reflector.extractEventRV(event.event)) |resource_version| {
+                                try raw.reflector.updateResourceVersion(resource_version);
+                            }
+                        },
+                    }
+                    try raw.downstream.emit(callback_io, event);
+                }
+            };
+            var run_sink = RunSink{ .reflector = self, .downstream = sink };
+            const reflector_sink = watch_mod.EventSink(T).fromTypedCtx(RunSink, &run_sink, RunSink.receive);
+
+            self.resetErrors();
+            stream.run(io, reflector_sink) catch |err| {
+                if (err == error.HttpGone) {
+                    self.transitionTo(.gone);
+                    return;
+                }
+                if (err == error.WatchRelist and self.state == .initial) return;
+                if (err == error.Canceled) return error.Canceled;
+                return self.handleWatchError(err);
+            };
+            if (self.state == .initial or self.state == .gone) return;
+            self.transitionTo(.watch_ended);
+        }
+
+        /// Run one non-watch step of the reflector lifecycle.
+        /// Call `runWatch()` while the reflector is in the `.watching` state;
+        /// calling `step()` there returns `error.WatchRequiresRun`.
         pub fn step(self: *Self, io: std.Io) !?ReflectorEvent(T) {
             self.ctx.check(io) catch return error.Canceled;
 
             return switch (self.state) {
                 .initial => self.stepInitial(io),
                 .listing => self.stepListing(io),
-                .watching => self.stepWatching(io),
+                .watching => return error.WatchRequiresRun,
                 .watch_ended => self.stepWatchEnded(),
                 .gone => self.stepGone(),
                 .failed => return error.ReflectorFailed,
@@ -371,107 +428,6 @@ pub fn Reflector(comptime T: type) type {
             }
         }
 
-        fn stepWatching(self: *Self, io: std.Io) !?ReflectorEvent(T) {
-            // Open watch stream if needed.
-            if (self.watch_stream == null) {
-                self.logger.info("watch reconnecting", &.{
-                    LogField.string("resource", meta.resource),
-                    LogField.string("resource_version", self.resource_version.slice() orelse ""),
-                });
-                const timeout = self.randomizedWatchTimeout(io);
-                const api = ApiT.init(self.client, self.ctx, self.namespace);
-                self.watch_stream = api.watch(io, .{
-                    .label_selector = self.options.label_selector,
-                    .field_selector = self.options.field_selector,
-                    .resource_version = self.resource_version.slice(),
-                    .timeout_seconds = timeout,
-                    .allow_bookmarks = true,
-                }) catch |err| {
-                    self.watch_stream = null;
-                    // Check for 410 Gone from the HTTP response.
-                    if (err == error.HttpGone) {
-                        self.transitionTo(.gone);
-                        return .gone;
-                    }
-                    if (err == error.HttpUnauthorized or err == error.HttpForbidden) {
-                        self.logger.err("watch auth error", &.{
-                            LogField.string("resource", meta.resource),
-                            LogField.string("error", @errorName(err)),
-                        });
-                    }
-                    return self.recordError(err);
-                };
-                self.resetErrors();
-            }
-
-            // Read next event from the watch stream.
-            const parsed_event = self.watch_stream.?.next(io) catch |err| {
-                self.closeWatch(io);
-                if (err == error.HttpGone) {
-                    self.transitionTo(.gone);
-                    return .gone;
-                }
-                return self.recordError(err);
-            };
-
-            if (parsed_event) |event| {
-                switch (event.event) {
-                    .bookmark => |bm| {
-                        // Update RV silently, don't forward to informer.
-                        self.updateResourceVersion(bm.resource_version) catch |err| {
-                            event.deinit();
-                            return self.recordError(err);
-                        };
-                        event.deinit();
-                        return null; // internal-only step
-                    },
-                    .api_error => |api_err| {
-                        if (api_err.code) |c| if (c == 410) {
-                            event.deinit();
-                            self.closeWatch(io);
-                            self.transitionTo(.gone);
-                            return .gone;
-                        };
-                        const code = api_err.code;
-                        if (code) |c| if (c == 401 or c == 403) {
-                            self.logger.err("watch stream auth error", &.{
-                                LogField.string("resource", meta.resource),
-                                LogField.uint("status_code", @intCast(c)),
-                            });
-                        };
-                        const watch_err: anyerror = if (code) |c| switch (c) {
-                            401 => error.HttpUnauthorized,
-                            403 => error.HttpForbidden,
-                            else => error.HttpRequestFailed,
-                        } else error.HttpRequestFailed;
-                        event.deinit();
-                        self.closeWatch(io);
-                        return self.recordError(watch_err);
-                    },
-                    .added, .modified, .deleted => {
-                        self.resetErrors();
-                        // Update RV from the event object.
-                        const ev_rv = self.extractEventRV(event.event);
-                        if (ev_rv) |rv_str| {
-                            self.updateResourceVersion(rv_str) catch {
-                                // Can't track RV but still forward the event.
-                                return .{ .watch_event = event };
-                            };
-                        }
-                        return .{ .watch_event = event };
-                    },
-                }
-            } else {
-                // Clean end of stream (server timeout or connection close).
-                self.logger.warn("watch stream ended (server timeout), will reconnect", &.{
-                    LogField.string("resource", meta.resource),
-                });
-                self.closeWatch(io);
-                self.transitionTo(.watch_ended);
-                return .watch_ended;
-            }
-        }
-
         fn stepWatchEnded(self: *Self) !?ReflectorEvent(T) {
             // Reconnect from last known resource version.
             self.transitionTo(.watching);
@@ -492,24 +448,16 @@ pub fn Reflector(comptime T: type) type {
         /// Force a re-list by resetting to initial state with a quorum read.
         /// Called by the informer when a watch event cannot be applied
         /// (e.g. OOM on store.put), to ensure the cache is eventually consistent.
-        pub fn forceRelist(self: *Self, io: std.Io) void {
+        pub fn forceRelist(self: *Self) void {
             self.logger.warn("forcing re-list", &.{
                 LogField.string("resource", meta.resource),
             });
-            self.closeWatch(io);
             self.resource_version.assign("") catch unreachable;
             std.debug.assert(self.state != .failed);
             self.state = .initial;
         }
 
         // Helpers
-        fn closeWatch(self: *Self, io: std.Io) void {
-            if (self.watch_stream) |*ws| {
-                ws.close(io);
-                self.watch_stream = null;
-            }
-        }
-
         fn randomizedWatchTimeout(self: *Self, io: std.Io) i64 {
             const base = self.options.watch_timeout_seconds;
             if (base <= 0) return 300;
@@ -556,7 +504,7 @@ pub fn Reflector(comptime T: type) type {
             }
         }
 
-        fn extractEventRV(_: *Self, event: watch_mod.WatchEvent(T)) ?[]const u8 {
+        pub fn extractEventRV(_: *Self, event: watch_mod.WatchEvent(T)) ?[]const u8 {
             const obj = switch (event) {
                 .added => |o| o,
                 .modified => |o| o,
@@ -607,8 +555,16 @@ pub fn Reflector(comptime T: type) type {
             return result_list.toOwnedSlice(self.allocator);
         }
 
-        fn updateResourceVersion(self: *Self, new_rv: []const u8) error{ResourceVersionTooLong}!void {
+        pub fn updateResourceVersion(self: *Self, new_rv: []const u8) error{ResourceVersionTooLong}!void {
             try self.resource_version.assign(new_rv);
+        }
+
+        fn handleWatchError(self: *Self, err: anyerror) anyerror {
+            return switch (self.recordError(err)) {
+                .transient_error => err,
+                .persistent_error => error.ReflectorFailed,
+                else => unreachable,
+            };
         }
 
         /// Record a transient error and return the appropriate event.

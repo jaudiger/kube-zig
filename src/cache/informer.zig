@@ -21,7 +21,7 @@ const Logger = logging_mod.Logger;
 const LogField = logging_mod.Field;
 
 /// Errors that `Informer.run` can return.
-pub const InformerError = error{ReflectorFailed};
+pub const InformerError = error{ReflectorFailed} || std.Io.Cancelable;
 
 /// Type-erased event handler for Informer callbacks.
 ///
@@ -193,7 +193,7 @@ pub fn Informer(comptime T: type) type {
             for (self.staging.items) |item| item.deinit();
             self.staging.deinit(self.allocator);
             self.handlers.deinit(self.allocator);
-            self.reflector.deinit(io);
+            self.reflector.deinit();
             self.store.deinit(io);
             self.cancel.deinit(io);
         }
@@ -216,11 +216,25 @@ pub fn Informer(comptime T: type) type {
             });
             const ctx = self.parent_ctx.withCancel(io, &self.cancel);
             self.reflector.ctx = ctx;
+            const sink = watch_mod.EventSink(T).fromTypedCtx(Self, self, Self.receiveWatchEvent);
             while (!ctx.isCanceled(io)) {
                 if (self.reflector.state == .failed) return error.ReflectorFailed;
 
-                const maybe_event = self.reflector.step(io) catch {
-                    self.reflector.backoffSleep(io, ctx) catch return;
+                if (self.reflector.state == .watching) {
+                    self.reflector.runWatch(io, sink) catch |err| {
+                        if (err == error.Canceled) return error.Canceled;
+                        if (err == error.ReflectorFailed) return error.ReflectorFailed;
+                        if (self.reflector.state != .gone) {
+                            self.reflector.backoffSleep(io, ctx) catch |sleep_err| return sleep_err;
+                        }
+                    };
+                    continue;
+                }
+
+                const maybe_event = self.reflector.step(io) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
+                    if (err == error.ReflectorFailed) return error.ReflectorFailed;
+                    self.reflector.backoffSleep(io, ctx) catch |sleep_err| return sleep_err;
                     continue;
                 };
 
@@ -269,7 +283,6 @@ pub fn Informer(comptime T: type) type {
         fn processEvent(self: *Self, io: std.Io, event: ReflectorEvent(T)) void {
             switch (event) {
                 .init_page => |page| self.processInitPage(io, page),
-                .watch_event => |parsed| self.processWatchEvent(io, parsed),
                 .watch_ended => {
                     self.metrics.watch_restarts_total.inc();
                 },
@@ -300,7 +313,7 @@ pub fn Informer(comptime T: type) type {
                 self.logger.err("staging append failed: OOM, aborting sync", &.{});
                 for (page.items) |item| item.deinit();
                 self.allocator.free(page.items);
-                return self.abortSyncAndRelist(io);
+                return self.abortSyncAndRelist();
             };
             // Free the items array (items themselves are now in staging).
             self.allocator.free(page.items);
@@ -310,14 +323,14 @@ pub fn Informer(comptime T: type) type {
                 const staged = self.staging.toOwnedSlice(self.allocator) catch {
                     // On OOM, leave staging as-is; will be cleaned up on deinit.
                     self.logger.err("sync failed: OOM converting staging to owned slice", &.{});
-                    return self.abortSyncAndRelist(io);
+                    return self.abortSyncAndRelist();
                 };
                 const replace_result = self.store.replace(io, staged) catch {
                     self.logger.err("sync failed: could not replace store contents", &.{});
                     // replace() takes unconditional ownership of arenas;
                     // only free the slice itself.
                     self.allocator.free(staged);
-                    return self.abortSyncAndRelist(io);
+                    return self.abortSyncAndRelist();
                 };
                 self.logger.info("store replace succeeded", &.{
                     LogField.uint("item_count", @intCast(staged.len)),
@@ -344,21 +357,28 @@ pub fn Informer(comptime T: type) type {
             }
         }
 
-        fn processWatchEvent(self: *Self, io: std.Io, parsed: watch_mod.ParsedEvent(T)) void {
+        fn receiveWatchEvent(self: *Self, io: std.Io, event: *const watch_mod.ParsedEvent(T)) anyerror!void {
+            const owned = event.*;
+            @constCast(event).arena = null;
+            if (self.processWatchEvent(io, owned)) return error.WatchRelist;
+        }
+
+        fn processWatchEvent(self: *Self, io: std.Io, parsed: watch_mod.ParsedEvent(T)) bool {
             switch (parsed.event) {
                 .added => |obj| {
                     const key = ObjectKey.fromResource(T, obj) orelse {
                         parsed.deinit();
-                        return;
+                        return false;
                     };
                     self.logger.debug("watch add", &.{
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const old = self.store.put(io, .{ .key = key, .object = obj, .arena = parsed.arena }) catch {
+                    const old = self.store.put(io, .{ .key = key, .object = obj, .arena = parsed.arena.? }) catch {
+                        parsed.deinit();
                         self.logger.err("watch add failed (OOM), forcing re-list", &.{});
-                        self.reflector.forceRelist(io);
-                        return;
+                        self.reflector.forceRelist();
+                        return true;
                     };
                     if (old) |old_entry| {
                         // This was actually an update (object existed).
@@ -369,20 +389,22 @@ pub fn Informer(comptime T: type) type {
                     }
                     self.metrics.watch_events_total.inc();
                     self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
+                    return false;
                 },
                 .modified => |obj| {
                     const key = ObjectKey.fromResource(T, obj) orelse {
                         parsed.deinit();
-                        return;
+                        return false;
                     };
                     self.logger.debug("watch modify", &.{
                         LogField.string("namespace", key.namespace),
                         LogField.string("name", key.name),
                     });
-                    const old = self.store.put(io, .{ .key = key, .object = obj, .arena = parsed.arena }) catch {
+                    const old = self.store.put(io, .{ .key = key, .object = obj, .arena = parsed.arena.? }) catch {
+                        parsed.deinit();
                         self.logger.err("watch modify failed (OOM), forcing re-list", &.{});
-                        self.reflector.forceRelist(io);
-                        return;
+                        self.reflector.forceRelist();
+                        return true;
                     };
                     if (old) |old_entry| {
                         for (self.handlers.items) |h| h.onUpdate(io, &old_entry.object, &obj);
@@ -393,11 +415,12 @@ pub fn Informer(comptime T: type) type {
                     }
                     self.metrics.watch_events_total.inc();
                     self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
+                    return false;
                 },
                 .deleted => |obj| {
                     const key = ObjectKey.fromResource(T, obj) orelse {
                         parsed.deinit();
-                        return;
+                        return false;
                     };
                     self.logger.debug("watch delete", &.{
                         LogField.string("namespace", key.namespace),
@@ -412,18 +435,20 @@ pub fn Informer(comptime T: type) type {
                     parsed.deinit();
                     self.metrics.watch_events_total.inc();
                     self.metrics.store_object_count.set(@floatFromInt(self.store.len(io)));
+                    return false;
                 },
                 .bookmark, .api_error => {
                     // Should not reach here; reflector handles these.
                     parsed.deinit();
                 },
             }
+            return false;
         }
 
         fn dispatchInitialAdds(self: *Self, io: std.Io) void {
             const result = self.store.list(self.allocator, io) catch {
                 self.logger.err("dispatchInitialAdds failed: OOM listing store", &.{});
-                return self.abortSyncAndRelist(io);
+                return self.abortSyncAndRelist();
             };
             defer result.release();
 
@@ -439,9 +464,9 @@ pub fn Informer(comptime T: type) type {
 
         /// Abort the current sync and force the reflector to re-list.
         /// Clears staging so the next list cycle starts fresh.
-        fn abortSyncAndRelist(self: *Self, io: std.Io) void {
+        fn abortSyncAndRelist(self: *Self) void {
             self.clearStaging();
-            self.reflector.forceRelist(io);
+            self.reflector.forceRelist();
         }
     };
 }

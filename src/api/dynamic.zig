@@ -226,20 +226,23 @@ pub const DynamicApi = struct {
     }
 
     /// Watch for changes to resources in the configured namespace.
-    pub fn watch(self: DynamicApi, io: std.Io, opts: WatchOptions) !watch_mod.WatchStream(Json) {
+    /// The returned stream opens its connection when `run()` is called.
+    /// The caller must call `deinit()` on the returned stream when done.
+    pub fn watch(self: DynamicApi, opts: WatchOptions) !watch_mod.WatchStream(Json) {
         const path = try self.pathBuilder().watchPath(opts);
         defer self.client.allocator.free(path);
-        return watch_mod.WatchStream(Json).init(self.client, io, self.ctx, path, opts.max_line_size);
+        return watch_mod.WatchStream(Json).init(self.client, self.ctx, path, opts.max_line_size);
     }
 
     /// Watch for changes to resources across all namespaces.
     /// Only available for namespaced resources; returns `error.NotNamespaced`
     /// for cluster-scoped resources.
-    pub fn watchAll(self: DynamicApi, io: std.Io, opts: WatchOptions) !watch_mod.WatchStream(Json) {
+    /// The caller must call `deinit()` on the returned stream when done.
+    pub fn watchAll(self: DynamicApi, opts: WatchOptions) !watch_mod.WatchStream(Json) {
         if (!self.meta.namespaced) return error.NotNamespaced;
         const path = try self.pathBuilder().watchAllPath(opts);
         defer self.client.allocator.free(path);
-        return watch_mod.WatchStream(Json).init(self.client, io, self.ctx, path, opts.max_line_size);
+        return watch_mod.WatchStream(Json).init(self.client, self.ctx, path, opts.max_line_size);
     }
 
     // Subresource methods
@@ -286,13 +289,13 @@ pub const DynamicApi = struct {
         return self.client.getRaw(io, path, self.ctx);
     }
 
-    /// Stream the /log subresource continuously. Return a `LogStream` iterator
-    /// that yields one log line per call to `nextLine()`. The caller must call
-    /// `close()` on the returned stream when done.
-    pub fn streamLogs(self: DynamicApi, io: std.Io, name: []const u8, log_opts: LogOptions, stream_opts: LogStreamOptions) !log_stream_mod.LogStream {
+    /// Configure a continuous /log subresource stream.
+    /// The returned stream delivers borrowed lines when `run()` is called.
+    /// The caller must call `deinit()` on the returned stream when done.
+    pub fn streamLogs(self: DynamicApi, name: []const u8, log_opts: LogOptions, stream_opts: LogStreamOptions) !log_stream_mod.LogStream {
         const path = try self.pathBuilder().streamLogPath(name, log_opts);
         defer self.client.allocator.free(path);
-        return log_stream_mod.LogStream.init(self.client, io, self.ctx, path, stream_opts);
+        return log_stream_mod.LogStream.init(self.client, self.ctx, path, stream_opts);
     }
 };
 
@@ -327,7 +330,7 @@ test "watchAll: cluster-scoped returns error.NotNamespaced" {
     }, null);
 
     // Act / Assert
-    try testing.expectError(error.NotNamespaced, api.watchAll(std.testing.io, .{}));
+    try testing.expectError(error.NotNamespaced, api.watchAll(.{}));
 }
 
 // ResourceMeta validation tests

@@ -79,11 +79,12 @@ pub fn Controller(comptime T: type) type {
         informer: InformerT,
         queue: *WorkQueue,
         reconciler: Reconciler,
-        informer_thread: ?std.Thread,
+        informer_task: ?std.Io.Future(InformerError!void),
         informer_error: std.atomic.Value(u16),
         secondary_informer_error: std.atomic.Value(u16),
         secondary_informers: std.ArrayList(SecondaryInformer),
-        secondary_threads: std.ArrayList(std.Thread),
+        secondary_tasks: std.ArrayList(std.Io.Future(InformerError!void)),
+        lifecycle_io: ?std.Io = null,
         logger: Logger = Logger.noop,
 
         pub const Options = struct {
@@ -209,17 +210,20 @@ pub fn Controller(comptime T: type) type {
                 .informer = informer,
                 .queue = queue,
                 .reconciler = reconciler,
-                .informer_thread = null,
+                .informer_task = null,
                 .informer_error = std.atomic.Value(u16).init(0),
                 .secondary_informer_error = std.atomic.Value(u16).init(0),
                 .secondary_informers = .empty,
-                .secondary_threads = .empty,
+                .secondary_tasks = .empty,
+                .lifecycle_io = null,
                 .logger = logger,
             };
         }
 
         /// Release all resources including secondary informers, queue, and store.
         pub fn deinit(self: *Self, io: std.Io) void {
+            self.cancel(io);
+            self.join();
             self.queue.shutdown(io);
 
             // Deinit secondary informers (via vtable).
@@ -227,7 +231,7 @@ pub fn Controller(comptime T: type) type {
                 si.vtable.deinit_fn(si.ptr, self.allocator, io);
             }
             self.secondary_informers.deinit(self.allocator);
-            self.secondary_threads.deinit(self.allocator);
+            self.secondary_tasks.deinit(self.allocator);
 
             self.reconciler.deinit(io);
             self.queue.deinit(io);
@@ -239,8 +243,8 @@ pub fn Controller(comptime T: type) type {
         /// primary resource `T` keys via `opts.map_fn` and enqueued into the
         /// shared work queue.
         ///
-        /// The secondary informer runs its own list+watch loop in a separate
-        /// thread (started when `start()` or `run()` is called).
+        /// The secondary informer runs its own list+watch task (started when
+        /// `start()` or `run()` is called).
         ///
         /// Must be called before `start()` or `run()`.
         ///
@@ -262,7 +266,7 @@ pub fn Controller(comptime T: type) type {
             namespace: if (S.resource_meta.namespaced) []const u8 else ?[]const u8,
             opts: SecondaryOptions(S),
         ) !void {
-            std.debug.assert(self.informer_thread == null);
+            std.debug.assert(self.informer_task == null);
             const InformerS = informer_mod.Informer(S);
             const EventHandlerS = informer_mod.EventHandler(S);
             const MappingCtx = SecondaryMappingCtx(S);
@@ -367,8 +371,7 @@ pub fn Controller(comptime T: type) type {
             try self.secondary_informers.append(self.allocator, si);
         }
 
-        /// Spawn N reconciler worker threads, 1 primary informer thread,
-        /// and 1 thread per secondary informer.
+        /// Spawn N reconciler worker threads and one task per informer.
         /// Returns immediately; call `stop()` to shut down.
         pub fn start(self: *Self, io: std.Io) RunError!void {
             self.logger.info("controller starting", &.{
@@ -378,13 +381,14 @@ pub fn Controller(comptime T: type) type {
             });
             try self.reconciler.start(io);
             errdefer self.reconciler.stop(io);
+            self.lifecycle_io = io;
 
-            self.informer_thread = try std.Thread.spawn(.{}, informerThreadFn, .{ self, io });
+            self.informer_task = try io.concurrent(informerTask, .{ self, io });
 
-            // Start secondary informer threads.
+            // Start secondary informer tasks.
             for (self.secondary_informers.items, 0..) |si, idx| {
-                const thread = std.Thread.spawn(.{}, secondaryInformerThreadFn, .{ self, io, si }) catch |err| {
-                    self.logger.warn("secondary thread spawn failed, rolling back", &.{
+                const task = io.concurrent(secondaryInformerTask, .{ self, io, si }) catch |err| {
+                    self.logger.warn("secondary informer task spawn failed, rolling back", &.{
                         LogField.uint("index", idx),
                         LogField.string("error", @errorName(err)),
                     });
@@ -392,10 +396,11 @@ pub fn Controller(comptime T: type) type {
                     self.joinSecondaryStartup(true);
                     return err;
                 };
-                self.secondary_threads.append(self.allocator, thread) catch |err| {
-                    // Thread was spawned but we can't track it, so cancel it.
+                self.secondary_tasks.append(self.allocator, task) catch |err| {
+                    // Task was spawned but cannot be tracked, so cancel it.
                     si.vtable.cancel(si.ptr, io);
-                    thread.join();
+                    var untracked = task;
+                    untracked.cancel(io) catch {};
                     self.cancel(io);
                     self.joinSecondaryStartup(true);
                     return err;
@@ -403,37 +408,35 @@ pub fn Controller(comptime T: type) type {
             }
         }
 
-        /// Signal all components to stop. Non-blocking.
+        /// Cancel all components and stop every informer task.
         pub fn cancel(self: *Self, io: std.Io) void {
             self.logger.info("controller canceling", &.{
                 LogField.string("resource", T.resource_meta.resource),
             });
-            // Cancel primary informer (sets flag + interrupts watch socket).
-            self.informer.stop(io);
-            // Cancel all secondary informers.
-            for (self.secondary_informers.items) |si| {
-                si.vtable.cancel(si.ptr, io);
-            }
-            // Shut down the work queue (unblocks reconciler workers).
+            self.cancelInformerTasks(io);
+            // Shut down the work queue and unblock reconciler workers.
             self.reconciler.cancel(io);
+            self.informer_task = null;
+            self.secondary_tasks.clearRetainingCapacity();
         }
 
-        /// Wait for all threads to complete. Blocks.
+        /// Wait for all components to complete. Blocks.
         pub fn join(self: *Self) void {
             self.logger.info("controller joining", &.{
                 LogField.string("resource", T.resource_meta.resource),
             });
             // Join reconciler workers.
             self.reconciler.join();
-            // Join secondary informer threads.
-            for (self.secondary_threads.items) |thread| {
-                thread.join();
+            const io = self.lifecycle_io orelse return;
+            // Join secondary informer tasks.
+            for (self.secondary_tasks.items) |*task| {
+                task.await(io) catch {};
             }
-            self.secondary_threads.clearRetainingCapacity();
-            // Join primary informer thread.
-            if (self.informer_thread) |thread| {
-                thread.join();
-                self.informer_thread = null;
+            self.secondary_tasks.clearRetainingCapacity();
+            // Join the primary informer task.
+            if (self.informer_task) |*task| {
+                task.await(io) catch {};
+                self.informer_task = null;
             }
         }
 
@@ -443,35 +446,36 @@ pub fn Controller(comptime T: type) type {
             self.join();
         }
 
-        /// Spawn 1 primary informer thread and secondary informer threads,
-        /// then block the caller as a single reconcile worker.
+        /// Spawn informer tasks, then block the caller as a single reconcile worker.
         /// Returns when the queue is shut down.
         pub fn run(self: *Self, io: std.Io) !void {
             self.logger.info("controller run", &.{
                 LogField.string("resource", T.resource_meta.resource),
                 LogField.uint("secondaries", self.secondary_informers.items.len),
             });
-            self.informer_thread = try std.Thread.spawn(.{}, informerThreadFn, .{ self, io });
+            self.lifecycle_io = io;
+            self.informer_task = try io.concurrent(informerTask, .{ self, io });
 
-            // Start secondary informer threads.
+            // Start secondary informer tasks.
             for (self.secondary_informers.items) |si| {
-                const thread = std.Thread.spawn(.{}, secondaryInformerThreadFn, .{ self, io, si }) catch |err| {
-                    self.informer.stop(io);
-                    for (self.secondary_informers.items) |s| s.vtable.cancel(s.ptr, io);
+                const task = io.concurrent(secondaryInformerTask, .{ self, io, si }) catch |err| {
+                    self.cancelInformerTasks(io);
                     self.joinSecondaryStartup(false);
                     return err;
                 };
-                self.secondary_threads.append(self.allocator, thread) catch |err| {
+                self.secondary_tasks.append(self.allocator, task) catch |err| {
                     si.vtable.cancel(si.ptr, io);
-                    thread.join();
-                    self.informer.stop(io);
-                    for (self.secondary_informers.items) |s| s.vtable.cancel(s.ptr, io);
+                    var untracked = task;
+                    untracked.cancel(io) catch {};
+                    self.cancelInformerTasks(io);
                     self.joinSecondaryStartup(false);
                     return err;
                 };
             }
 
             self.reconciler.run(io);
+            self.cancel(io);
+            self.join();
         }
 
         /// Get a read-only handle to the informer's store for querying cached objects.
@@ -488,22 +492,22 @@ pub fn Controller(comptime T: type) type {
             return true;
         }
 
-        /// If any informer thread exited with an error, returns that error.
+        /// If any informer task exited with an error, returns that error.
         /// Prefers the primary informer error; falls back to the first
         /// secondary informer error.
         pub fn getInformerError(self: *Self) ?InformerError {
             return self.getPrimaryInformerError() orelse self.getSecondaryInformerError();
         }
 
-        /// If the primary informer thread exited with an error, returns it.
+        /// If the primary informer task exited with an error, returns it.
         pub fn getPrimaryInformerError(self: *Self) ?InformerError {
             const code = self.informer_error.load(.acquire);
             if (code == 0) return null;
             return @errorCast(@as(anyerror, @errorFromInt(code)));
         }
 
-        /// If a secondary informer thread exited with an error, returns
-        /// the first such error.
+        /// If a secondary informer task exited with an error, returns the
+        /// first such error.
         pub fn getSecondaryInformerError(self: *Self) ?InformerError {
             const code = self.secondary_informer_error.load(.acquire);
             if (code == 0) return null;
@@ -511,40 +515,59 @@ pub fn Controller(comptime T: type) type {
         }
 
         fn joinSecondaryStartup(self: *Self, join_reconciler: bool) void {
-            for (self.secondary_threads.items) |t| t.join();
-            self.secondary_threads.clearRetainingCapacity();
-            if (join_reconciler) {
-                self.reconciler.join();
+            const io = self.lifecycle_io orelse return;
+            // Join secondary informer tasks.
+            for (self.secondary_tasks.items) |*task| {
+                task.await(io) catch {};
             }
-            if (self.informer_thread) |t| {
-                t.join();
-                self.informer_thread = null;
+            self.secondary_tasks.clearRetainingCapacity();
+            if (join_reconciler) self.reconciler.join();
+            if (self.informer_task) |*task| {
+                task.await(io) catch {};
+                self.informer_task = null;
             }
         }
 
-        fn informerThreadFn(self: *Self, io: std.Io) void {
+        fn cancelInformerTasks(self: *Self, io: std.Io) void {
+            // Cancel the primary informer and interrupt its watch socket.
+            self.informer.stop(io);
+            // Cancel all secondary informers.
+            for (self.secondary_informers.items) |si| {
+                si.vtable.cancel(si.ptr, io);
+            }
+            if (self.informer_task) |*task| {
+                task.cancel(io) catch {};
+            }
+            for (self.secondary_tasks.items) |*task| {
+                task.cancel(io) catch {};
+            }
+        }
+
+        fn informerTask(self: *Self, io: std.Io) InformerError!void {
             self.informer.run(io) catch |err| {
-                self.logger.err("informer thread exited with error", &.{
+                if (err == error.Canceled) return error.Canceled;
+                self.logger.err("informer task exited with error", &.{
                     LogField.string("resource", T.resource_meta.resource),
                     LogField.string("error", @errorName(err)),
                 });
                 self.informer_error.store(@intFromError(err), .release);
-                // Shut down the work queue so reconciler workers unblock
-                // from get() and exit instead of waiting forever.
+                // Shut down the work queue so reconciler workers can exit.
                 self.queue.shutdown(io);
+                return err;
             };
         }
 
-        fn secondaryInformerThreadFn(self: *Self, io: std.Io, si: SecondaryInformer) void {
+        fn secondaryInformerTask(self: *Self, io: std.Io, si: SecondaryInformer) InformerError!void {
             si.vtable.run(si.ptr, io) catch |err| {
-                self.logger.err("secondary informer thread exited with error", &.{
+                if (err == error.Canceled) return error.Canceled;
+                self.logger.err("secondary informer task exited with error", &.{
                     LogField.string("resource", T.resource_meta.resource),
                     LogField.string("error", @errorName(err)),
                 });
-                // Store only the first secondary error (preserve it from
-                // being overwritten by later failures).
+                // Preserve the first secondary informer error.
                 _ = self.secondary_informer_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
                 self.queue.shutdown(io);
+                return err;
             };
         }
     };
@@ -600,11 +623,11 @@ test "Controller: comptime instantiation" {
     try testing.expect(@hasField(ControllerType, "informer"));
     try testing.expect(@hasField(ControllerType, "queue"));
     try testing.expect(@hasField(ControllerType, "reconciler"));
-    try testing.expect(@hasField(ControllerType, "informer_thread"));
+    try testing.expect(@hasField(ControllerType, "informer_task"));
     try testing.expect(@hasField(ControllerType, "informer_error"));
     try testing.expect(@hasField(ControllerType, "secondary_informer_error"));
     try testing.expect(@hasField(ControllerType, "secondary_informers"));
-    try testing.expect(@hasField(ControllerType, "secondary_threads"));
+    try testing.expect(@hasField(ControllerType, "secondary_tasks"));
 }
 
 test "Controller: Options defaults" {
@@ -630,14 +653,11 @@ test "Controller: Options defaults" {
 test "Controller: stop without start is safe" {
     // Act / Assert
     // We cannot fully init a Controller without a real Client, but we can
-    // verify that the stop logic handles a null informer_thread gracefully
-    // by checking the field's default value.
+    // Verify that the task field defaults to null.
     const ControllerType = Controller(TestResource);
-    // A default-constructed informer_thread is null.
-    const default: ?std.Thread = null;
+    const default: ?std.Io.Future(InformerError!void) = null;
     try testing.expect(default == null);
-    // Verify the field type matches.
-    try testing.expect(@TypeOf(@as(ControllerType, undefined).informer_thread) == ?std.Thread);
+    try testing.expect(@TypeOf(@as(ControllerType, undefined).informer_task) == ?std.Io.Future(InformerError!void));
 }
 
 test "Controller: has watchSecondary declaration" {

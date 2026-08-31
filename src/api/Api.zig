@@ -148,29 +148,26 @@ pub fn Api(comptime T: type) type {
             return self.client.get(io, ListT, path, self.ctx);
         }
 
-        /// Watch for changes to resources in the configured namespace.
-        /// Return a `WatchStream(T)` iterator that yields typed events.
-        /// The caller must call `close()` on the returned stream when done.
-        pub fn watch(self: @This(), io: std.Io, opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
+        /// Configure a watch for resources in the configured namespace.
+        /// The returned stream opens its connection when `run()` is called.
+        /// The caller must call `deinit()` on the returned stream when done.
+        pub fn watch(self: @This(), opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
             if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; watch is not available for POST-only resources");
             const path = try self.pathBuilder().watchPath(opts);
-            // Safe to free path after init: WatchStream.init() calls client.watchStream()
-            // which copies the path into a URI via buildUri() and opens the HTTP request
-            // synchronously. The path slice is not retained by WatchStream.
             defer self.client.allocator.free(path);
-            return watch_mod.WatchStream(T).init(self.client, io, self.ctx, path, opts.max_line_size);
+            return watch_mod.WatchStream(T).init(self.client, self.ctx, path, opts.max_line_size);
         }
 
-        /// Watch for changes to resources across all namespaces.
+        /// Configure a watch for resources across all namespaces.
         /// Only available for namespaced resources; cluster-scoped resources
         /// are already cluster-wide, use `watch()` instead.
-        pub fn watchAll(self: @This(), io: std.Io, opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
+        /// The caller must call `deinit()` on the returned stream when done.
+        pub fn watchAll(self: @This(), opts: ThisModule.WatchOptions) !watch_mod.WatchStream(T) {
             if (!has_list) @compileError("type '" ++ @typeName(T) ++ "' has no list_kind; watch is not available for POST-only resources");
             if (!meta.namespaced) @compileError("watchAll is only available for namespaced resources; use watch() instead");
             const path = try self.pathBuilder().watchAllPath(opts);
-            // Safe to free path after init: see comment in watch() above.
             defer self.client.allocator.free(path);
-            return watch_mod.WatchStream(T).init(self.client, io, self.ctx, path, opts.max_line_size);
+            return watch_mod.WatchStream(T).init(self.client, self.ctx, path, opts.max_line_size);
         }
 
         /// Get a single resource by name.
@@ -353,14 +350,14 @@ pub fn Api(comptime T: type) type {
             return self.client.getRaw(io, path, self.ctx);
         }
 
-        /// Stream the /log subresource continuously. Return a `LogStream` iterator
-        /// that yields one log line per call to `nextLine()`. The caller must call
-        /// `close()` on the returned stream when done.
+        /// Configure a continuous /log subresource stream.
+        /// The returned stream delivers borrowed lines when `run()` is called.
+        /// The caller must call `deinit()` on the returned stream when done.
         /// The Kubernetes API returns 404 for resources that do not support this subresource.
-        pub fn streamLogs(self: @This(), io: std.Io, name: []const u8, log_opts: ThisModule.LogOptions, stream_opts: ThisModule.LogStreamOptions) !log_stream_mod.LogStream {
+        pub fn streamLogs(self: @This(), name: []const u8, log_opts: ThisModule.LogOptions, stream_opts: ThisModule.LogStreamOptions) !log_stream_mod.LogStream {
             const path = try self.pathBuilder().streamLogPath(name, log_opts);
             defer self.client.allocator.free(path);
-            return log_stream_mod.LogStream.init(self.client, io, self.ctx, path, stream_opts);
+            return log_stream_mod.LogStream.init(self.client, self.ctx, path, stream_opts);
         }
 
         // Pagination helpers

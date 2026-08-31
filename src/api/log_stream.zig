@@ -1,8 +1,7 @@
-//! Log stream iterator for tailing Kubernetes pod logs.
+//! Task-oriented Kubernetes pod log streaming.
 //!
-//! Provides `LogStream`, a line-based iterator over a streaming HTTP
-//! response that yields raw log lines. Modeled after `WatchStream` but
-//! without JSON parsing.
+//! `LogStream` opens its HTTP connection when `run` is called and delivers
+//! borrowed lines to a callback sink.
 
 const std = @import("std");
 const client_mod = @import("../client/Client.zig");
@@ -17,118 +16,87 @@ pub const LogStreamOptions = struct {
     max_line_size: usize = 1024 * 1024,
 };
 
-/// Iterator over a Kubernetes pod log stream that yields raw log lines.
-///
-/// Example:
-/// ```zig
-/// var stream = try api.streamLogs(io, "my-pod", .{}, .{});
-/// defer stream.close(io);
-/// while (try stream.nextLine(io)) |line| {
-///     defer stream.allocator.free(line);
-///     // use line
-/// }
-/// ```
-pub const LogStream = struct {
-    const Self = @This();
+/// A callback sink for lines delivered by `LogStream.run`.
+pub const LineSink = struct {
+    ctx: ?*anyopaque,
+    call: *const fn (?*anyopaque, Io, []const u8) anyerror!void,
 
-    allocator: std.mem.Allocator,
-    ctx: Context,
-    state: *StreamState,
-    closed: bool,
-    max_line_size: usize,
-    watcher: ?*CancelWatcher,
-
-    /// Background cancellation helper.
-    const CancelWatcher = struct {
-        io: Io,
-        ctx: Context,
-        state: *StreamState,
-        done: std.atomic.Value(u32),
-        thread: std.Thread,
-
-        const poll_ns: u64 = 50 * std.time.ns_per_ms;
-
-        fn run(self: *CancelWatcher) void {
-            const timeout: Io.Timeout = .{ .duration = .{
-                .clock = .awake,
-                .raw = .{ .nanoseconds = poll_ns },
-            } };
-            while (true) {
-                if (self.done.load(.acquire) != 0) return;
-                if (self.ctx.isCanceled(self.io)) {
-                    self.state.interrupt(self.io);
-                    return;
-                }
-                self.io.futexWaitTimeout(u32, &self.done.raw, 0, timeout) catch {};
+    pub fn fromFn(comptime func: *const fn (Io, []const u8) anyerror!void) LineSink {
+        const Wrapper = struct {
+            fn call(_: ?*anyopaque, io: Io, line: []const u8) anyerror!void {
+                return func(io, line);
             }
-        }
-    };
-
-    /// Initialize a log stream by opening an HTTP streaming connection.
-    pub fn init(client_ptr: *Client, io: std.Io, ctx: Context, path: []const u8, opts: LogStreamOptions) !Self {
-        const stream_resp = try client_ptr.logStream(io, path, ctx);
-        errdefer stream_resp.state.deinit();
-
-        const watcher = try client_ptr.allocator.create(CancelWatcher);
-        errdefer client_ptr.allocator.destroy(watcher);
-        watcher.* = .{
-            .io = io,
-            .ctx = ctx,
-            .state = stream_resp.state,
-            .done = std.atomic.Value(u32).init(0),
-            .thread = undefined,
         };
-        watcher.thread = try std.Thread.spawn(.{}, CancelWatcher.run, .{watcher});
+        return .{ .ctx = null, .call = Wrapper.call };
+    }
 
+    pub fn fromTypedCtx(comptime Ctx: type, ctx: *Ctx, comptime func: *const fn (*Ctx, Io, []const u8) anyerror!void) LineSink {
+        const Wrapper = struct {
+            fn call(raw: ?*anyopaque, io: Io, line: []const u8) anyerror!void {
+                return func(@ptrCast(@alignCast(raw.?)), io, line);
+            }
+        };
+        return .{ .ctx = @ptrCast(ctx), .call = Wrapper.call };
+    }
+
+    fn emit(self: LineSink, io: Io, line: []const u8) anyerror!void {
+        return self.call(self.ctx, io, line);
+    }
+};
+
+/// Configuration for a task-oriented Kubernetes pod log stream.
+/// The path is owned by the stream and must be released with `deinit`.
+const LineSinkType = LineSink;
+pub const LogStream = struct {
+    pub const LineSink = LineSinkType;
+    pub const Sink = LineSinkType;
+    allocator: std.mem.Allocator,
+    client: *Client,
+    ctx: Context,
+    path: []u8,
+    max_line_size: usize,
+
+    pub fn init(client_ptr: *Client, ctx: Context, path: []const u8, opts: LogStreamOptions) !LogStream {
+        const owned_path = try client_ptr.allocator.dupe(u8, path);
         return .{
             .allocator = client_ptr.allocator,
+            .client = client_ptr,
             .ctx = ctx,
-            .state = stream_resp.state,
-            .closed = false,
+            .path = owned_path,
             .max_line_size = opts.max_line_size,
-            .watcher = watcher,
         };
     }
 
-    /// Read the next log line from the stream.
-    /// Return `null` on clean end-of-stream. The returned slice is owned
-    /// by `self.allocator`; the caller must free it.
-    pub fn nextLine(self: *Self, io: std.Io) !?[]const u8 {
-        if (self.closed) return null;
-        self.ctx.check(io) catch return error.Canceled;
+    pub fn deinit(self: *LogStream) void {
+        self.allocator.free(self.path);
+        self.path = &.{};
+    }
 
-        const reader = self.state.reader orelse return null;
+    /// Open the log stream and deliver borrowed lines to `sink`.
+    pub fn run(self: *LogStream, io: Io, sink: LineSinkType) anyerror!void {
+        const stream_resp = try self.client.logStream(io, self.path, self.ctx);
+        defer stream_resp.state.deinit();
+        const reader = stream_resp.state.reader orelse return;
 
-        var line_writer = Io.Writer.Allocating.init(self.allocator);
-        errdefer line_writer.deinit();
+        while (true) {
+            try self.ctx.check(io);
+            var line_writer = Io.Writer.Allocating.init(self.allocator);
+            defer line_writer.deinit();
 
-        _ = reader.streamDelimiterLimit(&line_writer.writer, '\n', Io.Limit.limited(self.max_line_size)) catch |err| switch (err) {
-            error.ReadFailed => return error.ConnectionResetByPeer,
-            error.WriteFailed => return error.OutOfMemory,
-            error.StreamTooLong => return error.LineTooLong,
-        };
+            _ = reader.streamDelimiterLimit(&line_writer.writer, '\n', Io.Limit.limited(self.max_line_size)) catch |err| switch (err) {
+                error.ReadFailed => {
+                    io.checkCancel() catch return error.Canceled;
+                    return error.ConnectionResetByPeer;
+                },
+                error.WriteFailed => return error.OutOfMemory,
+                error.StreamTooLong => return error.LineTooLong,
+            };
 
-        if (reader.bufferedLen() > 0) {
+            if (reader.bufferedLen() == 0) return;
             reader.toss(1);
-        } else {
-            line_writer.deinit();
-            return null;
+            const line = line_writer.toOwnedSlice() catch return error.OutOfMemory;
+            defer self.allocator.free(line);
+            try sink.emit(io, line);
         }
-
-        return line_writer.toOwnedSlice() catch return error.OutOfMemory;
-    }
-
-    /// Close the log stream and release all resources.
-    pub fn close(self: *Self, io: Io) void {
-        if (self.closed) return;
-        self.closed = true;
-        if (self.watcher) |w| {
-            w.done.store(1, .release);
-            io.futexWake(u32, &w.done.raw, std.math.maxInt(u32));
-            w.thread.join();
-            self.allocator.destroy(w);
-            self.watcher = null;
-        }
-        self.state.deinit();
     }
 };

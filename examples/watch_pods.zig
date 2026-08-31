@@ -33,42 +33,42 @@ pub fn main(init: std.process.Init) !void {
 
     const pods = kube_zig.Api(k8s.CoreV1Pod).init(&client, client.context(), config.namespace);
 
-    var stream = try pods.watch(io, .{ .timeout_seconds = 300 });
-    defer stream.close(io);
+    var stream = try pods.watch(.{ .timeout_seconds = 300 });
+    defer stream.deinit();
 
-    while (try stream.next(io)) |event| {
-        defer event.deinit();
-        switch (event.event) {
-            .added => |pod| {
-                const name = kube_zig.metadata.getName(k8s.CoreV1Pod, pod) orelse "(unnamed)";
-                const phase = if (pod.status) |s| (s.phase orelse "Unknown") else "Unknown";
-                try w.print("ADDED    {s}  (phase: {s})\n", .{ name, phase });
-            },
-            .modified => |pod| {
-                const name = kube_zig.metadata.getName(k8s.CoreV1Pod, pod) orelse "(unnamed)";
-                const phase = if (pod.status) |s| (s.phase orelse "Unknown") else "Unknown";
-                try w.print("MODIFIED {s}  (phase: {s})\n", .{ name, phase });
-            },
-            .deleted => |pod| {
-                const name = kube_zig.metadata.getName(k8s.CoreV1Pod, pod) orelse "(unnamed)";
-                try w.print("DELETED  {s}\n", .{name});
-            },
-            .bookmark => {
-                const rv = stream.resourceVersion() orelse "(unknown)";
-                try w.print("BOOKMARK (resourceVersion: {s})\n", .{rv});
-            },
-            .api_error => |api_err| {
-                const code = if (api_err.code) |c| c else 0;
-                const reason = api_err.reason orelse "Unknown";
-                try w.print("ERROR    code={d} reason={s}\n", .{ code, reason });
-            },
+    const SinkCtx = struct {
+        writer: *std.Io.Writer,
+
+        fn receive(ctx: *@This(), _: std.Io, parsed: *const kube_zig.ParsedEvent(k8s.CoreV1Pod)) anyerror!void {
+            switch (parsed.event) {
+                .added => |pod| {
+                    const name = kube_zig.metadata.getName(k8s.CoreV1Pod, pod) orelse "(unnamed)";
+                    const phase = if (pod.status) |s| (s.phase orelse "Unknown") else "Unknown";
+                    try ctx.writer.print("ADDED    {s}  (phase: {s})\n", .{ name, phase });
+                },
+                .modified => |pod| {
+                    const name = kube_zig.metadata.getName(k8s.CoreV1Pod, pod) orelse "(unnamed)";
+                    const phase = if (pod.status) |s| (s.phase orelse "Unknown") else "Unknown";
+                    try ctx.writer.print("MODIFIED {s}  (phase: {s})\n", .{ name, phase });
+                },
+                .deleted => |pod| {
+                    const name = kube_zig.metadata.getName(k8s.CoreV1Pod, pod) orelse "(unnamed)";
+                    try ctx.writer.print("DELETED  {s}\n", .{name});
+                },
+                .bookmark => |bookmark| try ctx.writer.print("BOOKMARK (resourceVersion: {s})\n", .{bookmark.resource_version}),
+                .api_error => |api_err| {
+                    const code = if (api_err.code) |c| c else 0;
+                    const reason = api_err.reason orelse "Unknown";
+                    try ctx.writer.print("ERROR    code={d} reason={s}\n", .{ code, reason });
+                },
+            }
+            try ctx.writer.flush();
         }
-        try w.flush();
-    }
+    };
+    var sink_ctx = SinkCtx{ .writer = w };
+    const sink = kube_zig.EventSink(k8s.CoreV1Pod).fromTypedCtx(SinkCtx, &sink_ctx, SinkCtx.receive);
+    var task = try io.concurrent(kube_zig.WatchStream(k8s.CoreV1Pod).run, .{ &stream, io, sink });
+    try task.await(io);
 
     try w.print("\nWatch stream ended.\n", .{});
-    if (stream.resourceVersion()) |rv| {
-        try w.print("Last resourceVersion: {s}\n", .{rv});
-        try w.print("(Use this value to resume watching without replaying history)\n", .{});
-    }
 }

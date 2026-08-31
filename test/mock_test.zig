@@ -12,6 +12,32 @@ const DynamicApi = kube_zig.DynamicApi;
 const DiscoveryClient = kube_zig.DiscoveryClient;
 const CancelSource = kube_zig.CancelSource;
 
+fn WatchCollector(comptime T: type) type {
+    return struct {
+        events: std.ArrayList(kube_zig.ParsedEvent(T)),
+
+        fn init() @This() {
+            return .{ .events = .empty };
+        }
+
+        fn deinit(self: *@This()) void {
+            for (self.events.items) |event| event.deinit();
+            self.events.deinit(testing.allocator);
+        }
+
+        fn receive(self: *@This(), _: std.Io, event: *const kube_zig.ParsedEvent(T)) anyerror!void {
+            try self.events.append(testing.allocator, event.*);
+            @constCast(event).arena = null;
+        }
+
+        fn run(self: *@This(), stream: *kube_zig.WatchStream(T)) !void {
+            const sink = kube_zig.EventSink(T).fromTypedCtx(@This(), self, @This().receive);
+            var task = try std.testing.io.concurrent(kube_zig.WatchStream(T).run, .{ stream, std.testing.io, sink });
+            try task.await(std.testing.io);
+        }
+    };
+}
+
 // ============================================================================
 // Test helpers
 // ============================================================================
@@ -272,24 +298,18 @@ test "WatchStream: parses ADDED/MODIFIED/DELETED events from mock stream" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(std.testing.io, .{});
-    defer stream.close(std.testing.io);
+    var stream = try pods.watch(.{});
+    defer stream.deinit();
+    var collector = WatchCollector(k8s.CoreV1Pod).init();
+    defer collector.deinit();
+    try collector.run(&stream);
 
-    const ev1 = (try stream.next(std.testing.io)).?;
-    defer ev1.deinit();
-    try testing.expect(ev1.event == .added);
-    try testing.expectEqualStrings("pod-1", ev1.event.added.metadata.?.name.?);
-
-    const ev2 = (try stream.next(std.testing.io)).?;
-    defer ev2.deinit();
-    try testing.expect(ev2.event == .modified);
-    try testing.expectEqualStrings("2", ev2.event.modified.metadata.?.resourceVersion.?);
-
-    const ev3 = (try stream.next(std.testing.io)).?;
-    defer ev3.deinit();
-    try testing.expect(ev3.event == .deleted);
-
-    try testing.expect(try stream.next(std.testing.io) == null);
+    try testing.expectEqual(@as(usize, 3), collector.events.items.len);
+    try testing.expect(collector.events.items[0].event == .added);
+    try testing.expectEqualStrings("pod-1", collector.events.items[0].event.added.metadata.?.name.?);
+    try testing.expect(collector.events.items[1].event == .modified);
+    try testing.expectEqualStrings("2", collector.events.items[1].event.modified.metadata.?.resourceVersion.?);
+    try testing.expect(collector.events.items[2].event == .deleted);
 }
 
 test "WatchStream: resourceVersion is tracked" {
@@ -312,13 +332,14 @@ test "WatchStream: resourceVersion is tracked" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(std.testing.io, .{});
-    defer stream.close(std.testing.io);
+    var stream = try pods.watch(.{});
+    defer stream.deinit();
+    var collector = WatchCollector(k8s.CoreV1Pod).init();
+    defer collector.deinit();
+    try collector.run(&stream);
 
-    const ev = (try stream.next(std.testing.io)).?;
-    defer ev.deinit();
-
-    try testing.expectEqualStrings("42", stream.resourceVersion().?);
+    try testing.expectEqual(@as(usize, 1), collector.events.items.len);
+    try testing.expectEqualStrings("42", collector.events.items[0].event.added.metadata.?.resourceVersion.?);
 }
 
 // ============================================================================
@@ -404,10 +425,10 @@ test "Multiple requests are recorded in order" {
 }
 
 // ============================================================================
-// WatchStream: next/close/resourceVersion behavior
+// WatchStream task and cancellation behavior
 // ============================================================================
 
-test "WatchStream: next returns null on empty stream" {
+test "WatchStream: run returns without events on empty stream" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
@@ -420,14 +441,17 @@ test "WatchStream: next returns null on empty stream" {
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
     // Act
-    var stream = try pods.watch(std.testing.io, .{});
-    defer stream.close(std.testing.io);
+    var stream = try pods.watch(.{});
+    defer stream.deinit();
+    var collector = WatchCollector(k8s.CoreV1Pod).init();
+    defer collector.deinit();
+    try collector.run(&stream);
 
     // Assert
-    try testing.expect(try stream.next(std.testing.io) == null);
+    try testing.expectEqual(@as(usize, 0), collector.events.items.len);
 }
 
-test "WatchStream: resourceVersion returns null before any events" {
+test "WatchStream: run delivers resourceVersion events" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
@@ -443,19 +467,18 @@ test "WatchStream: resourceVersion returns null before any events" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(std.testing.io, .{});
-    defer stream.close(std.testing.io);
+    var stream = try pods.watch(.{});
+    defer stream.deinit();
+    var collector = WatchCollector(k8s.CoreV1Pod).init();
+    defer collector.deinit();
+    try collector.run(&stream);
 
     // Act / Assert
-    try testing.expect(stream.resourceVersion() == null);
-
-    const ev = (try stream.next(std.testing.io)).?;
-    defer ev.deinit();
-
-    try testing.expectEqualStrings("10", stream.resourceVersion().?);
+    try testing.expectEqual(@as(usize, 1), collector.events.items.len);
+    try testing.expectEqualStrings("10", collector.events.items[0].event.added.metadata.?.resourceVersion.?);
 }
 
-test "WatchStream: close is idempotent" {
+test "WatchStream: deinit is idempotent" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
@@ -467,16 +490,16 @@ test "WatchStream: close is idempotent" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(std.testing.io, .{});
+    var stream = try pods.watch(.{});
 
     // Act
-    stream.close(std.testing.io);
-    stream.close(std.testing.io);
+    stream.deinit();
+    stream.deinit();
 
     // Assert: no panic or double-free
 }
 
-test "WatchStream: partial line at EOF returns null, not a parse error" {
+test "WatchStream: partial line at EOF returns no event" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
@@ -489,14 +512,17 @@ test "WatchStream: partial line at EOF returns null, not a parse error" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(std.testing.io, .{});
-    defer stream.close(std.testing.io);
+    var stream = try pods.watch(.{});
+    defer stream.deinit();
+    var collector = WatchCollector(k8s.CoreV1Pod).init();
+    defer collector.deinit();
 
     // Act / Assert
-    try testing.expect(try stream.next(std.testing.io) == null);
+    try collector.run(&stream);
+    try testing.expectEqual(@as(usize, 0), collector.events.items.len);
 }
 
-test "WatchStream: readLine rejects lines exceeding max_line_size" {
+test "WatchStream: run rejects lines exceeding max_line_size" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
@@ -513,11 +539,15 @@ test "WatchStream: readLine rejects lines exceeding max_line_size" {
 
     const pods = Api(k8s.CoreV1Pod).init(&c, c.context(), "default");
 
-    var stream = try pods.watch(std.testing.io, .{});
-    defer stream.close(std.testing.io);
+    var stream = try pods.watch(.{});
+    defer stream.deinit();
 
     // Act / Assert
-    try testing.expectError(error.LineTooLong, stream.next(std.testing.io));
+    const sink = kube_zig.EventSink(k8s.CoreV1Pod).fromFn(struct {
+        fn receive(_: std.Io, _: *const kube_zig.ParsedEvent(k8s.CoreV1Pod)) anyerror!void {}
+    }.receive);
+    var task = try std.testing.io.concurrent(kube_zig.WatchStream(k8s.CoreV1Pod).run, .{ &stream, std.testing.io, sink });
+    try testing.expectError(error.LineTooLong, task.await(std.testing.io));
 }
 
 test "ctx deadline reaches the transport via RequestOptions" {
@@ -540,7 +570,7 @@ test "ctx deadline reaches the transport via RequestOptions" {
     try testing.expectEqual(ctx.deadline_ns.?, mock.getRequest(0).?.deadline_ns.?);
 }
 
-test "WatchStream: close after ctx cancel joins watcher without hanging" {
+test "WatchStream: future cancellation returns without hanging" {
     // Arrange
     var mock = MockTransport.init(testing.allocator);
     defer mock.deinit();
@@ -551,13 +581,18 @@ test "WatchStream: close after ctx cancel joins watcher without hanging" {
 
     var cs = CancelSource.init();
     const pods = Api(k8s.CoreV1Pod).init(&c, cs.context(), "default");
-    var stream = try pods.watch(std.testing.io, .{});
+    var stream = try pods.watch(.{});
 
     // Act
+    const sink = kube_zig.EventSink(k8s.CoreV1Pod).fromFn(struct {
+        fn receive(_: std.Io, _: *const kube_zig.ParsedEvent(k8s.CoreV1Pod)) anyerror!void {}
+    }.receive);
+    var task = try std.testing.io.concurrent(kube_zig.WatchStream(k8s.CoreV1Pod).run, .{ &stream, std.testing.io, sink });
     cs.cancel(std.testing.io);
-    stream.close(std.testing.io);
+    task.cancel(std.testing.io) catch {};
+    stream.deinit();
 
-    // Assert: reaching here means close() returned without hanging on join.
+    // Assert: reaching here means task cancellation returned without hanging.
 }
 
 // ============================================================================

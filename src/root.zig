@@ -86,12 +86,14 @@ pub const RawResponse = Client.RawResponse;
 const watch_mod = @import("api/watch.zig");
 pub const WatchEvent = watch_mod.WatchEvent;
 pub const WatchStream = watch_mod.WatchStream;
+pub const EventSink = watch_mod.EventSink;
 pub const ParsedEvent = watch_mod.ParsedEvent;
 pub const StreamState = client_mod.StreamState;
 pub const StreamResponse = client_mod.StreamResponse;
 
 const log_stream_mod = @import("api/log_stream.zig");
 pub const LogStream = log_stream_mod.LogStream;
+pub const LineSink = log_stream_mod.LineSink;
 pub const LogStreamOptions = log_stream_mod.LogStreamOptions;
 
 const store_mod = @import("cache/store.zig");

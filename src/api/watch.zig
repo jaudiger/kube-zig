@@ -1,8 +1,8 @@
 //! Kubernetes watch stream for observing resource changes in real time.
 //!
-//! Provides `WatchStream(T)`, a line-based iterator over a streaming HTTP
-//! response that yields typed `WatchEvent(T)` values (ADDED, MODIFIED,
-//! DELETED, BOOKMARK, ERROR). Uses two-phase JSON parsing to handle
+//! Provides `WatchStream(T)`, a task-oriented stream over a streaming HTTP
+//! response that delivers typed `WatchEvent(T)` values (ADDED, MODIFIED,
+//! DELETED, BOOKMARK, ERROR) to an event sink. Uses two-phase JSON parsing to handle
 //! bookmark objects that contain null values for required fields.
 
 const std = @import("std");
@@ -13,7 +13,6 @@ const StreamState = client_mod.StreamState;
 const Io = std.Io;
 const Logger = @import("../util/logging.zig").Logger;
 const LogField = @import("../util/logging.zig").Field;
-const ResourceVersion = @import("../util/resource_version.zig").ResourceVersion;
 const testing = std.testing;
 
 /// Typed Kubernetes watch event.
@@ -46,13 +45,14 @@ pub fn WatchEvent(comptime T: type) type {
 pub fn ParsedEvent(comptime T: type) type {
     return struct {
         event: WatchEvent(T),
-        arena: *std.heap.ArenaAllocator,
+        arena: ?*std.heap.ArenaAllocator,
 
         /// Free the arena and all memory allocated during parsing.
         pub fn deinit(self: @This()) void {
-            const child = self.arena.child_allocator;
-            self.arena.deinit();
-            child.destroy(self.arena);
+            const arena = self.arena orelse return;
+            const child = arena.child_allocator;
+            arena.deinit();
+            child.destroy(arena);
         }
     };
 }
@@ -204,184 +204,127 @@ fn extractEventResourceVersion(comptime T: type, event: WatchEvent(T)) ?[]const 
     };
 }
 
-/// Iterator over a Kubernetes watch stream that yields typed events.
-///
-/// Example:
-/// ```zig
-/// var stream = try api.watch(.{});
-/// defer stream.close();
-/// while (try stream.next()) |event| {
-///     defer event.deinit();
-///     switch (event.event) { ... }
-/// }
-/// ```
+/// A callback sink for events delivered by `WatchStream.run`.
+pub fn EventSink(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        ctx: ?*anyopaque,
+        call: *const fn (?*anyopaque, Io, *const ParsedEvent(T)) anyerror!void,
+
+        pub fn fromFn(comptime func: *const fn (Io, *const ParsedEvent(T)) anyerror!void) Self {
+            const Wrapper = struct {
+                fn call(_: ?*anyopaque, io: Io, event: *const ParsedEvent(T)) anyerror!void {
+                    return func(io, event);
+                }
+            };
+            return .{ .ctx = null, .call = Wrapper.call };
+        }
+
+        pub fn fromTypedCtx(comptime Ctx: type, ctx: *Ctx, comptime func: *const fn (*Ctx, Io, *const ParsedEvent(T)) anyerror!void) Self {
+            const Wrapper = struct {
+                fn call(raw: ?*anyopaque, io: Io, event: *const ParsedEvent(T)) anyerror!void {
+                    return func(@ptrCast(@alignCast(raw.?)), io, event);
+                }
+            };
+            return .{ .ctx = @ptrCast(ctx), .call = Wrapper.call };
+        }
+
+        pub fn emit(self: Self, io: Io, event: *const ParsedEvent(T)) anyerror!void {
+            return self.call(self.ctx, io, event);
+        }
+    };
+}
+
+/// Configuration for a task-oriented Kubernetes watch stream.
+/// The stream does not open a connection until `run` is called. The path is
+/// owned by the stream and must be released with `deinit`.
 pub fn WatchStream(comptime T: type) type {
+    const EventSinkType = EventSink(T);
     return struct {
         const Self = @This();
         pub const Event = WatchEvent(T);
-
+        pub const EventSink = EventSinkType;
+        pub const Sink = EventSinkType;
         /// Default maximum bytes allowed for a single watch event line (4 MiB).
         pub const default_max_line_size: usize = 4 * 1024 * 1024;
 
         allocator: std.mem.Allocator,
         client: *Client,
         ctx: Context,
-        state: *StreamState,
-        last_resource_version: ResourceVersion,
-        closed: bool,
+        path: []u8,
         max_line_size: usize,
-        watcher: ?*CancelWatcher,
 
-        /// Background helper that translates context cancellation into a
-        /// socket shutdown so a blocked `next()` returns immediately.
-        const CancelWatcher = struct {
-            io: Io,
-            ctx: Context,
-            state: *StreamState,
-            done: std.atomic.Value(u32),
-            thread: std.Thread,
-
-            const poll_ns: u64 = 50 * std.time.ns_per_ms;
-
-            fn run(self: *CancelWatcher) void {
-                const timeout: Io.Timeout = .{ .duration = .{
-                    .clock = .awake,
-                    .raw = .{ .nanoseconds = poll_ns },
-                } };
-                while (true) {
-                    if (self.done.load(.acquire) != 0) return;
-                    if (self.ctx.isCanceled(self.io)) {
-                        self.state.interrupt(self.io);
-                        return;
-                    }
-                    self.io.futexWaitTimeout(u32, &self.done.raw, 0, timeout) catch {};
-                }
-            }
-        };
-
-        /// Initialize a watch stream by opening an HTTP streaming connection.
-        pub fn init(client_ptr: *Client, io: std.Io, ctx: Context, path: []const u8, max_line_size: usize) !Self {
-            client_ptr.logger.info("watch started", &.{});
-            const stream_resp = try client_ptr.watchStream(io, path, ctx);
-            errdefer stream_resp.state.deinit();
-
-            const watcher = try client_ptr.allocator.create(CancelWatcher);
-            errdefer client_ptr.allocator.destroy(watcher);
-            watcher.* = .{
-                .io = io,
-                .ctx = ctx,
-                .state = stream_resp.state,
-                .done = std.atomic.Value(u32).init(0),
-                .thread = undefined,
-            };
-            watcher.thread = try std.Thread.spawn(.{}, CancelWatcher.run, .{watcher});
-
+        pub fn init(client_ptr: *Client, ctx: Context, path: []const u8, max_line_size: usize) !Self {
+            const owned_path = try client_ptr.allocator.dupe(u8, path);
             return .{
                 .allocator = client_ptr.allocator,
                 .client = client_ptr,
                 .ctx = ctx,
-                .state = stream_resp.state,
-                .last_resource_version = .{},
-                .closed = false,
+                .path = owned_path,
                 .max_line_size = max_line_size,
-                .watcher = watcher,
             };
         }
 
-        /// Read the next watch event from the stream.
-        /// Return `null` on clean end-of-stream (server timeout or connection close).
-        /// The caller must call `deinit()` on the returned `ParsedEvent`.
-        pub fn next(self: *Self, io: std.Io) !?ParsedEvent(T) {
-            if (self.closed) return null;
-            self.ctx.check(io) catch return error.Canceled;
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.path);
+            self.path = &.{};
+        }
 
-            const line = try self.readLine() orelse return null;
-            defer self.allocator.free(line);
+        /// Open the watch stream and deliver borrowed events to `sink`.
+        pub fn run(self: *Self, io: Io, sink: Sink) anyerror!void {
+            self.client.logger.info("watch started", &.{});
+            const stream_resp = try self.client.watchStream(io, self.path, self.ctx);
+            defer stream_resp.state.deinit();
+            const state = stream_resp.state;
 
-            if (line.len == 0) return null;
+            while (true) {
+                try self.ctx.check(io);
+                const line = (try self.readLine(io, state)) orelse return;
+                defer self.allocator.free(line);
+                if (line.len == 0) return;
 
-            const parsed = parseEventLine(T, self.allocator, line) catch |err| {
-                self.client.logger.warn("watch event parse failed", &.{
-                    LogField.string("error", @errorName(err)),
-                    LogField.uint("line_len", line.len),
-                    LogField.string("line_prefix", if (line.len > 200) line[0..200] else line),
-                });
-                return err;
-            };
-            errdefer parsed.deinit();
-
-            // Log watch error events.
-            switch (parsed.event) {
-                .api_error => |api_err| {
-                    self.client.logger.warn("watch error event", &.{
+                const parsed = parseEventLine(T, self.allocator, line) catch |err| {
+                    self.client.logger.warn("watch event parse failed", &.{
+                        LogField.string("error", @errorName(err)),
+                        LogField.uint("line_len", line.len),
+                        LogField.string("line_prefix", if (line.len > 200) line[0..200] else line),
+                    });
+                    return err;
+                };
+                defer parsed.deinit();
+                switch (parsed.event) {
+                    .api_error => |api_err| self.client.logger.warn("watch error event", &.{
                         LogField.uint("code", if (api_err.code) |c| std.math.cast(u64, c) orelse 0 else 0),
                         LogField.string("reason", api_err.reason orelse ""),
                         LogField.string("message", api_err.message orelse ""),
-                    });
-                },
-                else => {},
+                    }),
+                    else => {},
+                }
+                try sink.emit(io, &parsed);
             }
-
-            // Update last_resource_version for reconnection.
-            const rv = extractEventResourceVersion(T, parsed.event);
-            if (rv) |new_rv| {
-                try self.last_resource_version.assign(new_rv);
-            }
-
-            return parsed;
         }
 
-        /// Return the last observed resourceVersion for reconnection.
-        pub fn resourceVersion(self: *const Self) ?[]const u8 {
-            return self.last_resource_version.slice();
-        }
-
-        /// Close the watch stream and release all resources.
-        /// Joins the cancellation watcher thread before freeing state.
-        pub fn close(self: *Self, io: Io) void {
-            if (self.closed) return;
-            self.closed = true;
-            self.client.logger.debug("watch stream closed", &.{
-                LogField.string("last_resource_version", self.last_resource_version.slice() orelse ""),
-            });
-            if (self.watcher) |w| {
-                w.done.store(1, .release);
-                io.futexWake(u32, &w.done.raw, std.math.maxInt(u32));
-                w.thread.join();
-                self.allocator.destroy(w);
-                self.watcher = null;
-            }
-            self.state.deinit();
-        }
-
-        fn readLine(self: *Self) !?[]const u8 {
-            const reader = self.state.reader orelse return null;
-
+        fn readLine(self: *Self, io: Io, state: *StreamState) !?[]const u8 {
+            const reader = state.reader orelse return null;
             var line_writer = Io.Writer.Allocating.init(self.allocator);
             errdefer line_writer.deinit();
-
-            // Read until we find a newline delimiter, bounded by max_line_size.
-            // Using streamDelimiterLimit enforces the limit during streaming,
-            // preventing unbounded allocation from a malicious server.
+            // Bound streaming reads to max_line_size to avoid unbounded allocation.
             const n = reader.streamDelimiterLimit(&line_writer.writer, '\n', Io.Limit.limited(self.max_line_size)) catch |err| switch (err) {
-                error.ReadFailed => return error.ConnectionResetByPeer,
+                error.ReadFailed => {
+                    io.checkCancel() catch return error.Canceled;
+                    return error.ConnectionResetByPeer;
+                },
                 error.WriteFailed => return error.OutOfMemory,
                 error.StreamTooLong => return error.LineTooLong,
             };
-
-            // If the reader buffer still has data, the first byte is the delimiter; consume it.
+            // Consume the buffered newline delimiter when one remains.
             if (reader.bufferedLen() > 0) {
-                reader.toss(1); // consume the '\n' delimiter
+                reader.toss(1);
             } else {
-                if (n > 0) {
-                    self.client.logger.warn("watch stream truncated mid-line, treating as end-of-stream", &.{
-                        LogField.uint("dropped_bytes", n),
-                    });
-                }
+                if (n > 0) self.client.logger.warn("watch stream truncated mid-line, treating as end-of-stream", &.{LogField.uint("dropped_bytes", n)});
                 line_writer.deinit();
                 return null;
             }
-
             return line_writer.toOwnedSlice() catch return error.OutOfMemory;
         }
     };

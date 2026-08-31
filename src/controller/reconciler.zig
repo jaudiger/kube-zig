@@ -20,7 +20,7 @@ const QueueMetrics = metrics_mod.QueueMetrics;
 const testing = std.testing;
 
 /// Errors that `Reconciler.start` and `Controller.start` can return.
-pub const RunError = std.Thread.SpawnError || error{OutOfMemory};
+pub const RunError = std.Thread.SpawnError || std.Io.ConcurrentError || error{OutOfMemory};
 
 /// Result returned by a reconcile callback to indicate what action the
 /// Reconciler should take on the processed key.
