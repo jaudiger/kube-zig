@@ -682,7 +682,7 @@ pub fn main(init: std.process.Init) !void {
     var recorder = kube_zig.EventRecorder.init(allocator, &client, "ephemeral-env-controller", "ephemeral-env-controller", .{
         .logger = logger,
     });
-    defer recorder.deinit();
+    defer recorder.deinit(io);
 
     // Create the controller (cluster-scoped, namespace = null).
     var reconcile_ctx = ReconcileCtx{

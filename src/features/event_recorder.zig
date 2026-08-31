@@ -1,16 +1,16 @@
 //! Asynchronous Kubernetes Event recorder.
 //!
 //! Wraps `Api(CoreV1Event).create()` to emit core/v1 Event objects from a
-//! dedicated background worker thread so that callers (e.g. a reconcile loop)
-//! are never blocked by slow apiserver responses. Events are enqueued via
-//! `event()`, which is non-blocking and returns immediately. The worker
-//! thread drains the queue and issues the HTTP POST. Errors during event
-//! creation are logged and silently discarded.
+//! dedicated background task so that callers are never blocked by slow
+//! apiserver responses. Events are enqueued via `event()`, which is
+//! non-blocking and returns immediately. The task drains the queue and issues
+//! the HTTP POST. Errors during event creation are logged and silently
+//! discarded.
 //!
-//! Lifecycle: `init` -> `start` -> `event` (any number of times) -> `stop` /
-//! (`cancel` + `join`) -> `deinit`. The recorder can be registered with a
-//! `ControllerManager` via `runnable()` so that `mgr.stop` drives the
-//! lifecycle automatically.
+//! Lifecycle: `init` -> `start` -> `event` (any number of times) ->
+//! `shutdown` or `cancel` -> `join` -> `deinit`. `shutdown` drains queued
+//! events, while `cancel` aborts delivery and drops queued events. The recorder
+//! can be registered with a `ControllerManager` via `runnable()`.
 //!
 //! Event names are deterministic hashes of the involved object reference and
 //! reason string, so repeated events for the same object/reason produce the
@@ -63,15 +63,15 @@ const QueuedEvent = struct {
     }
 };
 
-/// Asynchronous Kubernetes Event recorder backed by a worker thread.
+/// Asynchronous Kubernetes Event recorder backed by an owned IO task.
 ///
 /// `event()` is non-blocking: it deep-copies the arguments into a per-record
-/// arena, enqueues the record, and returns. A background thread drains the
-/// queue and issues the HTTP POST. On overflow the event is dropped and a
-/// warning is logged; the caller is never stalled.
+/// arena, enqueues the record, and returns. A background task drains the queue
+/// and issues the HTTP POST. On overflow the event is dropped and a warning is
+/// logged; the caller is never stalled.
 ///
-/// Thread-safe: all public methods may be called from any thread after
-/// `start()` has returned.
+/// Enqueueing is thread-safe. Lifecycle methods must not be called after
+/// `deinit()`.
 pub const EventRecorder = struct {
     allocator: std.mem.Allocator,
     client: *Client,
@@ -82,18 +82,20 @@ pub const EventRecorder = struct {
     logger: Logger,
 
     mutex: std.Io.Mutex,
-    /// Wakeup epoch: producers bump this and futexWake; worker futexWaits on it.
+    /// Wakeup epoch: producers bump this and wake the task.
     cond_epoch: std.atomic.Value(u32),
-    shut_down: std.atomic.Value(bool),
     state: std.atomic.Value(State),
+    cancel_source: client_mod.CancelSource,
+    dispatch_ctx: ?client_mod.Context,
 
     queue: RingQueue(QueuedEvent),
-    worker_thread: ?std.Thread,
+    worker_task: ?std.Io.Future(std.Io.Cancelable!void),
+    join_mutex: std.Io.Mutex,
 
-    /// Events dropped due to queue overflow or OOM since the recorder started.
+    /// Events dropped due to queue overflow, OOM, or forced cancellation.
     dropped_total: std.atomic.Value(u64),
 
-    pub const State = enum(u8) { idle, running, stopped };
+    pub const State = enum(u8) { idle, running, stopping, canceling, stopped };
 
     pub const Options = struct {
         /// Maximum number of events that can be queued at once.
@@ -102,7 +104,7 @@ pub const EventRecorder = struct {
         logger: Logger = Logger.noop,
     };
 
-    /// Create a recorder in `idle` state. No thread is spawned.
+    /// Create a recorder in `idle` state. No task is spawned.
     pub fn init(
         allocator: std.mem.Allocator,
         client: *Client,
@@ -118,17 +120,21 @@ pub const EventRecorder = struct {
             .logger = opts.logger.withScope("event_recorder"),
             .mutex = .init,
             .cond_epoch = std.atomic.Value(u32).init(0),
-            .shut_down = std.atomic.Value(bool).init(false),
             .state = std.atomic.Value(State).init(.idle),
+            .cancel_source = .init(),
+            .dispatch_ctx = null,
             .queue = .{ .max_capacity = opts.max_queue_size },
-            .worker_thread = null,
+            .worker_task = null,
+            .join_mutex = .init,
             .dropped_total = std.atomic.Value(u64).init(0),
         };
     }
 
-    /// Release owned memory. The recorder must not be in `running` state.
-    pub fn deinit(self: *EventRecorder) void {
-        std.debug.assert(self.state.load(.acquire) != .running);
+    /// Release owned memory. The recorder must have been joined.
+    pub fn deinit(self: *EventRecorder, io: std.Io) void {
+        std.debug.assert(self.state.load(.acquire) == .idle or self.state.load(.acquire) == .stopped);
+        std.debug.assert(self.worker_task == null);
+        self.cancel_source.deinit(io);
         while (self.queue.pop()) |item| {
             var mutable = item;
             mutable.deinit();
@@ -136,33 +142,69 @@ pub const EventRecorder = struct {
         self.queue.deinit(self.allocator);
     }
 
-    /// Spawn the worker thread. Transitions from `idle` to `running`.
+    /// Spawn the background task. Transitions from `idle` to `running`.
     pub fn start(self: *EventRecorder, io: std.Io) RunError!void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         std.debug.assert(self.state.load(.acquire) == .idle);
+        self.dispatch_ctx = self.client.context().withCancel(io, &self.cancel_source);
         self.state.store(.running, .release);
-        self.worker_thread = try std.Thread.spawn(.{}, run, .{ self, io });
+        self.worker_task = io.concurrent(run, .{ self, io }) catch |err| {
+            self.dispatch_ctx = null;
+            self.cancel_source.deinit(io);
+            self.state.store(.idle, .release);
+            return err;
+        };
     }
 
-    /// Signal the worker to drain remaining events and exit (non-blocking).
-    pub fn cancel(self: *EventRecorder, io: std.Io) void {
-        self.shut_down.store(true, .release);
-        _ = self.cond_epoch.fetchAdd(1, .release);
-        io.futexWake(u32, &self.cond_epoch.raw, std.math.maxInt(u32));
-    }
-
-    /// Wait for the worker thread to exit.
-    pub fn join(self: *EventRecorder) void {
-        if (self.worker_thread) |t| {
-            t.join();
-            self.worker_thread = null;
+    /// Request graceful shutdown without waiting. Queued events are drained.
+    pub fn shutdown(self: *EventRecorder, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        switch (self.state.load(.acquire)) {
+            .idle => self.state.store(.stopped, .release),
+            .running => self.state.store(.stopping, .release),
+            .stopping, .canceling, .stopped => return,
         }
-        self.state.store(.stopped, .release);
+        self.wake(io);
     }
 
-    /// Cancel and join: signal shutdown and wait for the worker to finish.
+    /// Request immediate cancellation without waiting. `join()` applies the
+    /// task cancellation and drops undelivered events.
+    pub fn cancel(self: *EventRecorder, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        switch (self.state.load(.acquire)) {
+            .idle => self.state.store(.stopped, .release),
+            .running, .stopping => self.state.store(.canceling, .release),
+            .canceling, .stopped => return,
+        }
+        self.wake(io);
+    }
+
+    /// Wait for the background task to exit.
+    pub fn join(self: *EventRecorder, io: std.Io) void {
+        self.join_mutex.lockUncancelable(io);
+        defer self.join_mutex.unlock(io);
+
+        if (self.worker_task) |*task| {
+            if (self.state.load(.acquire) == .canceling) {
+                task.cancel(io) catch {};
+            } else {
+                task.await(io) catch {};
+            }
+            self.mutex.lockUncancelable(io);
+            self.worker_task = null;
+            self.dispatch_ctx = null;
+            self.state.store(.stopped, .release);
+            self.mutex.unlock(io);
+        }
+    }
+
+    /// Gracefully shut down and wait for the task to finish.
     pub fn stop(self: *EventRecorder, io: std.Io) void {
-        self.cancel(io);
-        self.join();
+        self.shutdown(io);
+        self.join(io);
     }
 
     /// Return a `Runnable` that plugs this recorder into a `ControllerManager`.
@@ -241,7 +283,7 @@ pub const EventRecorder = struct {
         const ok: bool = blk: {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
-            if (self.shut_down.raw) {
+            if (self.state.load(.acquire) != .running) {
                 self.recordDrop("recorder shut down");
                 break :blk false;
             }
@@ -252,8 +294,7 @@ pub const EventRecorder = struct {
             break :blk true;
         };
         if (ok) {
-            _ = self.cond_epoch.fetchAdd(1, .release);
-            io.futexWake(u32, &self.cond_epoch.raw, 1);
+            self.wake(io);
         } else {
             var mutable = record;
             mutable.deinit();
@@ -265,33 +306,71 @@ pub const EventRecorder = struct {
         self.logger.warn("event dropped", &.{LogField.string("reason", reason)});
     }
 
-    fn run(self: *EventRecorder, io: std.Io) void {
+    fn wake(self: *EventRecorder, io: std.Io) void {
+        _ = self.cond_epoch.fetchAdd(1, .release);
+        io.futexWake(u32, &self.cond_epoch.raw, std.math.maxInt(u32));
+    }
+
+    fn run(self: *EventRecorder, io: std.Io) std.Io.Cancelable!void {
+        defer {
+            self.state.store(.stopped, .release);
+            self.discardQueued(io);
+        }
+
         while (true) {
             self.mutex.lockUncancelable(io);
-
-            // Wait for work or shutdown signal.
-            while (self.queue.count == 0 and !self.shut_down.raw) {
+            while (self.queue.count == 0 and self.state.load(.acquire) == .running) {
                 const observed = self.cond_epoch.load(.acquire);
                 self.mutex.unlock(io);
-                io.futexWaitUncancelable(u32, &self.cond_epoch.raw, observed);
+                io.futexWait(u32, &self.cond_epoch.raw, observed) catch |err| return err;
                 self.mutex.lockUncancelable(io);
             }
 
-            if (self.queue.count == 0) {
+            const state = self.state.load(.acquire);
+            if (state == .canceling or (state == .stopping and self.queue.count == 0)) {
                 self.mutex.unlock(io);
                 return;
             }
 
-            const item = self.queue.pop().?;
+            const item = self.queue.pop() orelse {
+                self.mutex.unlock(io);
+                continue;
+            };
             self.mutex.unlock(io);
 
             var mutable = item;
-            self.dispatch(io, mutable);
-            mutable.deinit();
+            defer mutable.deinit();
+            self.dispatch(io, mutable) catch |err| {
+                if (err == error.Canceled) {
+                    self.recordDrop("recorder canceled");
+                    return err;
+                }
+                self.logger.warn("event creation failed", &.{
+                    LogField.string("error", @errorName(err)),
+                });
+            };
         }
     }
 
-    fn dispatch(self: *EventRecorder, io: std.Io, item: QueuedEvent) void {
+    fn discardQueued(self: *EventRecorder, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        var dropped: u64 = 0;
+        while (self.queue.pop()) |item| {
+            var mutable = item;
+            mutable.deinit();
+            dropped += 1;
+        }
+        if (dropped > 0) {
+            _ = self.dropped_total.fetchAdd(dropped, .monotonic);
+            self.logger.warn("events dropped on task shutdown", &.{
+                LogField.uint("count", dropped),
+            });
+        }
+    }
+
+    fn dispatch(self: *EventRecorder, io: std.Io, item: QueuedEvent) std.Io.Cancelable!void {
         const CoreV1Event = types.CoreV1Event;
         const EventApi = Api_mod.Api(CoreV1Event);
 
@@ -319,8 +398,9 @@ pub const EventRecorder = struct {
             .reportingInstance = self.instance,
         };
 
-        const api = EventApi.init(self.client, self.client.context(), effective_ns);
+        const api = EventApi.init(self.client, self.dispatch_ctx.?, effective_ns);
         const result = api.create(io, ev, .{}) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             self.logger.warn("event creation failed", &.{
                 LogField.string("error", @errorName(err)),
             });
@@ -528,7 +608,7 @@ test "EventRecorder: overflow drops events and increments counter" {
     var recorder = EventRecorder.init(testing.allocator, &client, "test", "test-pod", .{
         .max_queue_size = 2,
     });
-    defer recorder.deinit();
+    defer recorder.deinit(io);
 
     // Act
     for (0..5) |_| {
@@ -560,7 +640,7 @@ test "EventRecorder: end-to-end via mock transport" {
     };
 
     var recorder = EventRecorder.init(testing.allocator, &client, "ctrl", "ctrl-pod-1", .{});
-    defer recorder.deinit();
+    defer recorder.deinit(io);
 
     // Act
     try recorder.start(io);
