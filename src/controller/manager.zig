@@ -508,7 +508,7 @@ fn makeMockRunnable(state: *MockState) Runnable {
 test "Runnable: VTable has expected fields" {
     // Act / Assert
     const vtable_info = @typeInfo(Runnable.VTable);
-    try testing.expectEqual(6, vtable_info.@"struct".fields.len);
+    try testing.expectEqual(6, vtable_info.@"struct".field_names.len);
 }
 
 test "init/deinit: count is 0, allSynced is vacuously true" {

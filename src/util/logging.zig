@@ -22,7 +22,7 @@ pub const Level = enum(u8) {
 
     /// Return the numeric ordering value for level comparison.
     pub fn order(self: Level) u8 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// Return the lowercase string representation of this level.
@@ -127,27 +127,27 @@ pub const Logger = struct {
     // Convenience methods
     /// Log a message at trace level. Skipped if min_level is above trace.
     pub fn trace(self: Logger, message: []const u8, fields: []const Field) void {
-        if (@intFromEnum(Level.trace) >= self.min_level) self.log(.trace, message, fields);
+        if (@backingInt(Level.trace) >= self.min_level) self.log(.trace, message, fields);
     }
 
     /// Log a message at debug level. Skipped if min_level is above debug.
     pub fn debug(self: Logger, message: []const u8, fields: []const Field) void {
-        if (@intFromEnum(Level.debug) >= self.min_level) self.log(.debug, message, fields);
+        if (@backingInt(Level.debug) >= self.min_level) self.log(.debug, message, fields);
     }
 
     /// Log a message at info level. Skipped if min_level is above info.
     pub fn info(self: Logger, message: []const u8, fields: []const Field) void {
-        if (@intFromEnum(Level.info) >= self.min_level) self.log(.info, message, fields);
+        if (@backingInt(Level.info) >= self.min_level) self.log(.info, message, fields);
     }
 
     /// Log a message at warn level. Skipped if min_level is above warn.
     pub fn warn(self: Logger, message: []const u8, fields: []const Field) void {
-        if (@intFromEnum(Level.warn) >= self.min_level) self.log(.warn, message, fields);
+        if (@backingInt(Level.warn) >= self.min_level) self.log(.warn, message, fields);
     }
 
     /// Log a message at error level. Skipped if min_level is above error.
     pub fn err(self: Logger, message: []const u8, fields: []const Field) void {
-        if (@intFromEnum(Level.err) >= self.min_level) self.log(.err, message, fields);
+        if (@backingInt(Level.err) >= self.min_level) self.log(.err, message, fields);
     }
 
     /// Return a new Logger with the given scope tag.
@@ -249,7 +249,7 @@ pub const JsonStdoutLogger = struct {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &vtable_impl,
-            .min_level = @intFromEnum(self.min_level),
+            .min_level = @backingInt(self.min_level),
         };
     }
 
@@ -348,7 +348,7 @@ pub const TextStdoutLogger = struct {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &vtable_impl,
-            .min_level = @intFromEnum(self.min_level),
+            .min_level = @backingInt(self.min_level),
         };
     }
 
@@ -513,7 +513,7 @@ const TestLogger = struct {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &vtable_impl,
-            .min_level = @intFromEnum(self.min_level),
+            .min_level = @backingInt(self.min_level),
         };
     }
 
@@ -671,7 +671,7 @@ test "JsonStdoutLogger: init and logger method" {
     try testing.expect(l.ptr != null);
     try testing.expect(l.vtable == &JsonStdoutLogger.vtable_impl);
     // Verify min level is stored on the Logger for early short-circuit.
-    try testing.expectEqual(@as(u8, @intFromEnum(Level.warn)), l.min_level);
+    try testing.expectEqual(@as(u8, @backingInt(Level.warn)), l.min_level);
     // Verify min level is stored.
     try testing.expectEqual(Level.warn, jsl.min_level);
     // Note: we do NOT call l.warn/l.err here because the JsonStdoutLogger
@@ -745,7 +745,7 @@ test "TextStdoutLogger: init and logger method" {
     const l = tsl.logger();
     try testing.expect(l.ptr != null);
     try testing.expect(l.vtable == &TextStdoutLogger.vtable_impl);
-    try testing.expectEqual(@as(u8, @intFromEnum(Level.info)), l.min_level);
+    try testing.expectEqual(@as(u8, @backingInt(Level.info)), l.min_level);
 }
 
 test "writeTextLine: formats plain text correctly" {

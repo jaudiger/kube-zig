@@ -345,7 +345,7 @@ const ReconcileCtx = struct {
 
     // Helpers
     fn allocNsName(self: *ReconcileCtx, env_name: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "eenv-{s}", .{env_name});
+        return self.allocator.print("eenv-{s}", .{env_name});
     }
 
     fn handleDeletion(
@@ -428,7 +428,7 @@ const ReconcileCtx = struct {
         env_name: []const u8,
         owner_ref: ?k8s.MetaV1OwnerReference,
     ) !void {
-        const cm_name = try std.fmt.allocPrint(self.allocator, "{s}-config", .{env_name});
+        const cm_name = try self.allocator.print("{s}-config", .{env_name});
         defer self.allocator.free(cm_name);
 
         const cm_api = ConfigMapApi.init(self.client, self.client.context(), ns_name);
@@ -667,9 +667,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     // Allocator setup.
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
-    const allocator = debug_allocator.allocator();
+    var safe_allocator = std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
+    defer std.debug.assert(safe_allocator.deinit() == 0);
+    const allocator = safe_allocator.allocator();
 
     // Client init via ProxyConfig with structured JSON logging.
     const config = kube_zig.ProxyConfig.init(init.environ_map);

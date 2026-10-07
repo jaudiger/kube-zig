@@ -17,16 +17,16 @@ const validateHasMetadata = resource_shape.validateHasMetadata;
 fn ManagedFieldsEntryType(comptime T: type) type {
     comptime validateHasMetadata(T);
     // Get the metadata field type, unwrap the optional.
-    const fields = @typeInfo(T).@"struct".fields;
-    inline for (fields) |f| {
-        if (std.mem.eql(u8, f.name, "metadata")) {
+    const fields = @typeInfo(T).@"struct";
+    inline for (fields.field_names, fields.field_types) |field_name, field_type| {
+        if (std.mem.eql(u8, field_name, "metadata")) {
             // metadata is ?MetaType; unwrap the optional to get MetaType.
-            const MetaType = @typeInfo(f.type).optional.child;
-            const meta_fields = @typeInfo(MetaType).@"struct".fields;
-            inline for (meta_fields) |mf| {
-                if (std.mem.eql(u8, mf.name, "managedFields")) {
+            const MetaType = @typeInfo(field_type).optional.child;
+            const meta_fields = @typeInfo(MetaType).@"struct";
+            inline for (meta_fields.field_names, meta_fields.field_types) |meta_field_name, meta_field_type| {
+                if (std.mem.eql(u8, meta_field_name, "managedFields")) {
                     // Field type is ?[]const Entry; unwrap optional, then get child of slice.
-                    const OptionalSlice = mf.type;
+                    const OptionalSlice = meta_field_type;
                     const Slice = @typeInfo(OptionalSlice).optional.child;
                     return @typeInfo(Slice).pointer.child;
                 }

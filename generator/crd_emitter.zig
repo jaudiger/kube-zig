@@ -193,7 +193,7 @@ fn generateVersion(
     const type_name = try buildTypeName(allocator, meta.group_prefix, meta.kind, meta.version, multi_version);
     defer allocator.free(type_name);
 
-    const list_type_name = try std.fmt.allocPrint(allocator, "{s}List", .{type_name});
+    const list_type_name = try allocator.print("{s}List", .{type_name});
     defer allocator.free(list_type_name);
 
     // Write list type.

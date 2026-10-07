@@ -41,21 +41,21 @@ jobs:
     if: needs.changes.outputs.zig == 'true'
     uses: jaudiger/reusable-workflows/.github/workflows/build-zig.yml@769f5d6babad04c95206b14de840be01e30d99f9
     with:
-      zig-version: "0.16.0"
+      zig-version: "0.17.0"
 
   lint-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
     uses: jaudiger/reusable-workflows/.github/workflows/static-analysis-zig.yml@769f5d6babad04c95206b14de840be01e30d99f9
     with:
-      zig-version: "0.16.0"
+      zig-version: "0.17.0"
 
   test-zig:
     needs: changes
     if: needs.changes.outputs.zig == 'true'
     uses: jaudiger/reusable-workflows/.github/workflows/tests-zig.yml@769f5d6babad04c95206b14de840be01e30d99f9
     with:
-      zig-version: "0.16.0"
+      zig-version: "0.17.0"
 
   lint-actions:
     needs: changes

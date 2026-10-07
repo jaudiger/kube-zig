@@ -109,7 +109,7 @@ fn decompose(secs: u64) DateTime {
 
     return .{
         .year = year_day.year,
-        .month = @intFromEnum(month_day.month),
+        .month = @backingInt(month_day.month),
         .day = month_day.day_index + 1,
         .hours = day_secs.getHoursIntoDay(),
         .minutes = day_secs.getMinutesIntoHour(),

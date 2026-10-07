@@ -65,9 +65,7 @@ pub fn build(b: *std.Build) void {
     const crd_gen_step = b.step("generate-crd", "Generate Zig types from CRD JSON files (pass args: -- <output.zig> <crd1.json> ...)");
     const crd_gen_cmd = b.addRunArtifact(crd_generator);
     crd_gen_cmd.setCwd(b.path("."));
-    if (b.args) |args| {
-        crd_gen_cmd.addArgs(args);
-    }
+    crd_gen_cmd.addPassthruArgs();
     crd_gen_step.dependOn(&crd_gen_cmd.step);
 
     // Types module (standalone, generated)
@@ -113,9 +111,7 @@ pub fn build(b: *std.Build) void {
 
         const ex_run = b.addRunArtifact(ex_exe);
         ex_run.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            ex_run.addArgs(args);
-        }
+        ex_run.addPassthruArgs();
 
         const ex_step = b.step(ex[2], ex[3]);
         ex_step.dependOn(&ex_run.step);
@@ -124,11 +120,6 @@ pub fn build(b: *std.Build) void {
     // Tests
     const test_step = b.step("test", "Run all offline tests (unit + compile + roundtrip + api + proxy)");
 
-    // Helper: wrap a test compile step with kcov when -Dcoverage is set.
-    const kcov_args: []const ?[]const u8 = &.{
-        "kcov", "--include-pattern=generator/,src/", "kcov-output", null,
-    };
-
     // Unit tests for generator helpers
     addTestStep(b, test_step, b.addTest(.{
         .root_module = b.createModule(.{
@@ -136,7 +127,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Generated types compile + shape tests
     addTestStep(b, test_step, b.addTest(.{
@@ -148,7 +139,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "k8s", .module = types_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // JSON round-trip tests with fixtures
     addTestStep(b, test_step, b.addTest(.{
@@ -160,7 +151,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "k8s", .module = types_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Api(T) and resource metadata tests
     addTestStep(b, test_step, b.addTest(.{
@@ -173,7 +164,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "k8s", .module = types_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Emitter helper unit tests
     addTestStep(b, test_step, b.addTest(.{
@@ -182,7 +173,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // CRD emitter unit tests
     addTestStep(b, test_step, b.addTest(.{
@@ -191,7 +182,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Library inline tests (all src/ files tested via the kube-zig module).
     // The kube-zig module is rooted at src/root.zig and transitively imports all
@@ -205,7 +196,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "types", .module = types_mod },
             },
         });
-        addTestStep(b, test_step, b.addTest(.{ .root_module = lib_test_mod }), coverage, kcov_args);
+        addTestStep(b, test_step, b.addTest(.{ .root_module = lib_test_mod }), coverage);
     }
 
     // Client auth and status code tests
@@ -218,7 +209,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "kube-zig", .module = kube_zig_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Retry integration tests
     addTestStep(b, test_step, b.addTest(.{
@@ -230,7 +221,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "kube-zig", .module = kube_zig_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Rate limit integration tests
     addTestStep(b, test_step, b.addTest(.{
@@ -242,7 +233,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "kube-zig", .module = kube_zig_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Circuit breaker integration tests
     addTestStep(b, test_step, b.addTest(.{
@@ -254,7 +245,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "kube-zig", .module = kube_zig_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Mock transport tests (CRUD via Api(T), error handling, watch stream)
     addTestStep(b, test_step, b.addTest(.{
@@ -267,7 +258,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "k8s", .module = types_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 
     // Reflector reconnect tests (watch 410, disconnect, backoff, cancellation)
     addTestStep(b, test_step, b.addTest(.{
@@ -280,7 +271,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "k8s", .module = types_mod },
             },
         }),
-    }), coverage, kcov_args);
+    }), coverage);
 }
 
 fn addTestStep(
@@ -288,8 +279,12 @@ fn addTestStep(
     test_step: *std.Build.Step,
     test_artifact: *std.Build.Step.Compile,
     cov: bool,
-    kcov_args: []const ?[]const u8,
 ) void {
-    if (cov) test_artifact.setExecCmd(kcov_args);
-    test_step.dependOn(&b.addRunArtifact(test_artifact).step);
+    if (cov) {
+        const kcov_cmd = b.addSystemCommand(&.{ "kcov", "--include-pattern=generator/,src/", "kcov-output" });
+        kcov_cmd.addArtifactArg2(test_artifact, .{});
+        test_step.dependOn(&kcov_cmd.step);
+    } else {
+        test_step.dependOn(&b.addRunArtifact(test_artifact).step);
+    }
 }

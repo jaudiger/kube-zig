@@ -76,8 +76,8 @@ fn deepEqualImpl(comptime T: type, a: T, b: T) bool {
 
 fn structEqual(comptime T: type, a: T, b: T) bool {
     const struct_info = @typeInfo(T).@"struct";
-    inline for (struct_info.fields) |field| {
-        if (!deepEqualImpl(field.type, @field(a, field.name), @field(b, field.name))) return false;
+    inline for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+        if (!deepEqualImpl(field_type, @field(a, field_name), @field(b, field_name))) return false;
     }
     return true;
 }
@@ -87,11 +87,11 @@ fn taggedUnionEqual(comptime T: type, a: T, b: T) bool {
     if (union_info.tag_type == null) {
         @compileError("deepEqual: unsupported untagged union " ++ @typeName(T));
     }
-    inline for (union_info.fields) |field| {
-        if (a == @field(T, field.name)) {
-            if (b != @field(T, field.name)) return false;
-            if (field.type == void) return true;
-            return deepEqualImpl(field.type, @field(a, field.name), @field(b, field.name));
+    inline for (union_info.field_names, union_info.field_types) |field_name, field_type| {
+        if (a == @field(T, field_name)) {
+            if (b != @field(T, field_name)) return false;
+            if (field_type == void) return true;
+            return deepEqualImpl(field_type, @field(a, field_name), @field(b, field_name));
         }
     }
     unreachable;
@@ -225,9 +225,9 @@ fn isServerManagedField(comptime name: []const u8) bool {
 
 fn metadataFieldsEqual(comptime MetaType: type, a: MetaType, b: MetaType) bool {
     const struct_info = @typeInfo(MetaType).@"struct";
-    inline for (struct_info.fields) |field| {
-        if (comptime !isServerManagedField(field.name)) {
-            if (!deepEqualImpl(field.type, @field(a, field.name), @field(b, field.name))) return false;
+    inline for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+        if (comptime !isServerManagedField(field_name)) {
+            if (!deepEqualImpl(field_type, @field(a, field_name), @field(b, field_name))) return false;
         }
     }
     return true;

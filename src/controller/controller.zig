@@ -693,7 +693,7 @@ test "Controller: SecondaryOptions defaults" {
 test "SecondaryInformer: VTable has expected methods" {
     // Act / Assert
     const vtable_info = @typeInfo(SecondaryInformer.VTable);
-    try testing.expectEqual(4, vtable_info.@"struct".fields.len);
+    try testing.expectEqual(4, vtable_info.@"struct".field_names.len);
     try testing.expect(@hasField(SecondaryInformer.VTable, "run"));
     try testing.expect(@hasField(SecondaryInformer.VTable, "cancel"));
     try testing.expect(@hasField(SecondaryInformer.VTable, "has_synced"));

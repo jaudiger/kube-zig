@@ -2,6 +2,6 @@
     .name = .kube_zig,
     .version = "0.1.0",
     .fingerprint = 0xeffc1c03fefd50c7,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .paths = .{""},
 }

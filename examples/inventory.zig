@@ -40,9 +40,9 @@ const ResourceEntry = struct {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
-    const allocator = debug_allocator.allocator();
+    var safe_allocator = std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
+    defer std.debug.assert(safe_allocator.deinit() == 0);
+    const allocator = safe_allocator.allocator();
 
     const config = kube_zig.ProxyConfig.init(init.environ_map);
     var text_logger = kube_zig.log.TextStdoutLogger.init(io, .info);
@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Print summary table.
     try w.print("{s:<20} {s:>6}\n", .{ "Resource", "Count" });
-    try w.print("{s:<20} {s:>6}\n", .{ "-" ** 20, "-" ** 6 });
+    try w.print("{s:<20} {s:>6}\n", .{ @as([20]u8, @splat('-')), @as([6]u8, @splat('-')) });
 
     var total: usize = 0;
     for (&entries) |*entry| {
@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    try w.print("{s:<20} {s:>6}\n", .{ "-" ** 20, "-" ** 6 });
+    try w.print("{s:<20} {s:>6}\n", .{ @as([20]u8, @splat('-')), @as([6]u8, @splat('-')) });
     try w.print("{s:<20} {d:>6}\n\n", .{ "Total", total });
 
     // Print details per resource kind.

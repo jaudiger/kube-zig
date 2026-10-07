@@ -239,24 +239,25 @@ pub fn removeCondition(
 fn makeNewCondition(comptime C: type, value: ConditionValue, timestamp: []const u8) C {
     var cond: C = undefined;
 
-    inline for (@typeInfo(C).@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "type")) {
-            @field(cond, field.name) = value.type;
-        } else if (comptime std.mem.eql(u8, field.name, "status")) {
-            @field(cond, field.name) = value.status.toValue();
-        } else if (comptime std.mem.eql(u8, field.name, "reason")) {
-            @field(cond, field.name) = coerceStringValue(field.type, value.reason);
-        } else if (comptime std.mem.eql(u8, field.name, "message")) {
-            @field(cond, field.name) = coerceStringValue(field.type, value.message);
-        } else if (comptime std.mem.eql(u8, field.name, "lastTransitionTime")) {
-            @field(cond, field.name) = coerceStringValue(field.type, timestamp);
-        } else if (comptime std.mem.eql(u8, field.name, "observedGeneration")) {
-            @field(cond, field.name) = value.observed_generation;
-        } else if (comptime @typeInfo(field.type) == .optional) {
-            @field(cond, field.name) = null;
+    const struct_info = @typeInfo(C).@"struct";
+    inline for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+        if (comptime std.mem.eql(u8, field_name, "type")) {
+            @field(cond, field_name) = value.type;
+        } else if (comptime std.mem.eql(u8, field_name, "status")) {
+            @field(cond, field_name) = value.status.toValue();
+        } else if (comptime std.mem.eql(u8, field_name, "reason")) {
+            @field(cond, field_name) = coerceStringValue(field_type, value.reason);
+        } else if (comptime std.mem.eql(u8, field_name, "message")) {
+            @field(cond, field_name) = coerceStringValue(field_type, value.message);
+        } else if (comptime std.mem.eql(u8, field_name, "lastTransitionTime")) {
+            @field(cond, field_name) = coerceStringValue(field_type, timestamp);
+        } else if (comptime std.mem.eql(u8, field_name, "observedGeneration")) {
+            @field(cond, field_name) = value.observed_generation;
+        } else if (comptime @typeInfo(field_type) == .optional) {
+            @field(cond, field_name) = null;
         } else {
             @compileError("condition type '" ++ @typeName(C) ++
-                "' has unhandled required field '" ++ field.name ++ "'");
+                "' has unhandled required field '" ++ field_name ++ "'");
         }
     }
 

@@ -22,9 +22,9 @@ const crontab_name = "dynamic-crontab";
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
-    const allocator = debug_allocator.allocator();
+    var safe_allocator = std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
+    defer std.debug.assert(safe_allocator.deinit() == 0);
+    const allocator = safe_allocator.allocator();
 
     const config = kube_zig.ProxyConfig.init(init.environ_map);
     var text_logger = kube_zig.log.TextStdoutLogger.init(io, .info);

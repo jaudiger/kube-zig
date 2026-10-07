@@ -8,7 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HealthCheck = @import("../util/health_check.zig").HealthCheck;
-const native_os = builtin.os.tag;
+const native_os = builtin.target.os.tag;
 const http = std.http;
 const Uri = std.Uri;
 const InClusterConfig = @import("incluster.zig").InClusterConfig;
@@ -1116,7 +1116,7 @@ pub const Client = struct {
             .bad_gateway => error.HttpBadGateway,
             .service_unavailable => error.HttpServiceUnavailable,
             .gateway_timeout => error.HttpGatewayTimeout,
-            else => if (@intFromEnum(status) >= 500)
+            else => if (@backingInt(status) >= 500)
                 error.HttpServerError
             else
                 error.HttpUnexpectedStatus,
@@ -1177,7 +1177,7 @@ pub const Client = struct {
     fn buildUri(self: *Client, path: []const u8, buf: []u8) (error{OutOfMemory} || error{HttpRequestFailed})!OwnedUri {
         const url = std.fmt.bufPrint(buf, "{s}{s}", .{ self.base_url, path }) catch {
             // Path too long for the provided buffer; fall back to heap.
-            const heap_url = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path }) catch return error.OutOfMemory;
+            const heap_url = self.allocator.print("{s}{s}", .{ self.base_url, path }) catch return error.OutOfMemory;
             errdefer self.allocator.free(heap_url);
             return .{ .uri = Uri.parse(heap_url) catch return error.HttpRequestFailed, .heap_buf = heap_url };
         };
@@ -1356,7 +1356,7 @@ pub const Client = struct {
                     self.logger.trace("request api_error", &.{
                         LogField.string("method", @tagName(req_ctx.method)),
                         LogField.string("path", path),
-                        LogField.uint("status", @intFromEnum(e.status)),
+                        LogField.uint("status", @backingInt(e.status)),
                     });
                     return raw;
                 },
@@ -1385,7 +1385,7 @@ pub const Client = struct {
                 LogField.uint("attempt", @intCast(attempt + 1)),
                 LogField.uint("max_retries", @intCast(self.retry_policy.max_retries)),
                 LogField.uint("backoff_ms", sleep_ns / std.time.ns_per_ms),
-                LogField.uint("status_code", @intFromEnum(code)),
+                LogField.uint("status_code", @backingInt(code)),
             }),
         }
     }

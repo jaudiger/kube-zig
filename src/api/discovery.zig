@@ -124,7 +124,7 @@ pub const DiscoveryClient = struct {
             LogField.string("group", group),
             LogField.string("version", version),
         });
-        const path = try std.fmt.allocPrint(self.client.allocator, "/apis/{s}/{s}", .{ group, version });
+        const path = try self.client.allocator.print("/apis/{s}/{s}", .{ group, version });
         defer self.client.allocator.free(path);
         return self.client.get(io, types.MetaV1APIResourceList, path, self.ctx);
     }
@@ -464,7 +464,7 @@ pub const DiscoveryClient = struct {
     }
 
     fn makeCacheKey(self: *DiscoveryClient, group: []const u8, version: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{s}\x00{s}", .{ group, version });
+        return self.allocator.print("{s}\x00{s}", .{ group, version });
     }
 
     fn isCacheValid(io: std.Io, fetched_at: std.Io.Clock.Timestamp, ttl_ns: u64) bool {

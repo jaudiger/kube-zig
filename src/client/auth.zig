@@ -109,7 +109,7 @@ pub const AuthProvider = struct {
                 else => error.TokenReadFailed,
             };
         };
-        const new_header = std.fmt.allocPrint(self.allocator, "Bearer {s}", .{new_token}) catch {
+        const new_header = self.allocator.print("Bearer {s}", .{new_token}) catch {
             self.allocator.free(new_token);
             return error.OutOfMemory;
         };

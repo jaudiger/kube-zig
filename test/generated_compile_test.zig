@@ -90,11 +90,14 @@ test "ContainerPort.containerPort is i32 (required)" {
     const info = @typeInfo(k8s.CoreV1ContainerPort);
 
     // Act / Assert
-    inline for (info.@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, "containerPort")) {
-            try testing.expect(f.type == i32);
+    var found = false;
+    inline for (info.@"struct".field_names, info.@"struct".field_types) |field_name, field_type| {
+        if (std.mem.eql(u8, field_name, "containerPort")) {
+            found = true;
+            try testing.expect(field_type == i32);
         }
     }
+    try testing.expect(found);
 }
 
 test "DeploymentSpec.replicas is i32" {
@@ -102,9 +105,12 @@ test "DeploymentSpec.replicas is i32" {
     const info = @typeInfo(k8s.AppsV1DeploymentSpec);
 
     // Act / Assert
-    inline for (info.@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, "replicas")) {
-            try testing.expect(f.type == ?i32);
+    var found = false;
+    inline for (info.@"struct".field_names, info.@"struct".field_types) |field_name, field_type| {
+        if (std.mem.eql(u8, field_name, "replicas")) {
+            found = true;
+            try testing.expect(field_type == ?i32);
         }
     }
+    try testing.expect(found);
 }

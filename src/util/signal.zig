@@ -22,7 +22,7 @@ const testing = std.testing;
 
 /// Returns true if the current platform supports POSIX signals.
 fn isPosixSupported() bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .linux, .macos => true,
         else => false,
     };
@@ -101,7 +101,7 @@ pub const SignalHandler = struct {
 /// are performed here. A consumer polls `signal_received` via futex with
 /// a short timeout to observe the change.
 fn signalHandler(sig: std.posix.SIG) callconv(.c) void {
-    received_signal.store(@intCast(@intFromEnum(sig)), .release);
+    received_signal.store(@intCast(@backingInt(sig)), .release);
     signal_received.store(1, .release);
 }
 
@@ -198,10 +198,10 @@ test "SignalHandler: manual flag set simulates signal" {
     // Assert
     // Directly set the atomic to simulate signal receipt.
     signal_received.store(1, .release);
-    received_signal.store(@intFromEnum(std.posix.SIG.TERM), .release);
+    received_signal.store(@backingInt(std.posix.SIG.TERM), .release);
 
     try testing.expect(handler.isSignaled());
-    try testing.expectEqual(@as(i32, @intFromEnum(std.posix.SIG.TERM)), handler.getSignal().?);
+    try testing.expectEqual(@as(i32, @backingInt(std.posix.SIG.TERM)), handler.getSignal().?);
 }
 
 test "ShutdownCallback: fromTypedCtx calls function" {
@@ -260,7 +260,7 @@ test "setupShutdown: handle owns callbacks across caller's scope" {
     var c = Counter{};
 
     signal_received.store(1, .release);
-    received_signal.store(@intFromEnum(std.posix.SIG.TERM), .release);
+    received_signal.store(@backingInt(std.posix.SIG.TERM), .release);
     defer {
         signal_received.store(0, .release);
         received_signal.store(0, .release);

@@ -14,7 +14,7 @@ pub const TraceId = struct {
     bytes: [16]u8,
 
     /// The all-zeros trace ID, representing an invalid/unset trace.
-    pub const zero: TraceId = .{ .bytes = .{0} ** 16 };
+    pub const zero: TraceId = .{ .bytes = @splat(0) };
 
     /// Generate a random trace ID using the system CSPRNG.
     pub fn generate(io: std.Io) TraceId {
@@ -49,7 +49,7 @@ pub const SpanId = struct {
     bytes: [8]u8,
 
     /// The all-zeros span ID, representing an invalid/unset span.
-    pub const zero: SpanId = .{ .bytes = .{0} ** 8 };
+    pub const zero: SpanId = .{ .bytes = @splat(0) };
 
     /// Generate a random span ID using the system CSPRNG.
     pub fn generate(io: std.Io) SpanId {

@@ -113,7 +113,7 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, output_dir: []const u8
         deps.sort(StringKeySortCtx{ .keys = deps.keys() });
 
         // Build filename: "{group_key}.zig"
-        const filename = try std.fmt.allocPrint(allocator, "{s}.zig", .{group_key});
+        const filename = try allocator.print("{s}.zig", .{group_key});
         defer allocator.free(filename);
 
         const file = try dir.createFile(io, filename, .{});
@@ -277,7 +277,7 @@ fn extractResourceMetas(
         const knd = kind orelse continue;
 
         // Build tuple key: "group/version/kind"
-        const tuple_key = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}", .{ group, ver, knd });
+        const tuple_key = try allocator.print("{s}/{s}/{s}", .{ group, ver, knd });
 
         const gop = try info_map.getOrPut(allocator, tuple_key);
         if (gop.found_existing) {

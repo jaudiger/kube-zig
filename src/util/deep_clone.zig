@@ -101,8 +101,8 @@ fn isManagedArrayHashMap(comptime T: type) bool {
 fn cloneStruct(comptime T: type, allocator: Allocator, value: T) Allocator.Error!T {
     const struct_info = @typeInfo(T).@"struct";
     var result: T = undefined;
-    inline for (struct_info.fields) |field| {
-        @field(result, field.name) = try deepCloneImpl(field.type, allocator, @field(value, field.name));
+    inline for (struct_info.field_names, struct_info.field_types) |field_name, field_type| {
+        @field(result, field_name) = try deepCloneImpl(field_type, allocator, @field(value, field_name));
     }
     return result;
 }
@@ -112,12 +112,12 @@ fn cloneTaggedUnion(comptime T: type, allocator: Allocator, value: T) Allocator.
     if (union_info.tag_type == null) {
         @compileError("deepClone: unsupported untagged union " ++ @typeName(T));
     }
-    inline for (union_info.fields) |field| {
-        if (value == @field(T, field.name)) {
-            if (field.type == void) {
-                return @unionInit(T, field.name, {});
+    inline for (union_info.field_names, union_info.field_types) |field_name, field_type| {
+        if (value == @field(T, field_name)) {
+            if (field_type == void) {
+                return @unionInit(T, field_name, {});
             }
-            return @unionInit(T, field.name, try deepCloneImpl(field.type, allocator, @field(value, field.name)));
+            return @unionInit(T, field_name, try deepCloneImpl(field_type, allocator, @field(value, field_name)));
         }
     }
     unreachable;

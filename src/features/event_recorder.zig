@@ -568,9 +568,9 @@ test "generateEventName: handles null fields" {
 
 test "generateEventName: truncates names longer than 244 chars" {
     // Arrange
-    const long_name = "a" ** 300; // 300 chars
+    const long_name: [300]u8 = @splat('a');
     const ref = CoreV1ObjectReference{
-        .name = long_name,
+        .name = long_name[0..],
         .namespace = "default",
     };
     var buf: [253]u8 = undefined;

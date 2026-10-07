@@ -184,7 +184,7 @@ pub const DynamicApi = struct {
         const api_version = if (self.meta.group.len == 0)
             self.meta.version
         else blk: {
-            break :blk try std.fmt.allocPrint(alloc, "{s}/{s}", .{ self.meta.group, self.meta.version });
+            break :blk try alloc.print("{s}/{s}", .{ self.meta.group, self.meta.version });
         };
         defer if (self.meta.group.len > 0) alloc.free(api_version);
 
@@ -202,7 +202,7 @@ pub const DynamicApi = struct {
         }
 
         // Serialize to JSON.
-        const json_body = try std.fmt.allocPrint(alloc, "{f}", .{
+        const json_body = try alloc.print("{f}", .{
             std.json.fmt(patched, .{ .emit_null_optional_fields = false }),
         });
         defer alloc.free(json_body);

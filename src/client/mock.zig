@@ -188,7 +188,7 @@ pub const MockTransport = struct {
 
     /// Enqueue a canned response by serializing a value to JSON.
     pub fn respondWithJson(self: *MockTransport, status: http.Status, value: anytype) error{OutOfMemory}!void {
-        const body = try std.fmt.allocPrint(self.allocator, "{f}", .{std.json.fmt(value, .{
+        const body = try self.allocator.print("{f}", .{std.json.fmt(value, .{
             .emit_null_optional_fields = false,
         })});
         errdefer self.allocator.free(body);
@@ -266,7 +266,7 @@ pub const MockTransport = struct {
             serialized_body = try buf_writer.toOwnedSlice();
         }
 
-        const path_str = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{
+        const path_str = try self.allocator.print("{s}{s}", .{
             opts.uri.path.percent_encoded,
             if (opts.uri.query) |q| q.percent_encoded else "",
         });
@@ -350,7 +350,7 @@ pub const MockTransport = struct {
 
     fn sendStreamImpl(self: *MockTransport, opts: RequestOptions, allocator: std.mem.Allocator) StreamTransportError!StreamResponse {
         // Record the request.
-        const path_str = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{
+        const path_str = try self.allocator.print("{s}{s}", .{
             opts.uri.path.percent_encoded,
             if (opts.uri.query) |q| q.percent_encoded else "",
         });

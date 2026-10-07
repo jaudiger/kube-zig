@@ -64,9 +64,9 @@ pub const InClusterConfig = struct {
     pub fn buildBaseUrl(allocator: Allocator, host: []const u8, port: []const u8) ![]const u8 {
         if (std.mem.indexOfScalar(u8, host, ':') != null) {
             // IPv6: wrap in brackets.
-            return std.fmt.allocPrint(allocator, "https://[{s}]:{s}", .{ host, port });
+            return allocator.print("https://[{s}]:{s}", .{ host, port });
         }
-        return std.fmt.allocPrint(allocator, "https://{s}:{s}", .{ host, port });
+        return allocator.print("https://{s}:{s}", .{ host, port });
     }
 };
 

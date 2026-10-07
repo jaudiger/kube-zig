@@ -82,7 +82,7 @@ test "ResourceVersion: clear resets to unset" {
 test "ResourceVersion: oversize string returns error and leaves value unchanged" {
     // Arrange
     var rv = ResourceVersion{};
-    const big: [ResourceVersion.max_len + 1]u8 = [_]u8{'x'} ** (ResourceVersion.max_len + 1);
+    const big: [ResourceVersion.max_len + 1]u8 = @splat('x');
 
     // Act / Assert
     try testing.expectError(error.ResourceVersionTooLong, rv.assign(&big));
@@ -92,7 +92,7 @@ test "ResourceVersion: oversize string returns error and leaves value unchanged"
 test "ResourceVersion: max_len string is accepted" {
     // Arrange
     var rv = ResourceVersion{};
-    const exactly_max: [ResourceVersion.max_len]u8 = [_]u8{'a'} ** ResourceVersion.max_len;
+    const exactly_max: [ResourceVersion.max_len]u8 = @splat('a');
 
     // Act
     try rv.assign(&exactly_max);

@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     const output_path = args_it.next() orelse
         std.process.fatal("Usage: fetch-spec <k8s-version> <output-path>\n", .{});
 
-    const sidecar_path = try std.fmt.allocPrint(allocator, "{s}.version", .{output_path});
+    const sidecar_path = try allocator.print("{s}.version", .{output_path});
 
     const token: ?[]const u8 = init.environ_map.get("GITHUB_TOKEN");
 
@@ -42,8 +42,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Downloading Kubernetes {s} OpenAPI spec...\n", .{version});
 
     // Construct the raw GitHub URL for the spec file.
-    const url = try std.fmt.allocPrint(
-        allocator,
+    const url = try allocator.print(
         "https://raw.githubusercontent.com/kubernetes/kubernetes/{s}/api/openapi-spec/swagger.json",
         .{version},
     );
@@ -119,7 +118,7 @@ fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, token: ?[]co
     const uri = try std.Uri.parse(url);
 
     const auth_value: []const u8 = if (token) |t|
-        try std.fmt.allocPrint(allocator, "Bearer {s}", .{t})
+        try allocator.print("Bearer {s}", .{t})
     else
         "";
 
@@ -138,7 +137,7 @@ fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, token: ?[]co
     var response = try req.receiveHead(&redirect_buf);
 
     if (response.head.status != .ok) {
-        std.debug.print("HTTP {d} for {s}\n", .{ @intFromEnum(response.head.status), url });
+        std.debug.print("HTTP {d} for {s}\n", .{ @backingInt(response.head.status), url });
         return error.HttpError;
     }
 

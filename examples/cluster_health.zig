@@ -9,9 +9,9 @@ const k8s = kube_zig.types;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
-    const allocator = debug_allocator.allocator();
+    var safe_allocator = std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
+    defer std.debug.assert(safe_allocator.deinit() == 0);
+    const allocator = safe_allocator.allocator();
 
     const config = kube_zig.ProxyConfig.init(init.environ_map);
     var text_logger = kube_zig.log.TextStdoutLogger.init(io, .info);
@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try w.print("Found {d} node(s)\n", .{items.len});
-    try w.print("{s}\n\n", .{"=" ** 72});
+    try w.print("{s}\n\n", .{@as([72]u8, @splat('='))});
 
     var healthy_count: usize = 0;
     var unhealthy_count: usize = 0;
@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     for (items) |node| {
         const name = kube_zig.metadata.getName(k8s.CoreV1Node, node) orelse "(unnamed)";
         try w.print("Node: {s}\n", .{name});
-        try w.print("{s}\n", .{"-" ** 72});
+        try w.print("{s}\n", .{@as([72]u8, @splat('-'))});
 
         if (node.status) |status| {
             // System info
@@ -129,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
             if (status.capacity != null or status.allocatable != null) {
                 try w.print("\n  Resources:\n", .{});
                 try w.print("    {s:<24} {s:>12} {s:>12}\n", .{ "Resource", "Capacity", "Allocatable" });
-                try w.print("    {s:<24} {s:>12} {s:>12}\n", .{ "-" ** 24, "-" ** 12, "-" ** 12 });
+                try w.print("    {s:<24} {s:>12} {s:>12}\n", .{ @as([24]u8, @splat('-')), @as([12]u8, @splat('-')), @as([12]u8, @splat('-')) });
 
                 for (resource_keys) |key| {
                     const cap = if (status.capacity) |c| (c.map.get(key) orelse "-") else "-";
@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Summary
-    try w.print("{s}\n", .{"=" ** 72});
+    try w.print("{s}\n", .{@as([72]u8, @splat('='))});
     try w.print("Summary: {d} healthy, {d} unhealthy, {d} total\n", .{
         healthy_count,
         unhealthy_count,

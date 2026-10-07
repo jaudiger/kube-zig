@@ -254,7 +254,7 @@ pub fn Api(comptime T: type) type {
 
             // Serialize with null optional fields omitted.
             const alloc = self.client.allocator;
-            const json_body = try std.fmt.allocPrint(alloc, "{f}", .{
+            const json_body = try alloc.print("{f}", .{
                 std.json.fmt(patched_body, .{ .emit_null_optional_fields = false }),
             });
             defer alloc.free(json_body);
@@ -577,7 +577,7 @@ test "init: namespaced resource requires []const u8 namespace parameter" {
         const ApiType = Api(MockNamespacedResource);
         const info = @typeInfo(@TypeOf(ApiType.init));
         // params: [0]=self/client, [1]=ctx, [2]=namespace
-        if (info.@"fn".params[2].type.? != []const u8)
+        if (info.@"fn".param_types[2].? != []const u8)
             @compileError("expected non-optional namespace param for namespaced resource");
     }
 }
@@ -588,7 +588,7 @@ test "init: cluster-scoped resource accepts ?[]const u8 namespace parameter" {
         const ApiType = Api(MockClusterResource);
         const info = @typeInfo(@TypeOf(ApiType.init));
         // params: [0]=self/client, [1]=ctx, [2]=namespace
-        if (info.@"fn".params[2].type.? != ?[]const u8)
+        if (info.@"fn".param_types[2].? != ?[]const u8)
             @compileError("expected optional namespace param for cluster-scoped resource");
     }
 }

@@ -420,7 +420,7 @@ pub fn Reflector(comptime T: type) type {
                     if (err.status == .unauthorized or err.status == .forbidden) {
                         self.logger.err("list auth error", &.{
                             LogField.string("resource", meta.resource),
-                            LogField.uint("status_code", @intFromEnum(err.status)),
+                            LogField.uint("status_code", @backingInt(err.status)),
                         });
                     }
                     return self.recordError(err.statusError());
